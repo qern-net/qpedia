@@ -1,0 +1,43 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qpedia/app:${QPEDIA_VERSION:-dev}
+    env_file: .env
+    volumes:
+      - wiki-data:/data/wiki
+      - raw-data:/data/raw
+      - sqlite-data:/data/sqlite
+      - models-cache:/data/models
+    ports:
+      - "8080:8080"
+    depends_on:
+      weaviate:
+        condition: service_healthy
+    restart: unless-stopped
+
+  weaviate:
+    image: semitechnologies/weaviate:1.27.0
+    volumes:
+      - weaviate-data:/var/lib/weaviate
+    environment:
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: ""
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      QUERY_DEFAULTS_LIMIT: "25"
+      CLUSTER_HOSTNAME: "node1"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  wiki-data:
+  raw-data:
+  sqlite-data:
+  models-cache:
+  weaviate-data:

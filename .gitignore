@@ -1,0 +1,35 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Runtime data volumes (mounted in containers)
+/data/wiki
+/data/raw
+/data/sqlite
+/data/weaviate
+
+# Smoke-test artifacts
+/test-fixtures
+
+# Local env overrides (checked-in template is .env.example)
+.env
+.env.local
+
+# Frontend build
+/web/node_modules
+/web/.svelte-kit
+/web/build
+
+# IDE / agent caches
+.idea/
+.vscode/
+.claude/
+*.swp
+.DS_Store
+
+# Vendored binaries fetched by scripts/fetch-pdfium.sh
+/vendor/pdfium
+
+# Secrets
+*.pem
+*.key

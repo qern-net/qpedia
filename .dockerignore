@@ -1,0 +1,10 @@
+target
+data
+web/node_modules
+web/.svelte-kit
+web/build
+.env
+.env.local
+.git
+.idea
+.vscode
