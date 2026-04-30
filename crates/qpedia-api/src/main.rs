@@ -11,13 +11,15 @@ use qpedia_core::{
     source::{Source, SourceStatus},
     SourceId,
 };
+use qpedia_embed::embedder_from_env;
 use qpedia_extract::ExtractorRegistry;
 use qpedia_ingest::{ingest_job, IngestContext, JobRunner};
 use qpedia_llm::provider_from_env;
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
     sqlite::{JobQueue, SourceStore},
-    SqliteStore, WikiRepo,
+    weaviate::weaviate_from_env,
+    SearchHit, SqliteStore, WikiRepo,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -61,7 +63,13 @@ async fn main() -> anyhow::Result<()> {
         info!("no LLM provider configured — ingest will stop at Extracted");
     }
 
-    let ctx = IngestContext::new(db, blob, wiki, extractors, llm);
+    // Local embedder (always available; downloads model on first use).
+    let embedder = Some(embedder_from_env(data_dir.join("models")));
+
+    // Weaviate is optional: degrades to fs-grep if unset/unreachable.
+    let weaviate = weaviate_from_env().await.map(Arc::new);
+
+    let ctx = IngestContext::new(db, blob, wiki, extractors, llm, embedder, weaviate);
 
     // Spawn the background job runner.
     let runner = JobRunner::new(ctx.clone(), "worker-1");
@@ -86,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/sources/:id", get(get_source))
         .route("/api/v1/wiki/list", get(list_wiki_pages))
+        .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
         .with_state(state);
 
@@ -147,6 +156,40 @@ async fn list_wiki_pages(
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(json!({ "prefix": prefix, "pages": pages })))
+}
+
+#[derive(Deserialize)]
+struct WikiSearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+async fn search_wiki(
+    State(s): State<AppState>,
+    Query(q): Query<WikiSearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = q.limit.unwrap_or(10).min(50);
+    let (mode, hits) = run_search(&s, &q.q, limit).await?;
+    Ok(Json(json!({"query": q.q, "mode": mode, "hits": hits})))
+}
+
+async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static str, Vec<SearchHit>), ApiError> {
+    if let (Some(embedder), Some(weaviate)) = (&s.ctx.embedder, &s.ctx.weaviate) {
+        let qv = embedder
+            .embed(&[query])
+            .await
+            .map_err(ApiError::Internal)?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        match weaviate.hybrid_search(query, &qv, limit).await {
+            Ok(h) if !h.is_empty() => return Ok(("hybrid", h)),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "weaviate search failed; falling back"),
+        }
+    }
+    let hits = s.ctx.wiki.search_text(query, limit).await.map_err(ApiError::Internal)?;
+    Ok(("filesystem", hits))
 }
 
 async fn get_wiki_page(

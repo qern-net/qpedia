@@ -1,7 +1,7 @@
 //! Ingest job handler: walks a source through every phase that's currently
 //! implemented in a single job tick. See DESIGN.md §5.1.
 
-use crate::handlers::{classify, distill};
+use crate::handlers::{classify, distill, embed};
 use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
 use qpedia_core::{source::SourceStatus, SourceId};
@@ -42,8 +42,11 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
                     return Ok(());
                 }
             }
-            SourceStatus::Committed | SourceStatus::Done => {
-                info!(id = %source_id, "ingest reached MVP terminus (Committed)");
+            SourceStatus::Committed | SourceStatus::Embedding => {
+                embed::run(ctx, source_id).await?;
+            }
+            SourceStatus::Done => {
+                info!(id = %source_id, "ingest reached terminus (Done)");
                 return Ok(());
             }
             other => {

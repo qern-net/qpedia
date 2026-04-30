@@ -30,6 +30,8 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         wiki: &ctx.wiki,
         blob: &ctx.blob,
         db: &ctx.db,
+        embedder: ctx.embedder.clone(),
+        weaviate: ctx.weaviate.clone(),
     };
 
     let bundle = run_agent(&deps, &src).await?;

@@ -8,11 +8,13 @@ use qpedia_core::{
     job::{Job, JobKind, JobState},
     JobId, SourceId,
 };
+use qpedia_embed::Embedder;
 use qpedia_extract::ExtractorRegistry;
 use qpedia_llm::LlmProvider;
 use qpedia_store::{
     blob::BlobStore,
     sqlite::JobQueue,
+    weaviate::WeaviateStore,
     SqliteStore, WikiRepo,
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,8 @@ pub struct IngestContext {
     pub wiki: WikiRepo,
     pub extractors: Arc<ExtractorRegistry>,
     pub llm: Option<Arc<dyn LlmProvider>>,
+    pub embedder: Option<Arc<dyn Embedder>>,
+    pub weaviate: Option<Arc<WeaviateStore>>,
 }
 
 impl IngestContext {
@@ -36,8 +40,10 @@ impl IngestContext {
         wiki: WikiRepo,
         extractors: Arc<ExtractorRegistry>,
         llm: Option<Arc<dyn LlmProvider>>,
+        embedder: Option<Arc<dyn Embedder>>,
+        weaviate: Option<Arc<WeaviateStore>>,
     ) -> Self {
-        Self { db, blob, wiki, extractors, llm }
+        Self { db, blob, wiki, extractors, llm, embedder, weaviate }
     }
 }
 
@@ -78,11 +84,12 @@ impl JobRunner {
         }
     }
 
-    /// Drive the queue until the process exits. Run inside `tokio::spawn`.
     pub async fn run(self) {
         info!(
             worker = %self.worker_id,
             llm = self.ctx.llm.as_ref().map(|p| p.name()),
+            embedder = self.ctx.embedder.as_ref().map(|e| e.name()),
+            weaviate = self.ctx.weaviate.is_some(),
             wiki = %self.ctx.wiki.root().display(),
             "job runner started"
         );

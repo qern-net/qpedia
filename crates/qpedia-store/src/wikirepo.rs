@@ -149,6 +149,20 @@ impl WikiRepo {
         Ok(out)
     }
 
+    /// Markdown paths touched by the HEAD commit (works for the root commit
+    /// too via `git show --name-only`). Returns paths relative to the repo
+    /// root, with forward slashes.
+    pub async fn changed_in_head(&self) -> Result<Vec<String>> {
+        let out = self.git(&["show", "--pretty=format:", "--name-only", "HEAD"]).await?;
+        Ok(out
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .filter(|l| l.ends_with(".md"))
+            .map(|l| l.replace('\\', "/"))
+            .collect())
+    }
+
     /// Filesystem-based text search over wiki pages. Returns matches with
     /// `(path, title, snippet)`. Title is the first H1, falling back to the
     /// frontmatter `title` or the file path. Snippet is ~160 chars around

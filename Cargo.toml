@@ -48,6 +48,8 @@ hex = "0.4"
 mime_guess = "2"
 pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "sync"] }
 tempfile = "3"
+fastembed = "4"
+uuid = { version = "1", features = ["v5", "serde"] }
 
 # Internal
 qpedia-core = { path = "crates/qpedia-core" }

@@ -20,9 +20,11 @@ use qpedia_core::{
     wiki::{DiffBundle, DiffOp},
     SourceId,
 };
+use qpedia_embed::Embedder;
 use qpedia_llm::{current_model, CompleteReq, LlmProvider, Message, Role};
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
+    weaviate::WeaviateStore,
     wikirepo::SearchHit,
     SqliteStore, WikiRepo,
 };
@@ -146,6 +148,8 @@ pub struct AgentDeps<'a> {
     pub wiki: &'a WikiRepo,
     pub blob: &'a BlobStore,
     pub db: &'a SqliteStore,
+    pub embedder: Option<Arc<dyn Embedder>>,
+    pub weaviate: Option<Arc<WeaviateStore>>,
 }
 
 /// Run the agent on a source, producing a DiffBundle.
@@ -300,7 +304,21 @@ async fn execute_tool(
         "search_wiki" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            let hits: Vec<SearchHit> = deps.wiki.search_text(query, limit).await?;
+            let hits: Vec<SearchHit> = match (&deps.embedder, &deps.weaviate) {
+                (Some(embedder), Some(weaviate)) => {
+                    // Hybrid search via Weaviate. On any error, fall back to fs.
+                    let qv = embedder.embed(&[query]).await?.into_iter().next().unwrap_or_default();
+                    match weaviate.hybrid_search(query, &qv, limit).await {
+                        Ok(h) if !h.is_empty() => h,
+                        Ok(_) => deps.wiki.search_text(query, limit).await?,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "weaviate search failed, falling back to fs");
+                            deps.wiki.search_text(query, limit).await?
+                        }
+                    }
+                }
+                _ => deps.wiki.search_text(query, limit).await?,
+            };
             Ok(serde_json::to_string(&hits)?)
         }
         "list_pages" => {
