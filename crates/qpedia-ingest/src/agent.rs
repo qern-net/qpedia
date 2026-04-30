@@ -1,19 +1,11 @@
 //! The ingest agent: bounded tool-using LLM loop that produces a DiffBundle.
 //! See DESIGN.md §6.
 //!
-//! v1 protocol: structured-text tool calls. Each assistant turn outputs a
-//! single JSON object `{"tool": "<name>", "args": {...}}`. The runtime
-//! executes the tool, appends a `Tool result for <name>: <json>` user turn,
-//! and reprompts. The model signals completion with `tool: "done"`.
-//!
-//! Why text-not-native: the same protocol works across Anthropic / OpenAI /
-//! local OSS models without a per-provider tool-API translation layer. We
-//! pay a small reliability tax (model occasionally adds preamble), which the
-//! parser tolerates by stripping fences and seeking the first `{`. Future
-//! upgrade: switch to provider-native tool-use blocks for the highest-end
-//! Claude/GPT models while keeping this protocol as the OSS fallback.
+//! Uses provider-native tool use (Anthropic `tool_use`/`tool_result` blocks,
+//! OpenAI `tool_calls` arrays). The system prompt no longer carries protocol
+//! instructions — the LLM API itself enforces tool shape and parsing.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use qpedia_core::{
     source::Source,
@@ -21,14 +13,14 @@ use qpedia_core::{
     SourceId,
 };
 use qpedia_embed::Embedder;
-use qpedia_llm::{current_model, CompleteReq, LlmProvider, Message, Role};
+use qpedia_llm::{current_model, CompleteReq, LlmProvider, Message, ToolCall, ToolDef};
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
     weaviate::WeaviateStore,
     wikirepo::SearchHit,
     SqliteStore, WikiRepo,
 };
-use serde::Deserialize;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -40,43 +32,10 @@ pub const MAX_PAGE_BYTES: usize = 50 * 1024;
 pub const MAX_TOOL_RESULT_CHARS: usize = 6000;
 pub const SOURCE_SNIPPET_CHARS: usize = 12_000;
 
-const PROTOCOL_INSTRUCTIONS: &str = r#"
-TOOL PROTOCOL — read carefully.
-
-Each of your turns must output ONE JSON object and nothing else:
-  {"tool": "<name>", "args": { ... }}
-
-No markdown fences, no preamble, no commentary. The runtime will execute the
-tool and reply with a "Tool result for <name>:" message. Then it's your turn
-again. Repeat until you call `done`.
-
-AVAILABLE TOOLS
-
-- search_wiki(query: string, limit?: int=5)
-    Substring search across all wiki pages. Returns
-    [{path, title, snippet}].
-
-- list_pages(prefix: string)
-    List wiki page paths under a prefix (e.g. "concepts/" or "" for all).
-
-- read_page(path: string)
-    Return the full markdown of a wiki page (frontmatter + body).
-
-- read_source(source_id: string)
-    Return the first ~12000 chars of a raw source's extracted text.
-    Use this on the SOURCE_ID you were given to pull more context.
-
-- propose_new(path: string, content: string, rationale: string)
-    Stage a NEW wiki page. `content` is the full markdown including
-    frontmatter (--- block). Path must not already exist.
-
-- propose_patch(path: string, new_content: string, rationale: string)
-    Stage a REPLACEMENT for an existing page. `new_content` is the full
-    markdown (frontmatter + body). Path must already exist.
-
-- done(summary: string)
-    Finalize. The runtime validates and commits all staged changes as a
-    single git commit. Call this exactly once at the end.
+const SYSTEM_INSTRUCTIONS: &str = r#"
+You are integrating ONE new source into an existing wiki. Use the tools to
+read the source, look at relevant existing pages, then propose new or
+patched pages. Call `done(summary)` exactly once at the end.
 
 PAGE FORMAT — required for every wiki page
 
@@ -98,32 +57,19 @@ Link other wiki pages as [[concepts/foo.md]].
 
 INGEST PROTOCOL
 
-You are integrating ONE new source into an existing wiki. Steps you decide
-the order of:
-
 1. read_source(SOURCE_ID) to ground yourself.
 2. search_wiki for topics this source touches; read_page on candidates.
 3. propose_new for a summary at "summaries/<SOURCE_ID>.md".
-4. propose_new or propose_patch for any concept/entity pages this source
-   creates or refines (1-3 max in v1; don't go nuts).
-5. propose_patch on "index.md" — add the new pages under their sections.
+4. propose_new or propose_patch for any concept/entity pages (1–3 max).
+5. propose_patch on "index.md" to list new pages under their sections.
 6. propose_patch on "log.md" — APPEND one timestamped line.
-7. done(summary) with a one-sentence summary.
+7. done(summary) with one sentence.
 
 BUDGETS
 
 - Max 18 turns, 20 staged operations, 500KB bundle, 50KB per page.
-- Stop early if the source is redundant (call done with a note).
-
-Begin.
+- Stop early if the source is redundant — call done with a note.
 "#;
-
-#[derive(Debug, Deserialize)]
-struct AgentToolCall {
-    tool: String,
-    #[serde(default)]
-    args: serde_json::Value,
-}
 
 pub struct StagedOps {
     pub ops: Vec<DiffOp>,
@@ -161,14 +107,11 @@ pub async fn run_agent(deps: &AgentDeps<'_>, src: &Source) -> Result<DiffBundle>
         .await?
         .unwrap_or_else(|| "(QPEDIA.md missing)".into());
 
-    let system = format!("{qpedia_md}\n\n---\n{PROTOCOL_INSTRUCTIONS}");
+    let system = format!("{qpedia_md}\n\n---\n{SYSTEM_INSTRUCTIONS}");
     let user_msg = build_initial_user_msg(src);
 
-    let mut messages: Vec<Message> = vec![Message {
-        role: Role::User,
-        content: user_msg,
-        tool_calls: Vec::new(),
-    }];
+    let tools = tool_defs();
+    let mut messages: Vec<Message> = vec![Message::user(user_msg)];
     let mut staged = StagedOps::new();
 
     for turn in 0..MAX_TURNS {
@@ -176,57 +119,73 @@ pub async fn run_agent(deps: &AgentDeps<'_>, src: &Source) -> Result<DiffBundle>
             model: current_model(),
             system: Some(system.clone()),
             messages: messages.clone(),
-            tools: Vec::new(),
+            tools: tools.clone(),
             max_tokens: 4096,
             temperature: 0.1,
         };
 
-        let resp = deps.llm.complete(req).await
+        let resp = deps
+            .llm
+            .complete(req)
+            .await
             .map_err(|e| anyhow!("agent llm call: {e}"))?;
-        let assistant_text = resp.content.trim().to_string();
-        debug!(turn, %assistant_text, "agent turn");
 
-        // Record assistant turn so the next call has the full history.
-        messages.push(Message {
-            role: Role::Assistant,
-            content: assistant_text.clone(),
-            tool_calls: Vec::new(),
-        });
+        debug!(
+            turn,
+            text_len = resp.content.len(),
+            tool_calls = resp.tool_calls.len(),
+            "agent turn"
+        );
 
-        let call = parse_tool_call(&assistant_text)
-            .with_context(|| format!("turn {turn} not a tool call:\n{assistant_text}"))?;
+        // Record assistant turn with both text and tool_calls so the next
+        // request has the full history (provider-native turn shape).
+        messages.push(Message::assistant(resp.content.clone(), resp.tool_calls.clone()));
 
-        if call.tool == "done" {
-            let summary = call
-                .args
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        if resp.tool_calls.is_empty() {
+            return Err(anyhow!(
+                "agent stopped without calling a tool (turn {turn}); \
+                 last text: {}",
+                resp.content
+            ));
+        }
+
+        // Execute each tool call, appending a Tool-role message per result.
+        let mut done_summary: Option<String> = None;
+        for call in &resp.tool_calls {
+            if call.name == "done" {
+                done_summary = Some(
+                    call.arguments
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                );
+                messages.push(Message::tool(&call.id, "ok", false));
+                continue;
+            }
+
+            let exec = execute_tool(call, deps, src, &mut staged).await;
+            let (text, is_error) = match exec {
+                Ok(r) => (truncate(&r, MAX_TOOL_RESULT_CHARS), false),
+                Err(e) => (format!("error: {e}"), true),
+            };
+            messages.push(Message::tool(&call.id, text, is_error));
+
+            if staged.ops.len() > MAX_OPS {
+                return Err(anyhow!("agent exceeded op budget ({} > {})", staged.ops.len(), MAX_OPS));
+            }
+            if staged.bytes > MAX_BUNDLE_BYTES {
+                return Err(anyhow!("agent exceeded bundle byte cap"));
+            }
+        }
+
+        if let Some(summary) = done_summary {
             info!(turn, ops = staged.ops.len(), %summary, "agent done");
             return Ok(DiffBundle {
                 ingest_id: src.id.as_str().to_string(),
                 summary,
                 operations: staged.ops,
             });
-        }
-
-        let result = execute_tool(&call, deps, src, &mut staged)
-            .await
-            .map(|r| truncate(&r, MAX_TOOL_RESULT_CHARS))
-            .unwrap_or_else(|e| format!("error: {e}"));
-
-        messages.push(Message {
-            role: Role::User,
-            content: format!("Tool result for {}:\n{}", call.tool, result),
-            tool_calls: Vec::new(),
-        });
-
-        if staged.ops.len() > MAX_OPS {
-            return Err(anyhow!("agent exceeded op budget ({} > {})", staged.ops.len(), MAX_OPS));
-        }
-        if staged.bytes > MAX_BUNDLE_BYTES {
-            return Err(anyhow!("agent exceeded bundle byte cap"));
         }
     }
 
@@ -243,12 +202,7 @@ fn build_initial_user_msg(src: &Source) -> String {
             let hints = c
                 .get("hints")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
                 .unwrap_or_default();
             (dt.to_string(), lang.to_string(), hints)
         })
@@ -270,22 +224,6 @@ fn build_initial_user_msg(src: &Source) -> String {
     )
 }
 
-fn parse_tool_call(text: &str) -> Result<AgentToolCall> {
-    // Strip code fences if any and find the first {...} block.
-    let trimmed = text.trim();
-    let no_fence = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed)
-        .trim_end_matches("```")
-        .trim();
-    let start = no_fence.find('{').ok_or_else(|| anyhow!("no JSON object"))?;
-    let candidate = &no_fence[start..];
-    let parsed: AgentToolCall =
-        serde_json::from_str(candidate).map_err(|e| anyhow!("invalid JSON: {e}"))?;
-    Ok(parsed)
-}
-
 fn truncate(s: &str, limit: usize) -> String {
     if s.len() <= limit { return s.to_string(); }
     let mut out = s.chars().take(limit).collect::<String>();
@@ -293,21 +231,115 @@ fn truncate(s: &str, limit: usize) -> String {
     out
 }
 
+// ---------- tool definitions ----------
+
+fn tool_defs() -> Vec<ToolDef> {
+    vec![
+        ToolDef {
+            name: "search_wiki".into(),
+            description:
+                "Hybrid (BM25 + vector) search over wiki pages. Returns array of {path, title, snippet}.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "search query"},
+                    "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 20}
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
+            name: "list_pages".into(),
+            description: "List wiki page paths under a prefix (e.g. 'concepts/' or '' for all).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prefix": {"type": "string", "default": ""}
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "read_page".into(),
+            description: "Return the full markdown of a wiki page (frontmatter + body).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "read_source".into(),
+            description:
+                "Return the first ~12000 chars of a raw source's extracted text. Use on the SOURCE_ID you were given.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"source_id": {"type": "string"}},
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "propose_new".into(),
+            description:
+                "Stage a NEW wiki page. content is full markdown including frontmatter. Path must not already exist.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "e.g. summaries/<source_id>.md"},
+                    "content": {"type": "string", "description": "full markdown including --- frontmatter"},
+                    "rationale": {"type": "string"}
+                },
+                "required": ["path", "content", "rationale"]
+            }),
+        },
+        ToolDef {
+            name: "propose_patch".into(),
+            description:
+                "Stage a REPLACEMENT for an existing page. new_content is the full markdown.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "new_content": {"type": "string"},
+                    "rationale": {"type": "string"}
+                },
+                "required": ["path", "new_content", "rationale"]
+            }),
+        },
+        ToolDef {
+            name: "done".into(),
+            description:
+                "Finalize. Runtime validates and commits all staged ops as one git commit. Call exactly once.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"]
+            }),
+        },
+    ]
+}
+
+// ---------- tool dispatch ----------
+
 async fn execute_tool(
-    call: &AgentToolCall,
+    call: &ToolCall,
     deps: &AgentDeps<'_>,
     src: &Source,
     staged: &mut StagedOps,
 ) -> Result<String> {
-    let args = &call.args;
-    match call.tool.as_str() {
+    let args = &call.arguments;
+    match call.name.as_str() {
         "search_wiki" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             let hits: Vec<SearchHit> = match (&deps.embedder, &deps.weaviate) {
                 (Some(embedder), Some(weaviate)) => {
-                    // Hybrid search via Weaviate. On any error, fall back to fs.
-                    let qv = embedder.embed(&[query]).await?.into_iter().next().unwrap_or_default();
+                    let qv = embedder
+                        .embed(&[query])
+                        .await?
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default();
                     match weaviate.hybrid_search(query, &qv, limit).await {
                         Ok(h) if !h.is_empty() => h,
                         Ok(_) => deps.wiki.search_text(query, limit).await?,
@@ -327,11 +359,7 @@ async fn execute_tool(
             Ok(serde_json::to_string(&pages)?)
         }
         "read_page" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("missing path"))?;
-            // Allow reading from staged-but-uncommitted ops too.
+            let path = require_str(args, "path")?;
             for op in &staged.ops {
                 match op {
                     DiffOp::Create { path: p, content, .. }
@@ -349,10 +377,7 @@ async fn execute_tool(
             }
         }
         "read_source" => {
-            let sid = args
-                .get("source_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(src.id.as_str());
+            let sid = args.get("source_id").and_then(|v| v.as_str()).unwrap_or(src.id.as_str());
             let bytes = deps
                 .blob
                 .get(&SourceId::from(sid.to_string()), BlobKind::Extracted, "txt")
@@ -375,11 +400,7 @@ async fn execute_tool(
             let content = ensure_frontmatter_id_and_timestamps(content, path);
             staged.bytes += content.len();
             staged.created_paths.insert(path.to_string());
-            staged.ops.push(DiffOp::Create {
-                path: path.to_string(),
-                content,
-                rationale,
-            });
+            staged.ops.push(DiffOp::Create { path: path.to_string(), content, rationale });
             Ok("ok".into())
         }
         "propose_patch" => {
@@ -388,7 +409,6 @@ async fn execute_tool(
             let rationale = args.get("rationale").and_then(|v| v.as_str()).unwrap_or("").to_string();
             check_path(path)?;
             check_page_size(path, new_content)?;
-            // Allow patching brand-new pages staged this turn (rare but legal).
             if !staged.created_paths.contains(path)
                 && deps.wiki.read_page(path).await?.is_none()
             {
@@ -407,7 +427,7 @@ async fn execute_tool(
     }
 }
 
-fn require_str<'a>(v: &'a serde_json::Value, key: &str) -> Result<&'a str> {
+fn require_str<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v.get(key)
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow!("missing {key}"))
@@ -442,33 +462,23 @@ fn ensure_frontmatter_id_and_timestamps(content: &str, _path: &str) -> String {
     let now = Utc::now().to_rfc3339();
     let id = ulid::Ulid::new().to_string();
 
-    // Quick check: locate the first frontmatter block.
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
-        // Wrap entire content with a minimal block.
         return format!(
             "---\nid: {id}\ncreated_at: {now}\nupdated_at: {now}\n---\n{content}"
         );
     }
-    // Find the closing ---.
     let after_first = trimmed.strip_prefix("---").unwrap();
     if let Some(end_rel) = after_first.find("\n---") {
         let mut fm = after_first[..end_rel].to_string();
         let body = &after_first[end_rel + "\n---".len()..];
         let mut additions = String::new();
-        if !fm.contains("id:") {
-            additions.push_str(&format!("\nid: {id}"));
-        }
-        if !fm.contains("created_at:") {
-            additions.push_str(&format!("\ncreated_at: {now}"));
-        }
-        if !fm.contains("updated_at:") {
-            additions.push_str(&format!("\nupdated_at: {now}"));
-        }
+        if !fm.contains("id:") { additions.push_str(&format!("\nid: {id}")); }
+        if !fm.contains("created_at:") { additions.push_str(&format!("\ncreated_at: {now}")); }
+        if !fm.contains("updated_at:") { additions.push_str(&format!("\nupdated_at: {now}")); }
         fm.push_str(&additions);
         format!("---{fm}\n---{body}")
     } else {
-        // Malformed frontmatter; leave alone, validator will reject.
         content.to_string()
     }
 }

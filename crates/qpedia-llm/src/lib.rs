@@ -161,7 +161,7 @@ impl CompleteReq {
     }
     pub fn system(mut self, s: impl Into<String>) -> Self { self.system = Some(s.into()); self }
     pub fn user(mut self, content: impl Into<String>) -> Self {
-        self.messages.push(Message { role: Role::User, content: content.into(), tool_calls: Vec::new() });
+        self.messages.push(Message::user(content));
         self
     }
     pub fn max_tokens(mut self, n: u32) -> Self { self.max_tokens = n; self }
@@ -174,6 +174,30 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
+    /// Set on Tool-role messages to identify which `tool_use` they answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Set on Tool-role messages to flag failed tool execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+}
+
+impl Message {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None, is_error: None }
+    }
+    pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self { role: Role::Assistant, content: content.into(), tool_calls, tool_call_id: None, is_error: None }
+    }
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+            is_error: Some(is_error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

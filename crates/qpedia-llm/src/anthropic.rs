@@ -1,10 +1,14 @@
 //! Direct Anthropic Messages API impl. See https://docs.anthropic.com/api/messages
 //!
 //! Translates between our generic `CompleteReq`/`CompleteResp` and Anthropic's
-//! native shape. Streaming is not yet implemented (returns Provider error);
-//! the ingest agent and chat retriever will need it later.
+//! native shape, including provider-native tool use:
+//!   - Assistant turns with tool calls → `tool_use` content blocks
+//!   - Tool-role messages → user-role messages with `tool_result` content
+//!   - Tools sent as top-level `tools: [{name, description, input_schema}]`
 
-use crate::{CompleteReq, CompleteResp, LlmError, LlmProvider, Message, Role, StopReason, ToolCall, Token, Usage};
+use crate::{
+    CompleteReq, CompleteResp, LlmError, LlmProvider, Message, Role, StopReason, Token, ToolCall, Usage,
+};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
@@ -26,7 +30,7 @@ impl AnthropicDirect {
 
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(180))
             .build()
             .expect("reqwest client");
         Self {
@@ -45,7 +49,12 @@ impl LlmProvider for AnthropicDirect {
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
         let body = AnthropicRequest::from(&req);
 
-        debug!(model = %req.model, msgs = req.messages.len(), "anthropic complete");
+        debug!(
+            model = %req.model,
+            msgs = req.messages.len(),
+            tools = req.tools.len(),
+            "anthropic complete"
+        );
 
         let resp = self
             .client
@@ -62,9 +71,7 @@ impl LlmProvider for AnthropicDirect {
         let text = resp.text().await.map_err(|e| LlmError::Http(e.to_string()))?;
 
         if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(LlmError::RateLimited);
-            }
+            if status.as_u16() == 429 { return Err(LlmError::RateLimited); }
             return Err(LlmError::Provider(format!("{status}: {text}")));
         }
 
@@ -100,7 +107,7 @@ impl From<&CompleteReq> for AnthropicRequest {
             model: r.model.clone(),
             max_tokens: r.max_tokens,
             system: r.system.clone(),
-            messages: r.messages.iter().map(AnthropicMessage::from).collect(),
+            messages: r.messages.iter().filter_map(AnthropicMessage::from_msg).collect(),
             tools: r.tools.iter().map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
@@ -113,21 +120,46 @@ impl From<&CompleteReq> for AnthropicRequest {
 
 #[derive(Debug, Serialize)]
 struct AnthropicMessage {
-    role: String,
+    role: &'static str,
     content: Vec<AnthropicContent>,
 }
 
-impl From<&Message> for AnthropicMessage {
-    fn from(m: &Message) -> Self {
-        let role = match m.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "user",     // Anthropic encodes tool results as user turn
-            Role::System => "user",   // System lives in `system` field, not messages
-        }.to_string();
-        AnthropicMessage {
-            role,
-            content: vec![AnthropicContent::Text { text: m.content.clone() }],
+impl AnthropicMessage {
+    /// Returns None for System (handled at top level) or empty messages.
+    fn from_msg(m: &Message) -> Option<Self> {
+        match m.role {
+            Role::System => None, // System goes in the top-level `system` field.
+            Role::Tool => {
+                // Anthropic encodes tool results as content blocks inside a
+                // user-role turn.
+                let block = AnthropicContent::ToolResult {
+                    tool_use_id: m.tool_call_id.clone().unwrap_or_default(),
+                    content: m.content.clone(),
+                    is_error: m.is_error.unwrap_or(false),
+                };
+                Some(AnthropicMessage { role: "user", content: vec![block] })
+            }
+            Role::User => Some(AnthropicMessage {
+                role: "user",
+                content: vec![AnthropicContent::Text { text: m.content.clone() }],
+            }),
+            Role::Assistant => {
+                let mut content = Vec::new();
+                if !m.content.is_empty() {
+                    content.push(AnthropicContent::Text { text: m.content.clone() });
+                }
+                for tc in &m.tool_calls {
+                    content.push(AnthropicContent::ToolUse {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        input: tc.arguments.clone(),
+                    });
+                }
+                if content.is_empty() {
+                    content.push(AnthropicContent::Text { text: String::new() });
+                }
+                Some(AnthropicMessage { role: "assistant", content })
+            }
         }
     }
 }
@@ -135,8 +167,23 @@ impl From<&Message> for AnthropicMessage {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContent {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
 }
+
+fn is_false(b: &bool) -> bool { !*b }
 
 #[derive(Debug, Serialize)]
 struct AnthropicTool {
