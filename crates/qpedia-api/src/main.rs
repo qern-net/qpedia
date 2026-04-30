@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -97,6 +98,25 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
         .with_state(state);
+
+    // Optional static SPA. In dev the user runs `npm run dev` (vite) and hits
+    // :5173 which proxies to us; in prod or after `npm run build` we serve
+    // from QPEDIA_WEB_DIR (default ./web/build, /app/web in container).
+    let web_dir: PathBuf = std::env::var("QPEDIA_WEB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let in_container = PathBuf::from("/app/web");
+            if in_container.exists() { in_container } else { PathBuf::from("./web/build") }
+        });
+    let app = if web_dir.join("index.html").exists() {
+        info!(web_dir = %web_dir.display(), "serving static SPA");
+        app.fallback_service(
+            ServeDir::new(&web_dir).fallback(ServeFile::new(web_dir.join("index.html"))),
+        )
+    } else {
+        info!(web_dir = %web_dir.display(), "no SPA build present — API-only (use `npm run dev` for the frontend)");
+        app
+    };
 
     info!(%bind, data_dir = %data_dir.display(), "qpedia-api starting");
     let listener = tokio::net::TcpListener::bind(bind).await?;
