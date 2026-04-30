@@ -83,3 +83,65 @@ export async function searchWiki(q: string, limit = 10): Promise<SearchResp> {
 
 /** Terminal states that don't transition further. */
 export const TERMINAL: ReadonlySet<SourceStatus> = new Set(['done', 'failed', 'dead'] as const);
+
+// ---------- chat ----------
+
+export type ChatTurn = { role: 'user' | 'assistant'; content: string };
+export type Citation = { path: string; title: string };
+
+export type ChatEvent =
+  | { type: 'meta'; retrieved: Citation[]; mode: 'hybrid' | 'filesystem' }
+  | { type: 'token'; text: string }
+  | { type: 'done' }
+  | { type: 'error'; message: string };
+
+export type ChatRequestBody = {
+  message: string;
+  history?: ChatTurn[];
+  max_pages?: number;
+};
+
+/** POSTs to /api/v1/chat and yields parsed SSE events. */
+export async function* streamChat(req: ChatRequestBody): AsyncGenerator<ChatEvent> {
+  const r = await fetch('/api/v1/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(req)
+  });
+  if (!r.ok || !r.body) {
+    let detail = '';
+    try { detail = (await r.text()).slice(0, 400); } catch {}
+    throw new Error(`chat ${r.status} ${detail}`);
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  // SSE events are separated by a blank line; lines within an event start
+  // with "event:" or "data:". We accept LF or CRLF terminators.
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    while (true) {
+      const lf = buffer.indexOf('\n\n');
+      const cr = buffer.indexOf('\r\n\r\n');
+      let idx = -1;
+      let term = 0;
+      if (lf >= 0 && (cr < 0 || lf < cr)) { idx = lf; term = 2; }
+      else if (cr >= 0)                   { idx = cr; term = 4; }
+      if (idx < 0) break;
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + term);
+      let evName = '';
+      let dataStr = '';
+      for (const raw of block.split(/\r?\n/)) {
+        if (raw.startsWith('event:'))      evName = raw.slice(6).trim();
+        else if (raw.startsWith('data:'))  dataStr += raw.slice(5).replace(/^\s/, '');
+      }
+      if (evName === 'done') { yield { type: 'done' }; continue; }
+      if (!dataStr) continue;
+      try { yield JSON.parse(dataStr) as ChatEvent; }
+      catch { /* ignore malformed event */ }
+    }
+  }
+}

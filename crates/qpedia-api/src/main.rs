@@ -1,10 +1,16 @@
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{get, post},
     Json, Router,
 };
+use futures::stream::StreamExt;
+use qpedia_retriever::{ChatEvent, ChatRequest, Retriever};
+use std::convert::Infallible;
 use chrono::Utc;
 use qpedia_core::{
     acl::Acl,
@@ -97,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/wiki/list", get(list_wiki_pages))
         .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
+        .route("/api/v1/chat", post(chat))
         .with_state(state);
 
     // Optional static SPA. In dev the user runs `npm run dev` (vite) and hits
@@ -210,6 +217,43 @@ async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static
     }
     let hits = s.ctx.wiki.search_text(query, limit).await.map_err(ApiError::Internal)?;
     Ok(("filesystem", hits))
+}
+
+async fn chat(
+    State(s): State<AppState>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let llm = s.ctx.llm.clone().ok_or_else(|| {
+        ApiError::Bad("chat requires an LLM provider — set ANTHROPIC_API_KEY or OPENAI_API_KEY".into())
+    })?;
+
+    let retriever = Retriever {
+        embedder: s.ctx.embedder.clone(),
+        weaviate: s.ctx.weaviate.clone(),
+        wiki: s.ctx.wiki.clone(),
+        llm,
+    };
+
+    let event_stream = retriever.chat(req).map(|ev| {
+        let event = match ev {
+            ChatEvent::Meta { .. } => Event::default()
+                .event("meta")
+                .json_data(&ev)
+                .unwrap_or_else(|_| Event::default().event("meta")),
+            ChatEvent::Token { .. } => Event::default()
+                .event("token")
+                .json_data(&ev)
+                .unwrap_or_else(|_| Event::default().event("token")),
+            ChatEvent::Done => Event::default().event("done").data(""),
+            ChatEvent::Error { .. } => Event::default()
+                .event("error")
+                .json_data(&ev)
+                .unwrap_or_else(|_| Event::default().event("error")),
+        };
+        Ok::<_, Infallible>(event)
+    });
+
+    Ok(Sse::new(event_stream).keep_alive(KeepAlive::default()))
 }
 
 async fn get_wiki_page(

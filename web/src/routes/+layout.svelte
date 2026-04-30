@@ -12,6 +12,7 @@
       <a href="/"        class:active={$page.url.pathname === '/'}>Sources</a>
       <a href="/wiki"    class:active={$page.url.pathname.startsWith('/wiki')}>Wiki</a>
       <a href="/search"  class:active={$page.url.pathname.startsWith('/search')}>Search</a>
+      <a href="/chat"    class:active={$page.url.pathname.startsWith('/chat')}>Chat</a>
     </nav>
     <span class="spacer"></span>
     <span class="muted mono">karpathy llmwiki</span>

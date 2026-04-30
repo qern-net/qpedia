@@ -2,11 +2,12 @@
 //! server, and any other endpoint that speaks `/v1/chat/completions`.
 //! Used for on-prem / air-gapped deployments.
 
-use crate::openrouter::{OpenAIRequest, OpenAIResponse};
+use crate::openrouter::{openai_sse_to_tokens, OpenAIRequest, OpenAIResponse};
 use crate::{CompleteReq, CompleteResp, LlmError, LlmProvider, Token};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use std::time::Duration;
+use tracing::debug;
 
 pub struct OpenAICompatible {
     base_url: String,
@@ -57,7 +58,29 @@ impl LlmProvider for OpenAICompatible {
         Ok(parsed.into())
     }
 
-    async fn stream(&self, _req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError> {
-        Err(LlmError::Provider("streaming not yet implemented".into()))
+    async fn stream(&self, req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError> {
+        let mut body = serde_json::to_value(OpenAIRequest::from_complete(&req, &self.default_model))
+            .map_err(|e| LlmError::Provider(format!("encode req: {e}")))?;
+        body.as_object_mut().unwrap().insert("stream".into(), serde_json::Value::Bool(true));
+
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        debug!(model = %req.model, "openai-compatible stream");
+
+        let mut builder = self.client.post(&url).header("accept", "text/event-stream").json(&body);
+        if let Some(key) = &self.api_key {
+            builder = builder.bearer_auth(key);
+        }
+
+        let resp = builder.send().await.map_err(|e| LlmError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 429 { return Err(LlmError::RateLimited); }
+            return Err(LlmError::Provider(format!("{status}: {text}")));
+        }
+
+        let bytes_stream = resp.bytes_stream();
+        let token_stream = openai_sse_to_tokens(bytes_stream);
+        Ok(Box::pin(token_stream))
     }
 }

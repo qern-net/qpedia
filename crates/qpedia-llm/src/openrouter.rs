@@ -3,7 +3,7 @@
 
 use crate::{CompleteReq, CompleteResp, LlmError, LlmProvider, StopReason, Token, ToolCall, Usage};
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -58,9 +58,79 @@ impl LlmProvider for OpenRouter {
         Ok(parsed.into())
     }
 
-    async fn stream(&self, _req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError> {
-        Err(LlmError::Provider("streaming not yet implemented".into()))
+    async fn stream(&self, req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError> {
+        let mut body = serde_json::to_value(OpenAIRequest::from_complete(&req, &self.default_model))
+            .map_err(|e| LlmError::Provider(format!("encode req: {e}")))?;
+        body.as_object_mut().unwrap().insert("stream".into(), serde_json::Value::Bool(true));
+
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let resp = self.client.post(&url)
+            .bearer_auth(&self.api_key)
+            .header("HTTP-Referer", "https://qpedia.local")
+            .header("X-Title", "Qpedia")
+            .header("accept", "text/event-stream")
+            .json(&body)
+            .send().await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 429 { return Err(LlmError::RateLimited); }
+            return Err(LlmError::Provider(format!("{status}: {text}")));
+        }
+
+        let bytes_stream = resp.bytes_stream();
+        let token_stream = openai_sse_to_tokens(bytes_stream);
+        Ok(Box::pin(token_stream))
     }
+}
+
+/// Translate an OpenAI-shaped SSE byte stream into Token deltas. Stops on
+/// `data: [DONE]`. Used by both OpenRouter and OpenAICompatible.
+pub(crate) fn openai_sse_to_tokens(
+    inner: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<Token, LlmError>> + Send + 'static {
+    async_stream::stream! {
+        let mut inner = Box::pin(inner);
+        let mut buffer: Vec<u8> = Vec::with_capacity(8192);
+        'outer: while let Some(chunk) = inner.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => { yield Err(LlmError::Http(e.to_string())); return; }
+            };
+            buffer.extend_from_slice(&bytes);
+
+            loop {
+                let Some((idx, term)) = find_event_terminator(&buffer) else { break };
+                let event_bytes: Vec<u8> = buffer.drain(..idx + term).collect();
+                let Ok(event_str) = std::str::from_utf8(&event_bytes) else { continue };
+                for line in event_str.lines() {
+                    let Some(data) = line.strip_prefix("data:") else { continue };
+                    let data = data.trim_start();
+                    if data.is_empty() { continue; }
+                    if data == "[DONE]" { break 'outer; }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+                    if let Some(text) = v
+                        .pointer("/choices/0/delta/content")
+                        .and_then(|t| t.as_str())
+                    {
+                        if !text.is_empty() {
+                            yield Ok(Token { text: text.to_string() });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn find_event_terminator(buf: &[u8]) -> Option<(usize, usize)> {
+    for i in 0..buf.len().saturating_sub(1) {
+        if buf[i] == b'\n' && buf[i + 1] == b'\n' { return Some((i, 2)); }
+        if i + 3 < buf.len() && &buf[i..i + 4] == b"\r\n\r\n" { return Some((i, 4)); }
+    }
+    None
 }
 
 // Shared OpenAI-shape wire types — also used by OpenAICompatible.
