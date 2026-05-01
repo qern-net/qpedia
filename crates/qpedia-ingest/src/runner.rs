@@ -69,6 +69,23 @@ pub fn ingest_job(source_id: &SourceId) -> Result<Job> {
     })
 }
 
+/// Build a Lint job (no payload — operates on the whole wiki).
+pub fn lint_job() -> Result<Job> {
+    let now = Utc::now();
+    Ok(Job {
+        id: JobId::new(),
+        kind: JobKind::Lint,
+        payload: serde_json::Value::Null,
+        state: JobState::Queued,
+        attempt: 0,
+        max_attempts: 3,
+        next_run_at: now,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
 pub struct JobRunner {
     ctx: IngestContext,
     worker_id: String,
@@ -123,10 +140,7 @@ impl JobRunner {
                 warn!(job = %job.id, "Remove handler not yet implemented");
                 Ok(())
             }
-            JobKind::Lint => {
-                warn!(job = %job.id, "Lint handler not yet implemented");
-                Ok(())
-            }
+            JobKind::Lint => handlers::lint::run(&self.ctx).await,
             JobKind::Reembed => {
                 warn!(job = %job.id, "Reembed handler not yet implemented");
                 Ok(())

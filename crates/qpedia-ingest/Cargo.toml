@@ -12,6 +12,7 @@ qpedia-store.workspace = true
 qpedia-extract.workspace = true
 qpedia-llm.workspace = true
 qpedia-embed.workspace = true
+qpedia-lint.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true

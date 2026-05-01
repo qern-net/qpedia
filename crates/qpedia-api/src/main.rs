@@ -19,7 +19,7 @@ use qpedia_core::{
 };
 use qpedia_embed::embedder_from_env;
 use qpedia_extract::ExtractorRegistry;
-use qpedia_ingest::{ingest_job, IngestContext, JobRunner};
+use qpedia_ingest::{ingest_job, lint_job, IngestContext, JobRunner};
 use qpedia_llm::provider_from_env;
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
@@ -104,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
         .route("/api/v1/chat", post(chat))
+        .route("/api/v1/admin/lint", post(enqueue_lint).get(last_lint_report))
         .with_state(state);
 
     // Optional static SPA. In dev the user runs `npm run dev` (vite) and hits
@@ -217,6 +218,24 @@ async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static
     }
     let hits = s.ctx.wiki.search_text(query, limit).await.map_err(ApiError::Internal)?;
     Ok(("filesystem", hits))
+}
+
+async fn enqueue_lint(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let job = lint_job().map_err(ApiError::Internal)?;
+    let job_id = job.id.to_string();
+    s.ctx.db.enqueue(&job).await?;
+    Ok(Json(json!({"job_id": job_id, "kind": "lint", "state": "queued"})))
+}
+
+async fn last_lint_report(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+    match s.ctx.wiki.read_page("_meta/lint.json").await {
+        Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
+            Ok(v) => Ok(Json(v)),
+            Err(_) => Ok(Json(json!({"raw": text}))),
+        },
+        Ok(None) => Err(ApiError::NotFound),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
 }
 
 async fn chat(
