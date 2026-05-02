@@ -14,33 +14,58 @@ use tracing::{info, warn};
 
 const MAX_EMBED_CHARS: usize = 8000;
 
+/// Per-source ingest phase: update status, embed pages from HEAD, audit.
 pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
-    let (Some(embedder), Some(weaviate)) = (ctx.embedder.as_ref(), ctx.weaviate.as_ref()) else {
+    if ctx.embedder.is_none() || ctx.weaviate.is_none() {
         info!(id = %source_id, "no embedder/weaviate — marking Done");
-        ctx.db.update_status(source_id, SourceStatus::Done).await?;
-        return Ok(());
-    };
-
-    ctx.db.update_status(source_id, SourceStatus::Embedding).await?;
-
-    let touched = ctx.wiki.changed_in_head().await?;
-    if touched.is_empty() {
-        warn!(id = %source_id, "embed: no markdown pages touched in HEAD");
         ctx.db.update_status(source_id, SourceStatus::Done).await?;
         return Ok(());
     }
 
-    // Read pages, prepare embed inputs.
+    ctx.db.update_status(source_id, SourceStatus::Embedding).await?;
+
+    let touched = embed_changed_pages(ctx).await?;
+    if touched.is_empty() {
+        warn!(id = %source_id, "embed: no markdown pages touched in HEAD");
+    }
+
+    ctx.db.update_status(source_id, SourceStatus::Done).await?;
+    ctx.db
+        .audit(
+            "qpedia-bot",
+            "wiki.embedded",
+            Some(source_id.as_str()),
+            Some(&serde_json::json!({"pages": touched})),
+        )
+        .await?;
+
+    info!(id = %source_id, pages = touched.len(), "embed phase complete");
+    Ok(())
+}
+
+/// Re-embed exactly the pages touched by HEAD and upsert into Weaviate.
+/// Used by both the per-source embed phase and the remove pipeline (which
+/// re-embeds patched pages after stripping a removed source from frontmatter).
+///
+/// Returns the list of paths embedded. No-ops cleanly when embedder or
+/// Weaviate is missing.
+pub async fn embed_changed_pages(ctx: &IngestContext) -> Result<Vec<String>> {
+    let (Some(embedder), Some(weaviate)) = (ctx.embedder.as_ref(), ctx.weaviate.as_ref()) else {
+        return Ok(Vec::new());
+    };
+
+    let touched = ctx.wiki.changed_in_head().await?;
+    if touched.is_empty() {
+        return Ok(touched);
+    }
+
     let mut records: Vec<(String, String, String, Frontmatter)> = Vec::new();
     let mut embed_inputs: Vec<String> = Vec::new();
 
     for path in &touched {
         let Some(content) = ctx.wiki.read_page(path).await? else { continue };
         let fm = parse_frontmatter(&content);
-        let title = fm
-            .title
-            .clone()
-            .unwrap_or_else(|| path.clone());
+        let title = fm.title.clone().unwrap_or_else(|| path.clone());
         let body = strip_frontmatter(&content);
         let embed_text: String = format!("{title}\n\n{body}")
             .chars()
@@ -51,15 +76,11 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
     }
 
     if records.is_empty() {
-        ctx.db.update_status(source_id, SourceStatus::Done).await?;
-        return Ok(());
+        return Ok(touched);
     }
 
     let inputs_ref: Vec<&str> = embed_inputs.iter().map(|s| s.as_str()).collect();
-    let vectors = embedder
-        .embed(&inputs_ref)
-        .await
-        .map_err(|e| anyhow!("embed: {e}"))?;
+    let vectors = embedder.embed(&inputs_ref).await.map_err(|e| anyhow!("embed: {e}"))?;
     if vectors.len() != records.len() {
         return Err(anyhow!(
             "embedder returned {} vectors for {} inputs",
@@ -80,24 +101,9 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
             source_ids: fm.source_ids,
             updated_at: now.clone(),
         };
-        weaviate
-            .upsert_page(&record, vector)
-            .await
-            .map_err(|e| anyhow!("weaviate upsert {}: {e}", path))?;
+        weaviate.upsert_page(&record, vector).await.map_err(|e| anyhow!("weaviate upsert {}: {e}", path))?;
     }
-
-    ctx.db.update_status(source_id, SourceStatus::Done).await?;
-    ctx.db
-        .audit(
-            "qpedia-bot",
-            "wiki.embedded",
-            Some(source_id.as_str()),
-            Some(&serde_json::json!({"pages": touched})),
-        )
-        .await?;
-
-    info!(id = %source_id, pages = touched.len(), "embed phase complete");
-    Ok(())
+    Ok(touched)
 }
 
 // ---------- frontmatter parsing (lenient) ----------

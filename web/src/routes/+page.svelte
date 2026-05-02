@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { listSources, TERMINAL, type Source } from '$lib/api';
+  import { deleteSource, listSources, TERMINAL, type Source } from '$lib/api';
   import StatusChip from '$lib/components/StatusChip.svelte';
   import UploadPanel from '$lib/components/UploadPanel.svelte';
 
@@ -33,6 +33,27 @@
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
   }
+
+  let pendingDelete = $state<Set<string>>(new Set());
+
+  async function onDelete(s: Source) {
+    if (!confirm(`Delete "${s.filename}" and any wiki pages derived from it?`)) return;
+    const next = new Set(pendingDelete);
+    next.add(s.id);
+    pendingDelete = next;
+    try {
+      await deleteSource(s.id);
+      // Trigger faster polling so the row disappears once the worker finishes.
+      setTimeout(refresh, 500);
+      setTimeout(refresh, 2000);
+      setTimeout(refresh, 5000);
+    } catch (e: any) {
+      const cleared = new Set(pendingDelete);
+      cleared.delete(s.id);
+      pendingDelete = cleared;
+      alert(`delete failed: ${e?.message ?? e}`);
+    }
+  }
 </script>
 
 <h1>Sources</h1>
@@ -63,6 +84,7 @@
               <th>Doc type</th>
               <th>Lang</th>
               <th>Hints</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -79,6 +101,16 @@
                 <td>{src.language ?? '—'}</td>
                 <td class="muted" style="max-width: 280px;">
                   {(src.classification?.hints ?? []).join(', ') || '—'}
+                </td>
+                <td>
+                  <button
+                    onclick={() => onDelete(src)}
+                    disabled={pendingDelete.has(src.id)}
+                    title="Delete this source and any wiki pages derived from it"
+                    style="font-size: 12px; padding: 4px 10px;"
+                  >
+                    {pendingDelete.has(src.id) ? 'removing…' : 'delete'}
+                  </button>
                 </td>
               </tr>
             {/each}

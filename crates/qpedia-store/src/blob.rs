@@ -17,6 +17,8 @@ pub trait BlobStorage: Send + Sync {
     async fn get(&self, id: &SourceId, kind: BlobKind, ext: &str) -> Result<Bytes>;
     async fn put_text(&self, id: &SourceId, kind: BlobKind, text: &str) -> Result<PathBuf>;
     fn path_for(&self, id: &SourceId, kind: BlobKind, ext: &str) -> PathBuf;
+    /// Recursively delete every blob for a source. Idempotent.
+    async fn delete_all(&self, id: &SourceId) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,5 +85,13 @@ impl BlobStorage for BlobStore {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).await?;
         Ok(Bytes::from(buf))
+    }
+
+    async fn delete_all(&self, id: &SourceId) -> Result<()> {
+        let dir = self.dir(id);
+        if dir.exists() {
+            tokio::fs::remove_dir_all(&dir).await?;
+        }
+        Ok(())
     }
 }

@@ -61,6 +61,7 @@ pub trait SourceStore: Send + Sync {
     async fn update_status(&self, id: &SourceId, status: SourceStatus) -> Result<()>;
     async fn update_language(&self, id: &SourceId, language: &str) -> Result<()>;
     async fn update_classification(&self, id: &SourceId, classification: &serde_json::Value) -> Result<()>;
+    async fn delete_source(&self, id: &SourceId) -> Result<()>;
 }
 
 #[async_trait]
@@ -141,6 +142,15 @@ impl SourceStore for SqliteStore {
     async fn update_classification(&self, id: &SourceId, classification: &serde_json::Value) -> Result<()> {
         sqlx::query("UPDATE sources SET classification_json = ? WHERE id = ?")
             .bind(classification.to_string())
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_source(&self, id: &SourceId) -> Result<()> {
+        sqlx::query("DELETE FROM sources WHERE id = ?")
             .bind(id.as_str())
             .execute(&self.pool)
             .await

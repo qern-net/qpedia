@@ -137,8 +137,8 @@ impl JobRunner {
                 handlers::ingest::run(&self.ctx, &p.source_id).await
             }
             JobKind::Remove => {
-                warn!(job = %job.id, "Remove handler not yet implemented");
-                Ok(())
+                let p: handlers::remove::RemovePayload = serde_json::from_value(job.payload)?;
+                handlers::remove::run(&self.ctx, &p.source_id).await
             }
             JobKind::Lint => handlers::lint::run(&self.ctx).await,
             JobKind::Reembed => {

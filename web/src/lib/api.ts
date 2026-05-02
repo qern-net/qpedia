@@ -67,6 +67,11 @@ export async function uploadSource(folderPath: string, file: File): Promise<Sour
   return json<Source>(await fetch('/api/v1/sources', { method: 'POST', body: fd }));
 }
 
+/** Enqueue a Remove job. Cleanup happens async; the row may linger briefly. */
+export async function deleteSource(id: string): Promise<{ job_id: string }> {
+  return json<{ job_id: string }>(await fetch(`/api/v1/sources/${id}`, { method: 'DELETE' }));
+}
+
 export async function listWikiPages(prefix: string = ''): Promise<{ prefix: string; pages: string[] }> {
   return json(await fetch(`/api/v1/wiki/list?prefix=${encodeURIComponent(prefix)}`));
 }

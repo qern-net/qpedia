@@ -19,7 +19,7 @@ use qpedia_core::{
 };
 use qpedia_embed::embedder_from_env;
 use qpedia_extract::ExtractorRegistry;
-use qpedia_ingest::{ingest_job, lint_job, IngestContext, JobRunner};
+use qpedia_ingest::{ingest_job, lint_job, remove_job, IngestContext, JobRunner};
 use qpedia_llm::provider_from_env;
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/sources",
             post(upload_source).get(list_sources).layer(DefaultBodyLimit::max(upload_limit)),
         )
-        .route("/api/v1/sources/:id", get(get_source))
+        .route("/api/v1/sources/:id", get(get_source).delete(delete_source))
         .route("/api/v1/wiki/list", get(list_wiki_pages))
         .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
@@ -165,6 +165,29 @@ async fn get_source(
         Some(src) => Ok(Json(src)),
         None => Err(ApiError::NotFound),
     }
+}
+
+/// Enqueue a Remove job. Cleanup (wiki commit, Weaviate, blobs, row delete)
+/// happens async; the source row remains visible until the job completes.
+async fn delete_source(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let sid = SourceId::from(id);
+    if s.ctx.db.get_source(&sid).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    let job = remove_job(&sid).map_err(ApiError::Internal)?;
+    let job_id = job.id.to_string();
+    s.ctx.db.enqueue(&job).await?;
+    s.ctx
+        .db
+        .audit("user:anon", "source.remove.requested", Some(sid.as_str()), None)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"job_id": job_id, "kind": "remove", "source_id": sid.as_str(), "state": "queued"})),
+    ))
 }
 
 #[derive(Deserialize)]
