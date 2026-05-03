@@ -60,7 +60,6 @@ pub struct OidcConfig {
         openidconnect::EndpointMaybeSet,   // HasUserInfoUrl
     >,
     pub http: reqwest::Client,
-    pub redirect_url: String,
     pub groups_claim: String,
     pub end_session_endpoint: Option<String>,
 }
@@ -108,14 +107,13 @@ impl AuthState {
                     ClientId::new(client_id),
                     Some(ClientSecret::new(client_secret)),
                 )
-                .set_redirect_uri(RedirectUrl::new(redirect_url.clone())?);
+                .set_redirect_uri(RedirectUrl::new(redirect_url)?);
 
                 info!(issuer = %issuer, "auth: OIDC configured");
                 Ok(Self {
                     mode: AuthMode::Oidc(Arc::new(OidcConfig {
                         client,
                         http,
-                        redirect_url,
                         groups_claim,
                         end_session_endpoint,
                     })),

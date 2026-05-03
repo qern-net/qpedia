@@ -383,11 +383,6 @@ async fn chat(
     user: User,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let _ = &user; // ACL filtering is applied inside the retriever via the
-                   // existing meta event; for v1 we trust the retriever's
-                   // upstream search filter (search_wiki already filters).
-                   // TODO: thread user.groups into Retriever for
-                   //       Weaviate-side WHERE filter on hybrid search.
     let llm = s.ctx.llm.clone().ok_or_else(|| {
         ApiError::Bad("chat requires an LLM provider — set ANTHROPIC_API_KEY or OPENAI_API_KEY".into())
     })?;
@@ -396,7 +391,9 @@ async fn chat(
         embedder: s.ctx.embedder.clone(),
         weaviate: s.ctx.weaviate.clone(),
         wiki: s.ctx.wiki.clone(),
+        db: s.ctx.db.clone(),
         llm,
+        user_groups: user.groups.clone(),
     };
 
     let event_stream = retriever.chat(req).map(|ev| {
