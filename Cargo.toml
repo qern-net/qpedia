@@ -51,6 +51,9 @@ tempfile = "3"
 fastembed = "4"
 uuid = { version = "1", features = ["v5", "serde"] }
 async-stream = "0.3"
+openidconnect = { version = "4", features = ["reqwest", "rustls-tls"], default-features = false }
+base64 = "0.22"
+rand = "0.8"
 
 # Internal
 qpedia-core = { path = "crates/qpedia-core" }

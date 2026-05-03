@@ -159,6 +159,146 @@ impl SourceStore for SqliteStore {
     }
 }
 
+// ---------- Auth: sessions + OIDC pending state ----------
+
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub user_id: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub groups: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAuth {
+    pub pkce_verifier: String,
+    pub nonce: String,
+    pub redirect_after: Option<String>,
+}
+
+impl SqliteStore {
+    pub async fn create_session(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        email: Option<&str>,
+        name: Option<&str>,
+        groups: &[String],
+        ttl_secs: i64,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let expires = now + ttl_secs * 1000;
+        sqlx::query(
+            "INSERT OR REPLACE INTO sessions \
+             (token_hash, user_id, user_email, user_name, groups_json, expires_at, created_at) \
+             VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind(token_hash)
+        .bind(user_id)
+        .bind(email)
+        .bind(name)
+        .bind(serde_json::to_string(groups)?)
+        .bind(expires)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    pub async fn lookup_session(&self, token_hash: &str) -> Result<Option<Session>> {
+        let now = Utc::now().timestamp_millis();
+        let row = sqlx::query(
+            "SELECT user_id, user_email, user_name, groups_json, expires_at \
+             FROM sessions WHERE token_hash = ? AND expires_at > ?",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(row) = row else { return Ok(None) };
+
+        let groups_json: String = row.try_get("groups_json").map_err(map_sqlx)?;
+        let groups: Vec<String> = serde_json::from_str(&groups_json)?;
+        let expires_ms: i64 = row.try_get("expires_at").map_err(map_sqlx)?;
+
+        Ok(Some(Session {
+            user_id: row.try_get("user_id").map_err(map_sqlx)?,
+            email: row.try_get("user_email").map_err(map_sqlx)?,
+            name: row.try_get("user_name").map_err(map_sqlx)?,
+            groups,
+            expires_at: ms_to_dt(expires_ms),
+        }))
+    }
+
+    pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    pub async fn save_pending(
+        &self,
+        state: &str,
+        pkce_verifier: &str,
+        nonce: &str,
+        redirect_after: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT OR REPLACE INTO auth_pending \
+             (state, pkce_verifier, nonce, redirect_after, created_at) \
+             VALUES (?,?,?,?,?)",
+        )
+        .bind(state)
+        .bind(pkce_verifier)
+        .bind(nonce)
+        .bind(redirect_after)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    /// Atomically read-and-delete a pending row. Returns None if missing
+    /// or older than 10 minutes.
+    pub async fn take_pending(&self, state: &str) -> Result<Option<PendingAuth>> {
+        let cutoff = Utc::now().timestamp_millis() - 10 * 60 * 1000;
+        let row = sqlx::query(
+            "DELETE FROM auth_pending WHERE state = ? AND created_at >= ? \
+             RETURNING pkce_verifier, nonce, redirect_after",
+        )
+        .bind(state)
+        .bind(cutoff)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(PendingAuth {
+            pkce_verifier: row.try_get("pkce_verifier").map_err(map_sqlx)?,
+            nonce: row.try_get("nonce").map_err(map_sqlx)?,
+            redirect_after: row.try_get("redirect_after").map_err(map_sqlx)?,
+        }))
+    }
+
+    /// Best-effort: clear stale pending rows so the table doesn't grow.
+    pub async fn purge_pending(&self, older_than_secs: i64) -> Result<()> {
+        let cutoff = Utc::now().timestamp_millis() - older_than_secs * 1000;
+        sqlx::query("DELETE FROM auth_pending WHERE created_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+}
+
 fn row_to_source(row: sqlx::sqlite::SqliteRow) -> Result<Source> {
     let id: String = row.try_get("id").map_err(map_sqlx)?;
     let acl_json: String = row.try_get("acl_json").map_err(map_sqlx)?;

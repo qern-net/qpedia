@@ -72,6 +72,23 @@ export async function deleteSource(id: string): Promise<{ job_id: string }> {
   return json<{ job_id: string }>(await fetch(`/api/v1/sources/${id}`, { method: 'DELETE' }));
 }
 
+// ---------- auth ----------
+
+export type Me = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  groups: string[];
+  is_admin: boolean;
+};
+
+export async function getMe(): Promise<Me | null> {
+  const r = await fetch('/api/v1/auth/me');
+  if (r.status === 401) return null;
+  if (!r.ok) throw new Error(`me ${r.status}`);
+  return r.json();
+}
+
 export async function listWikiPages(prefix: string = ''): Promise<{ prefix: string; pages: string[] }> {
   return json(await fetch(`/api/v1/wiki/list?prefix=${encodeURIComponent(prefix)}`));
 }

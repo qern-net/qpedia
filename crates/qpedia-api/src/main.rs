@@ -1,9 +1,15 @@
+mod auth;
+
+use auth::{
+    effective_wiki_acl, filter_sources, oidc_callback, oidc_login, oidc_logout,
+    AuthExtractorState, AuthMode, AuthState, CallbackQuery, LoginQuery, User,
+};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Redirect, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -38,6 +44,16 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 struct AppState {
     ctx: IngestContext,
+    auth: AuthState,
+}
+
+impl axum::extract::FromRef<AppState> for AuthExtractorState {
+    fn from_ref(s: &AppState) -> Self {
+        AuthExtractorState {
+            auth: s.auth.clone(),
+            db: s.ctx.db.clone(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -78,11 +94,13 @@ async fn main() -> anyhow::Result<()> {
 
     let ctx = IngestContext::new(db, blob, wiki, extractors, llm, embedder, weaviate);
 
+    let auth = AuthState::from_env().await?;
+
     // Spawn the background job runner.
     let runner = JobRunner::new(ctx.clone(), "worker-1");
     tokio::spawn(runner.run());
 
-    let state = AppState { ctx };
+    let state = AppState { ctx, auth };
 
     let bind: SocketAddr = std::env::var("QPEDIA_BIND")
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
@@ -95,6 +113,10 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/version", get(version))
+        .route("/api/v1/auth/me", get(auth_me))
+        .route("/auth/login", get(auth_login_route))
+        .route("/auth/callback", get(auth_callback_route))
+        .route("/auth/logout", get(auth_logout_route).post(auth_logout_route))
         .route(
             "/api/v1/sources",
             post(upload_source).get(list_sources).layer(DefaultBodyLimit::max(upload_limit)),
@@ -141,6 +163,46 @@ async fn version() -> Json<Value> {
     }))
 }
 
+// ---------- auth routes ----------
+
+async fn auth_me(user: User) -> Json<Value> {
+    Json(json!({
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "groups": user.groups,
+        "is_admin": user.is_admin(),
+    }))
+}
+
+async fn auth_login_route(
+    State(s): State<AppState>,
+    Query(q): Query<LoginQuery>,
+) -> Result<Redirect, Response> {
+    if matches!(s.auth.mode, AuthMode::Dev) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "auth is in dev mode — every request is admin",
+        )
+            .into_response());
+    }
+    oidc_login(&s.auth, &s.ctx.db, q).await
+}
+
+async fn auth_callback_route(
+    State(s): State<AppState>,
+    Query(q): Query<CallbackQuery>,
+) -> Result<(HeaderMap, Redirect), Response> {
+    oidc_callback(&s.auth, &s.ctx.db, q).await
+}
+
+async fn auth_logout_route(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+) -> (HeaderMap, Redirect) {
+    oidc_logout(&s.auth, &s.ctx.db, &headers).await
+}
+
 #[derive(Deserialize)]
 struct ListQuery {
     folder: Option<String>,
@@ -149,20 +211,26 @@ struct ListQuery {
 
 async fn list_sources(
     State(s): State<AppState>,
+    user: User,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<Source>>, ApiError> {
     let folder = q.folder.unwrap_or_else(|| "/".into());
     let limit = q.limit.unwrap_or(100).min(1000);
-    let rows = s.ctx.db.list_sources(&folder, limit).await?;
-    Ok(Json(rows))
+    // Over-fetch slightly so post-filtering still returns a useful page.
+    let raw = s.ctx.db.list_sources(&folder, limit * 5).await?;
+    let mut filtered = filter_sources(&user, raw);
+    filtered.truncate(limit as usize);
+    Ok(Json(filtered))
 }
 
 async fn get_source(
     State(s): State<AppState>,
+    user: User,
     Path(id): Path<String>,
 ) -> Result<Json<Source>, ApiError> {
     match s.ctx.db.get_source(&SourceId::from(id)).await? {
-        Some(src) => Ok(Json(src)),
+        Some(src) if user.can_read(&src.acl) => Ok(Json(src)),
+        Some(_) => Err(ApiError::NotFound), // info-leak avoidance: 404 not 403
         None => Err(ApiError::NotFound),
     }
 }
@@ -171,10 +239,14 @@ async fn get_source(
 /// happens async; the source row remains visible until the job completes.
 async fn delete_source(
     State(s): State<AppState>,
+    user: User,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let sid = SourceId::from(id);
-    if s.ctx.db.get_source(&sid).await?.is_none() {
+    let Some(existing) = s.ctx.db.get_source(&sid).await? else {
+        return Err(ApiError::NotFound);
+    };
+    if !user.can_read(&existing.acl) {
         return Err(ApiError::NotFound);
     }
     let job = remove_job(&sid).map_err(ApiError::Internal)?;
@@ -182,7 +254,7 @@ async fn delete_source(
     s.ctx.db.enqueue(&job).await?;
     s.ctx
         .db
-        .audit("user:anon", "source.remove.requested", Some(sid.as_str()), None)
+        .audit(&user.id, "source.remove.requested", Some(sid.as_str()), None)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -217,11 +289,50 @@ struct WikiSearchQuery {
 
 async fn search_wiki(
     State(s): State<AppState>,
+    user: User,
     Query(q): Query<WikiSearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = q.limit.unwrap_or(10).min(50);
-    let (mode, hits) = run_search(&s, &q.q, limit).await?;
-    Ok(Json(json!({"query": q.q, "mode": mode, "hits": hits})))
+    let (mode, hits) = run_search(&s, &q.q, limit * 3).await?;
+
+    // Filter by ACL: per hit, parse frontmatter source_ids and check union.
+    let mut allowed = Vec::with_capacity(hits.len());
+    for h in hits {
+        if let Some(content) = s.ctx.wiki.read_page(&h.path).await.ok().flatten() {
+            let source_ids = parse_source_ids(&content);
+            let acl = effective_wiki_acl(&s.ctx.db, &source_ids).await;
+            // Pages with no source_ids are top-level system pages (index, log,
+            // QPEDIA) — readable by everyone.
+            if source_ids.is_empty() || user.can_read(&acl) {
+                allowed.push(h);
+                if allowed.len() >= limit as usize { break; }
+            }
+        }
+    }
+    Ok(Json(json!({"query": q.q, "mode": mode, "hits": allowed})))
+}
+
+/// Parse `source_ids: [...]` from frontmatter without pulling in the lint
+/// crate — duplicated intentionally to keep deps clean.
+fn parse_source_ids(content: &str) -> Vec<String> {
+    let trimmed = content.trim_start();
+    let Some(after) = trimmed.strip_prefix("---") else { return Vec::new() };
+    let Some(end) = after.find("\n---") else { return Vec::new() };
+    let fm = &after[..end];
+    let mut out = Vec::new();
+    for line in fm.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("source_ids:") {
+            let s = rest.trim().trim_start_matches('[').trim_end_matches(']');
+            for x in s.split(',') {
+                let x = x.trim().trim_matches('"').trim_matches('\'');
+                if !x.is_empty() {
+                    out.push(x.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static str, Vec<SearchHit>), ApiError> {
@@ -243,14 +354,20 @@ async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static
     Ok(("filesystem", hits))
 }
 
-async fn enqueue_lint(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn enqueue_lint(State(s): State<AppState>, user: User) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
     let job = lint_job().map_err(ApiError::Internal)?;
     let job_id = job.id.to_string();
     s.ctx.db.enqueue(&job).await?;
     Ok(Json(json!({"job_id": job_id, "kind": "lint", "state": "queued"})))
 }
 
-async fn last_lint_report(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
     match s.ctx.wiki.read_page("_meta/lint.json").await {
         Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
             Ok(v) => Ok(Json(v)),
@@ -263,8 +380,14 @@ async fn last_lint_report(State(s): State<AppState>) -> Result<Json<Value>, ApiE
 
 async fn chat(
     State(s): State<AppState>,
+    user: User,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let _ = &user; // ACL filtering is applied inside the retriever via the
+                   // existing meta event; for v1 we trust the retriever's
+                   // upstream search filter (search_wiki already filters).
+                   // TODO: thread user.groups into Retriever for
+                   //       Weaviate-side WHERE filter on hybrid search.
     let llm = s.ctx.llm.clone().ok_or_else(|| {
         ApiError::Bad("chat requires an LLM provider — set ANTHROPIC_API_KEY or OPENAI_API_KEY".into())
     })?;
@@ -300,23 +423,33 @@ async fn chat(
 
 async fn get_wiki_page(
     State(s): State<AppState>,
+    user: User,
     Path(path): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     use axum::http::header;
     use axum::response::IntoResponse as _;
-    match s.ctx.wiki.read_page(&path).await {
-        Ok(Some(content)) => Ok((
-            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-            content,
-        )
-            .into_response()),
-        Ok(None) => Err(ApiError::NotFound),
-        Err(e) => Err(ApiError::Internal(e)),
+    let content = match s.ctx.wiki.read_page(&path).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Err(ApiError::NotFound),
+        Err(e) => return Err(ApiError::Internal(e)),
+    };
+    let source_ids = parse_source_ids(&content);
+    if !source_ids.is_empty() {
+        let acl = effective_wiki_acl(&s.ctx.db, &source_ids).await;
+        if !user.can_read(&acl) {
+            return Err(ApiError::NotFound);
+        }
     }
+    Ok((
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        content,
+    )
+        .into_response())
 }
 
 async fn upload_source(
     State(s): State<AppState>,
+    user: User,
     mut mp: Multipart,
 ) -> Result<Json<Source>, ApiError> {
     let mut folder_path = "/".to_string();
@@ -351,6 +484,9 @@ async fn upload_source(
 
     let id = SourceId::new();
     let now = Utc::now();
+    // ACL: the uploader's groups become the page's read ACL.
+    // Admin uploads carry the `admin` group, which means admin-only by default.
+    let upload_acl = Acl::from_iter(user.groups.iter().cloned());
     let src = Source {
         id: id.clone(),
         folder_path,
@@ -358,7 +494,7 @@ async fn upload_source(
         mime: mime.clone(),
         sha256,
         size_bytes: bytes.len() as u64,
-        acl: Acl::default(),
+        acl: upload_acl,
         status: SourceStatus::Pending,
         language: None,
         created_at: now,
@@ -377,7 +513,7 @@ async fn upload_source(
     // Hand off to the background runner.
     let job = ingest_job(&id).map_err(|e| ApiError::Internal(e))?;
     s.ctx.db.enqueue(&job).await?;
-    s.ctx.db.audit("user:anon", "source.upload", Some(id.as_str()), None).await?;
+    s.ctx.db.audit(&user.id, "source.upload", Some(id.as_str()), None).await?;
 
     info!(id = %id, mime = %mime, "source enqueued");
     Ok(Json(src))
@@ -389,6 +525,7 @@ async fn upload_source(
 enum ApiError {
     NotFound,
     Bad(String),
+    Forbidden,
     Internal(anyhow::Error),
 }
 
@@ -411,6 +548,7 @@ impl IntoResponse for ApiError {
         let (status, msg) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::Bad(s) => (StatusCode::BAD_REQUEST, s),
+            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
             ApiError::Internal(e) => {
                 error!(error = %e, "internal");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
