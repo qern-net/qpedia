@@ -12,10 +12,14 @@
 use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::SourceId;
-use qpedia_store::{sqlite::SourceStore, SqliteStore, WikiRepo};
+use qpedia_store::{sqlite::SourceStore, weaviate::WeaviateStore, SqliteStore, WikiRepo};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use tracing::info;
+use std::sync::Arc;
+use tracing::{info, warn};
+
+/// Pairs with certainty >= this are flagged as near-duplicates.
+pub const DUPLICATE_CERTAINTY: f32 = 0.93;
 
 const SKIP_FROM_ORPHAN_CHECK: &[&str] = &["index.md", "log.md", "QPEDIA.md"];
 
@@ -27,6 +31,7 @@ pub struct LintReport {
     pub broken_links: Vec<BrokenLink>,
     pub index_drift: IndexDrift,
     pub stale_source_ids: Vec<String>,
+    pub duplicates: Vec<Duplicate>,
 }
 
 impl LintReport {
@@ -36,7 +41,15 @@ impl LintReport {
             + self.index_drift.missing_from_index.len()
             + self.index_drift.stale_in_index.len()
             + self.stale_source_ids.len()
+            + self.duplicates.len()
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Duplicate {
+    pub a: String,
+    pub b: String,
+    pub certainty: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,11 +67,12 @@ pub struct IndexDrift {
 pub struct Linter {
     pub wiki: WikiRepo,
     pub db: SqliteStore,
+    pub weaviate: Option<Arc<WeaviateStore>>,
 }
 
 impl Linter {
-    pub fn new(wiki: WikiRepo, db: SqliteStore) -> Self {
-        Self { wiki, db }
+    pub fn new(wiki: WikiRepo, db: SqliteStore, weaviate: Option<Arc<WeaviateStore>>) -> Self {
+        Self { wiki, db, weaviate }
     }
 
     pub async fn run(&self) -> Result<LintReport> {
@@ -135,14 +149,51 @@ impl Linter {
         }
         report.stale_source_ids.sort();
 
+        // Near-duplicates via Weaviate nearObject. Skip system pages
+        // (they're intentionally distinct and won't have neighbors anyway).
+        if let Some(weaviate) = &self.weaviate {
+            let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
+            for path in &pages {
+                if SKIP_FROM_ORPHAN_CHECK.iter().any(|s| s == path) {
+                    continue;
+                }
+                match weaviate.nearest_neighbor(path).await {
+                    Ok(Some((other, certainty))) if certainty >= DUPLICATE_CERTAINTY => {
+                        let pair = sorted_pair(path, &other);
+                        if seen_pairs.insert(pair.clone()) {
+                            report.duplicates.push(Duplicate {
+                                a: pair.0,
+                                b: pair.1,
+                                certainty,
+                            });
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(path = %path, error = %e, "nearest_neighbor failed"),
+                }
+            }
+            report
+                .duplicates
+                .sort_by(|x, y| y.certainty.partial_cmp(&x.certainty).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
         info!(
             pages = report.page_count,
             issues = report.issue_count(),
             orphans = report.orphans.len(),
             broken = report.broken_links.len(),
+            duplicates = report.duplicates.len(),
             "lint complete"
         );
         Ok(report)
+    }
+}
+
+fn sorted_pair(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
     }
 }
 

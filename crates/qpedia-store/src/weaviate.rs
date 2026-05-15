@@ -124,6 +124,63 @@ impl WeaviateStore {
         Err(anyhow!("weaviate PUT object ({status}): {text}"))
     }
 
+    /// Find the nearest neighbor of a page by its embedding vector,
+    /// excluding the page itself. Returns (path, certainty) where
+    /// certainty is Weaviate's 0..1 cosine-similarity proxy.
+    pub async fn nearest_neighbor(&self, path: &str) -> Result<Option<(String, f32)>> {
+        let id = page_uuid(path);
+        let gql = format!(
+            r#"{{
+              Get {{
+                {class}(
+                  nearObject: {{ id: "{id}" }}
+                  limit: 2
+                ) {{
+                  path
+                  _additional {{ id certainty }}
+                }}
+              }}
+            }}"#,
+            class = CLASS_WIKI_PAGE,
+        );
+        let url = format!("{}/v1/graphql", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({"query": gql}))
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("nearest_neighbor ({status}): {text}"));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("decode nearest: {e}\nbody: {text}"))?;
+        let items = v
+            .pointer(&format!("/data/Get/{CLASS_WIKI_PAGE}"))
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for item in items {
+            let other_path = item
+                .get("path")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // Weaviate returns the queried object first; skip self.
+            if other_path == path || other_path.is_empty() {
+                continue;
+            }
+            let certainty = item
+                .pointer("/_additional/certainty")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0) as f32;
+            return Ok(Some((other_path, certainty)));
+        }
+        Ok(None)
+    }
+
     pub async fn delete_page(&self, path: &str) -> Result<()> {
         let id = page_uuid(path);
         let url = format!("{}/v1/objects/{CLASS_WIKI_PAGE}/{id}", self.base_url);

@@ -287,6 +287,87 @@ impl SqliteStore {
         }))
     }
 
+    // ---------- folder ACLs ----------
+
+    pub async fn list_folder_acls(&self) -> Result<Vec<(String, Acl, DateTime<Utc>, String)>> {
+        let rows = sqlx::query(
+            "SELECT folder_path, acl_json, updated_at, updated_by FROM folder_acls ORDER BY folder_path",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let path: String = row.try_get("folder_path").map_err(map_sqlx)?;
+            let acl_json: String = row.try_get("acl_json").map_err(map_sqlx)?;
+            let updated_ms: i64 = row.try_get("updated_at").map_err(map_sqlx)?;
+            let updated_by: String = row.try_get("updated_by").map_err(map_sqlx)?;
+            let acl: Acl = serde_json::from_str(&acl_json)?;
+            out.push((path, acl, ms_to_dt(updated_ms), updated_by));
+        }
+        Ok(out)
+    }
+
+    pub async fn set_folder_acl(&self, folder_path: &str, acl: &Acl, updated_by: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let acl_json = serde_json::to_string(acl)?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO folder_acls (folder_path, acl_json, updated_at, updated_by) \
+             VALUES (?,?,?,?)",
+        )
+        .bind(normalize_folder(folder_path))
+        .bind(acl_json)
+        .bind(now)
+        .bind(updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    pub async fn delete_folder_acl(&self, folder_path: &str) -> Result<()> {
+        sqlx::query("DELETE FROM folder_acls WHERE folder_path = ?")
+            .bind(normalize_folder(folder_path))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    /// Find the closest ancestor ACL for `folder_path`. Returns Some when
+    /// any ancestor (or the path itself) has an explicit ACL row.
+    pub async fn resolve_folder_acl(&self, folder_path: &str) -> Result<Option<Acl>> {
+        let normalized = normalize_folder(folder_path);
+        // Build the ancestor chain and look up the longest match.
+        let mut candidates = vec![normalized.clone()];
+        let mut cur = normalized.as_str();
+        while let Some(idx) = cur.rfind('/') {
+            let parent = if idx == 0 { "/".to_string() } else { cur[..idx].to_string() };
+            if !candidates.contains(&parent) {
+                candidates.push(parent.clone());
+            }
+            if idx == 0 { break; }
+            cur = &cur[..idx];
+        }
+        if !candidates.contains(&"/".to_string()) {
+            candidates.push("/".into());
+        }
+
+        let placeholders = candidates.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT folder_path, acl_json FROM folder_acls WHERE folder_path IN ({placeholders}) \
+             ORDER BY length(folder_path) DESC LIMIT 1"
+        );
+        let mut q = sqlx::query(&sql);
+        for c in &candidates {
+            q = q.bind(c);
+        }
+        let row = q.fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        let Some(row) = row else { return Ok(None) };
+        let acl_json: String = row.try_get("acl_json").map_err(map_sqlx)?;
+        Ok(Some(serde_json::from_str(&acl_json)?))
+    }
+
     /// Best-effort: clear stale pending rows so the table doesn't grow.
     pub async fn purge_pending(&self, older_than_secs: i64) -> Result<()> {
         let cutoff = Utc::now().timestamp_millis() - older_than_secs * 1000;
@@ -333,6 +414,14 @@ fn row_to_source(row: sqlx::sqlite::SqliteRow) -> Result<Source> {
 
 fn ms_to_dt(ms: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_else(Utc::now)
+}
+
+/// Normalize a folder path: ensure leading "/", strip trailing "/" except for root.
+fn normalize_folder(p: &str) -> String {
+    let p = p.trim();
+    if p.is_empty() { return "/".into(); }
+    let p = if p.starts_with('/') { p.to_string() } else { format!("/{p}") };
+    if p.len() > 1 && p.ends_with('/') { p.trim_end_matches('/').to_string() } else { p }
 }
 
 // ---------- Job queue ----------

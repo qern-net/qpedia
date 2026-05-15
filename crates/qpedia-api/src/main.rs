@@ -127,6 +127,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
         .route("/api/v1/chat", post(chat))
         .route("/api/v1/admin/lint", post(enqueue_lint).get(last_lint_report))
+        .route(
+            "/api/v1/admin/folder-acls",
+            get(list_folder_acls).put(set_folder_acl).delete(delete_folder_acl),
+        )
         .with_state(state);
 
     // Optional static SPA. In dev the user runs `npm run dev` (vite) and hits
@@ -364,6 +368,90 @@ async fn enqueue_lint(State(s): State<AppState>, user: User) -> Result<Json<Valu
     Ok(Json(json!({"job_id": job_id, "kind": "lint", "state": "queued"})))
 }
 
+#[derive(Deserialize)]
+struct FolderAclBody {
+    folder_path: String,
+    acl: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct FolderAclDeleteQuery {
+    folder_path: String,
+}
+
+async fn list_folder_acls(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let rows = s
+        .ctx
+        .db
+        .list_folder_acls()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(path, acl, updated_at, updated_by)| {
+            json!({
+                "folder_path": path,
+                "acl": acl.0.iter().cloned().collect::<Vec<_>>(),
+                "updated_at": updated_at.to_rfc3339(),
+                "updated_by": updated_by,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+async fn set_folder_acl(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<FolderAclBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let acl = Acl::from_iter(body.acl.iter().cloned());
+    s.ctx
+        .db
+        .set_folder_acl(&body.folder_path, &acl, &user.id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    s.ctx
+        .db
+        .audit(
+            &user.id,
+            "folder_acl.set",
+            Some(&body.folder_path),
+            Some(&json!({"acl": body.acl})),
+        )
+        .await?;
+    Ok(Json(json!({"folder_path": body.folder_path, "acl": body.acl})))
+}
+
+async fn delete_folder_acl(
+    State(s): State<AppState>,
+    user: User,
+    Query(q): Query<FolderAclDeleteQuery>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    s.ctx
+        .db
+        .delete_folder_acl(&q.folder_path)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    s.ctx
+        .db
+        .audit(&user.id, "folder_acl.delete", Some(&q.folder_path), None)
+        .await?;
+    Ok(Json(json!({"deleted": q.folder_path})))
+}
+
 async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<Value>, ApiError> {
     if !user.is_admin() {
         return Err(ApiError::Forbidden);
@@ -481,9 +569,13 @@ async fn upload_source(
 
     let id = SourceId::new();
     let now = Utc::now();
-    // ACL: the uploader's groups become the page's read ACL.
-    // Admin uploads carry the `admin` group, which means admin-only by default.
-    let upload_acl = Acl::from_iter(user.groups.iter().cloned());
+    // ACL resolution: prefer a folder-level ACL (closest ancestor wins);
+    // fall back to the uploader's groups so single-user / dev mode keeps
+    // working without configuration.
+    let upload_acl = match s.ctx.db.resolve_folder_acl(&folder_path).await? {
+        Some(acl) => acl,
+        None => Acl::from_iter(user.groups.iter().cloned()),
+    };
     let src = Source {
         id: id.clone(),
         folder_path,
