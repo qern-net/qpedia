@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 pub mod text;
 pub mod pdf;
 pub mod docx;
+pub mod marker;
 
 pub use text::TextExtractor;
 pub use pdf::PdfExtractor;
 pub use docx::DocxExtractor;
+pub use marker::MarkerExtractor;
 
 #[async_trait]
 pub trait Extractor: Send + Sync {
@@ -46,9 +48,27 @@ impl ExtractorRegistry {
 
     /// All built-in extractors. PDF support is optional: if pdfium isn't
     /// available, PDFs will be rejected at extract-time but text/docx still work.
+    ///
+    /// When `QPEDIA_MARKER_URL` is set, a MarkerExtractor is registered
+    /// ahead of `PdfExtractor` for PDFs. Marker failures fall back to
+    /// pdfium so a broken sidecar doesn't break ingestion.
     pub fn with_default() -> Self {
         let mut reg = Self::new();
         reg.register(Box::new(TextExtractor));
+
+        if let Ok(url) = std::env::var("QPEDIA_MARKER_URL") {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                match MarkerExtractor::try_new(url.clone()) {
+                    Ok(m) => {
+                        tracing::info!(url = %url, "MarkerExtractor active (high-fidelity PDFs)");
+                        reg.register(Box::new(m));
+                    }
+                    Err(e) => tracing::warn!(error = %e, "MarkerExtractor unavailable; falling through to pdfium"),
+                }
+            }
+        }
+
         match PdfExtractor::try_new() {
             Ok(pdf) => reg.register(Box::new(pdf)),
             Err(e) => tracing::warn!(error = %e, "PdfExtractor disabled — run scripts/fetch-pdfium.sh"),

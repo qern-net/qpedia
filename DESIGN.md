@@ -709,18 +709,15 @@ Parallelization notes: weeks 9–10 (frontend) can start at week 5 once the API 
 - Cross-language support in wiki (currently one working language).
 - Fine-grained per-page ACLs beyond source-union.
 - Eval harness: held-out Q&A set to track retrieval quality regressions.
-- **High-fidelity extraction sidecar (Marker / docling / nougat).** The current
-  PDF/DOCX pipeline (pdfium + pandoc) produces clean text but loses table
-  structure, equations, multi-column layout, and reading order on complex
-  business docs. ML-based extractors (Marker, IBM docling, Meta nougat)
-  produce structured markdown that the ingest agent can distill into
-  much better wiki pages. Trade-off: third container, Python + GPU, breaks
-  the 2-container target. Revisit if wiki-quality regressions on
-  table-heavy, multi-column, or scanned-with-formulas docs become a
-  recurring complaint. Adoption pattern: an internal HTTP service the
-  Rust extractor delegates to for `application/pdf` when the doc is
-  flagged "complex" by a cheap heuristic (page count > N, has scanned
-  pages, etc.).
+- **High-fidelity extraction sidecar (Marker).** Shipped behind a docker
+  compose `marker` profile (off by default). Lives in `sidecar/marker/`
+  as a thin FastAPI wrapper around marker-pdf. The Rust extractor
+  (`MarkerExtractor`) registers ahead of `PdfExtractor` when
+  `QPEDIA_MARKER_URL` is set and falls back to pdfium on any sidecar
+  failure. Activate when wiki quality on table-heavy, multi-column, or
+  formula-heavy PDFs becomes the bottleneck. Cost: ~5 GB image,
+  30-90 s cold start on first request (model download), seconds to
+  minutes per PDF on CPU. GPU recommended for serious throughput.
 
 ---
 

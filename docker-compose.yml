@@ -35,9 +35,21 @@ services:
       retries: 20
     restart: unless-stopped
 
+  marker:
+    profiles: [marker]
+    build:
+      context: ./sidecar/marker
+    image: qpedia/marker:${QPEDIA_VERSION:-dev}
+    ports:
+      - "18081:8000"
+    volumes:
+      - marker-cache:/root/.cache
+    restart: unless-stopped
+
 volumes:
   wiki-data:
   raw-data:
   sqlite-data:
   models-cache:
   weaviate-data:
+  marker-cache:

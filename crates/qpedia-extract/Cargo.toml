@@ -19,3 +19,4 @@ bytes.workspace = true
 tokio.workspace = true
 pdfium-render.workspace = true
 tempfile.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }

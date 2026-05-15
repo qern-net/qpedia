@@ -89,6 +89,36 @@ export async function getMe(): Promise<Me | null> {
   return r.json();
 }
 
+// ---------- admin: folder ACLs ----------
+
+export type FolderAcl = {
+  folder_path: string;
+  acl: string[];
+  updated_at?: string;
+  updated_by?: string;
+};
+
+export async function listFolderAcls(): Promise<{ items: FolderAcl[] }> {
+  return json(await fetch('/api/v1/admin/folder-acls'));
+}
+
+export async function setFolderAcl(folder_path: string, acl: string[]): Promise<FolderAcl> {
+  return json(
+    await fetch('/api/v1/admin/folder-acls', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ folder_path, acl })
+    })
+  );
+}
+
+export async function deleteFolderAcl(folder_path: string): Promise<void> {
+  const r = await fetch(`/api/v1/admin/folder-acls?folder_path=${encodeURIComponent(folder_path)}`, {
+    method: 'DELETE'
+  });
+  if (!r.ok) throw new Error(`delete folder acl: ${r.status}`);
+}
+
 export async function listWikiPages(prefix: string = ''): Promise<{ prefix: string; pages: string[] }> {
   return json(await fetch(`/api/v1/wiki/list?prefix=${encodeURIComponent(prefix)}`));
 }

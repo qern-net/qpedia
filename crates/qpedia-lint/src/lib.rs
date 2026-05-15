@@ -9,17 +9,23 @@
 //! Future v2 additions (DESIGN.md §9): contradictions (LLM clusters),
 //! near-duplicates (cosine > 0.93 via Weaviate nearObject).
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use qpedia_core::SourceId;
+use qpedia_llm::{current_model, CompleteReq, LlmProvider};
 use qpedia_store::{sqlite::SourceStore, weaviate::WeaviateStore, SqliteStore, WikiRepo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Pairs with certainty >= this are flagged as near-duplicates.
 pub const DUPLICATE_CERTAINTY: f32 = 0.93;
+
+/// Contradiction detection budget (env-overridable).
+const DEFAULT_MAX_CLUSTERS: usize = 8;
+const DEFAULT_MAX_PAGES_PER_CLUSTER: usize = 6;
+const PAGE_EXCERPT_CHARS: usize = 1500;
 
 const SKIP_FROM_ORPHAN_CHECK: &[&str] = &["index.md", "log.md", "QPEDIA.md"];
 
@@ -32,6 +38,7 @@ pub struct LintReport {
     pub index_drift: IndexDrift,
     pub stale_source_ids: Vec<String>,
     pub duplicates: Vec<Duplicate>,
+    pub contradictions: Vec<Contradiction>,
 }
 
 impl LintReport {
@@ -42,6 +49,7 @@ impl LintReport {
             + self.index_drift.stale_in_index.len()
             + self.stale_source_ids.len()
             + self.duplicates.len()
+            + self.contradictions.len()
     }
 }
 
@@ -50,6 +58,13 @@ pub struct Duplicate {
     pub a: String,
     pub b: String,
     pub certainty: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Contradiction {
+    pub tag: String,
+    pub pages: Vec<String>,
+    pub summary: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,11 +83,17 @@ pub struct Linter {
     pub wiki: WikiRepo,
     pub db: SqliteStore,
     pub weaviate: Option<Arc<WeaviateStore>>,
+    pub llm: Option<Arc<dyn LlmProvider>>,
 }
 
 impl Linter {
-    pub fn new(wiki: WikiRepo, db: SqliteStore, weaviate: Option<Arc<WeaviateStore>>) -> Self {
-        Self { wiki, db, weaviate }
+    pub fn new(
+        wiki: WikiRepo,
+        db: SqliteStore,
+        weaviate: Option<Arc<WeaviateStore>>,
+        llm: Option<Arc<dyn LlmProvider>>,
+    ) -> Self {
+        Self { wiki, db, weaviate, llm }
     }
 
     pub async fn run(&self) -> Result<LintReport> {
@@ -177,16 +198,163 @@ impl Linter {
                 .sort_by(|x, y| y.certainty.partial_cmp(&x.certainty).unwrap_or(std::cmp::Ordering::Equal));
         }
 
+        // Contradiction detection: cluster by shared tag, ask the LLM
+        // per-cluster. Bounded by env knobs to control cost.
+        if self.llm.is_some() {
+            match self.detect_contradictions(&pages, &content_cache).await {
+                Ok(cs) => report.contradictions = cs,
+                Err(e) => warn!(error = %e, "contradiction detection failed"),
+            }
+        }
+
         info!(
             pages = report.page_count,
             issues = report.issue_count(),
             orphans = report.orphans.len(),
             broken = report.broken_links.len(),
             duplicates = report.duplicates.len(),
+            contradictions = report.contradictions.len(),
             "lint complete"
         );
         Ok(report)
     }
+
+    async fn detect_contradictions(
+        &self,
+        pages: &[String],
+        content_cache: &HashMap<String, String>,
+    ) -> Result<Vec<Contradiction>> {
+        let Some(llm) = &self.llm else { return Ok(Vec::new()) };
+
+        let max_clusters = std::env::var("QPEDIA_LINT_MAX_CLUSTERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_CLUSTERS);
+        let max_pages_per_cluster = std::env::var("QPEDIA_LINT_MAX_PAGES_PER_CLUSTER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_PAGES_PER_CLUSTER);
+
+        // Build tag -> [paths] map.
+        let mut by_tag: HashMap<String, Vec<String>> = HashMap::new();
+        for path in pages {
+            if SKIP_FROM_ORPHAN_CHECK.iter().any(|s| s == path) { continue; }
+            let Some(content) = content_cache.get(path) else { continue };
+            for tag in extract_tags(content) {
+                by_tag.entry(tag).or_default().push(path.clone());
+            }
+        }
+
+        // Keep clusters with >=2 pages, sorted by size desc, capped.
+        let mut clusters: Vec<(String, Vec<String>)> = by_tag
+            .into_iter()
+            .filter(|(_, ps)| ps.len() >= 2)
+            .collect();
+        clusters.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        clusters.truncate(max_clusters);
+
+        let mut out: Vec<Contradiction> = Vec::new();
+        for (tag, mut paths) in clusters {
+            paths.truncate(max_pages_per_cluster);
+            let user_msg = build_cluster_prompt(&tag, &paths, content_cache);
+            let req = CompleteReq::new(current_model())
+                .system(CONTRADICTION_SYSTEM)
+                .user(user_msg)
+                .max_tokens(800)
+                .temperature(0.0);
+            let resp = match llm.complete(req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(tag = %tag, error = %e, "contradiction llm call failed");
+                    continue;
+                }
+            };
+            match parse_contradiction_response(&resp.content) {
+                Ok(items) => {
+                    for item in items {
+                        // Drop empty/garbage responses.
+                        if item.pages.len() < 2 || item.summary.trim().is_empty() {
+                            continue;
+                        }
+                        out.push(Contradiction {
+                            tag: tag.clone(),
+                            pages: item.pages,
+                            summary: item.summary,
+                        });
+                    }
+                }
+                Err(e) => warn!(tag = %tag, error = %e, "couldn't parse contradiction JSON; got: {}", resp.content),
+            }
+        }
+
+        Ok(out)
+    }
+}
+
+const CONTRADICTION_SYSTEM: &str = r#"You are reviewing wiki pages that share a topic tag.
+Identify contradictions BETWEEN the pages — claims in one page that
+directly contradict claims in another. Don't flag stylistic differences
+or different angles on the same fact — only real contradictions.
+
+Output ONE JSON array, nothing else:
+[
+  {
+    "pages": ["path/a.md", "path/b.md"],
+    "summary": "<one sentence describing the contradiction>"
+  }
+]
+
+If there are no contradictions, output [].
+- Output starts with [ and ends with ].
+- No markdown fences, no preamble.
+- Each finding's `pages` must reference paths from the inputs.
+"#;
+
+fn build_cluster_prompt(tag: &str, paths: &[String], cache: &HashMap<String, String>) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("Shared tag: {tag}\n\nPAGES:\n\n"));
+    for (i, path) in paths.iter().enumerate() {
+        s.push_str(&format!("--- {} {}\n", i + 1, path));
+        let body = cache.get(path).map(|c| c.as_str()).unwrap_or("");
+        let body = strip_frontmatter_for_prompt(body);
+        let excerpt: String = body.chars().take(PAGE_EXCERPT_CHARS).collect();
+        s.push_str(&excerpt);
+        if !s.ends_with('\n') { s.push('\n'); }
+        s.push('\n');
+    }
+    s
+}
+
+fn strip_frontmatter_for_prompt(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    let Some(after) = trimmed.strip_prefix("---") else { return content };
+    match after.find("\n---") {
+        Some(end) => after[end + "\n---".len()..].trim_start(),
+        None => content,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ContradictionOut {
+    pages: Vec<String>,
+    summary: String,
+}
+
+fn parse_contradiction_response(text: &str) -> Result<Vec<ContradictionOut>> {
+    let trimmed = text.trim();
+    // Strip optional code fences.
+    let cleaned = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim_end_matches("```")
+        .trim();
+    // Seek the first '['.
+    let start = cleaned.find('[').ok_or_else(|| anyhow!("no JSON array"))?;
+    let candidate = &cleaned[start..];
+    let v: Vec<ContradictionOut> =
+        serde_json::from_str(candidate).map_err(|e| anyhow!("not JSON: {e}"))?;
+    Ok(v)
 }
 
 fn sorted_pair(a: &str, b: &str) -> (String, String) {
@@ -245,6 +413,27 @@ fn extract_wikilinks(content: &str) -> Vec<String> {
             }
         }
         i += 1;
+    }
+    out
+}
+
+fn extract_tags(content: &str) -> Vec<String> {
+    let trimmed = content.trim_start();
+    let Some(after) = trimmed.strip_prefix("---") else { return Vec::new() };
+    let Some(end) = after.find("\n---") else { return Vec::new() };
+    let fm = &after[..end];
+    let mut out = Vec::new();
+    for line in fm.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("tags:") {
+            let s = rest.trim().trim_start_matches('[').trim_end_matches(']');
+            for x in s.split(',') {
+                let x = x.trim().trim_matches('"').trim_matches('\'');
+                if !x.is_empty() {
+                    out.push(x.to_string());
+                }
+            }
+        }
     }
     out
 }

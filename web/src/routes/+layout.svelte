@@ -23,6 +23,9 @@
       <a href="/wiki"    class:active={$page.url.pathname.startsWith('/wiki')}>Wiki</a>
       <a href="/search"  class:active={$page.url.pathname.startsWith('/search')}>Search</a>
       <a href="/chat"    class:active={$page.url.pathname.startsWith('/chat')}>Chat</a>
+      {#if me?.is_admin}
+        <a href="/admin"   class:active={$page.url.pathname.startsWith('/admin')}>Admin</a>
+      {/if}
     </nav>
     <span class="spacer"></span>
     {#if authChecked}

@@ -8,7 +8,12 @@ use qpedia_lint::Linter;
 use tracing::info;
 
 pub async fn run(ctx: &IngestContext) -> Result<()> {
-    let linter = Linter::new(ctx.wiki.clone(), ctx.db.clone(), ctx.weaviate.clone());
+    let linter = Linter::new(
+        ctx.wiki.clone(),
+        ctx.db.clone(),
+        ctx.weaviate.clone(),
+        ctx.llm.clone(),
+    );
     let report = linter.run().await?;
 
     let json = serde_json::to_string_pretty(&report)?;
