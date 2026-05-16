@@ -17,7 +17,7 @@
 
 use crate::handlers::embed::embed_changed_pages;
 use crate::runner::IngestContext;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use qpedia_core::{
     wiki::{DiffBundle, DiffOp},
@@ -56,12 +56,21 @@ pub fn remove_job(source_id: &SourceId) -> Result<Job> {
 pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
     info!(id = %source_id, "remove: start");
 
+    // Fetch the source first so we know which tenant's wiki to touch.
+    let src = ctx
+        .db
+        .get_source(source_id)
+        .await?
+        .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
+    let tenant = src.tenant.clone();
+    let wiki = ctx.wiki_store.get(&tenant).await?;
+
     // 1. Plan: walk wiki, decide delete vs patch per affected page.
     let mut to_delete: Vec<String> = Vec::new();
     let mut to_patch: Vec<(String, String)> = Vec::new();
 
-    for path in ctx.wiki.list_pages("").await? {
-        let Some(content) = ctx.wiki.read_page(&path).await? else { continue };
+    for path in wiki.list_pages("").await? {
+        let Some(content) = wiki.read_page(&path).await? else { continue };
         let source_ids = extract_source_ids(&content);
         if !source_ids.iter().any(|s| s == source_id.as_str()) {
             continue;
@@ -112,13 +121,13 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
             ),
             operations: ops,
         };
-        let sha = ctx.wiki.commit_bundle(&bundle).await?;
+        let sha = wiki.commit_bundle(&bundle).await?;
         info!(id = %source_id, sha = %sha, "remove: wiki committed");
 
         // 3a. Drop deleted pages from Weaviate.
         if let Some(weaviate) = &ctx.weaviate {
             for path in &to_delete {
-                if let Err(e) = weaviate.delete_page(path).await {
+                if let Err(e) = weaviate.delete_page(&tenant, path).await {
                     warn!(path = %path, error = %e, "weaviate delete failed");
                 }
             }
@@ -126,7 +135,7 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
         // 3b. Re-embed patched pages (HEAD diff captures the patches).
         if !to_patch.is_empty() {
-            let embedded = embed_changed_pages(ctx).await.unwrap_or_default();
+            let embedded = embed_changed_pages(ctx, &tenant).await.unwrap_or_default();
             info!(id = %source_id, embedded = embedded.len(), "remove: re-embedded patched pages");
         }
     }

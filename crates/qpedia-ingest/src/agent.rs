@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use qpedia_core::{
     source::Source,
+    tenant::Tenant,
     wiki::{DiffBundle, DiffOp},
     SourceId,
 };
@@ -92,6 +93,7 @@ impl StagedOps {
 pub struct AgentDeps<'a> {
     pub llm: Arc<dyn LlmProvider>,
     pub wiki: &'a WikiRepo,
+    pub tenant: Tenant,
     pub blob: &'a BlobStore,
     pub db: &'a SqliteStore,
     pub embedder: Option<Arc<dyn Embedder>>,
@@ -340,7 +342,7 @@ async fn execute_tool(
                         .into_iter()
                         .next()
                         .unwrap_or_default();
-                    match weaviate.hybrid_search(query, &qv, limit).await {
+                    match weaviate.hybrid_search(&deps.tenant, query, &qv, limit).await {
                         Ok(h) if !h.is_empty() => h,
                         Ok(_) => deps.wiki.search_text(query, limit).await?,
                         Err(e) => {

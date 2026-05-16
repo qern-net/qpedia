@@ -9,6 +9,7 @@ use qpedia_core::{
     acl::Acl,
     job::{Job, JobKind, JobState},
     source::{Source, SourceStatus},
+    tenant::Tenant,
     Error, JobId, Result, SourceId,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -56,8 +57,15 @@ impl SqliteStore {
 #[async_trait]
 pub trait SourceStore: Send + Sync {
     async fn insert_source(&self, src: &Source) -> Result<()>;
+    /// Lookup without tenant scoping. Used by jobs that already trust the
+    /// id (it's only handed out within a tenant). For API reads see
+    /// `get_source_in`.
     async fn get_source(&self, id: &SourceId) -> Result<Option<Source>>;
-    async fn list_sources(&self, folder_prefix: &str, limit: i64) -> Result<Vec<Source>>;
+    /// Lookup that enforces tenant scoping. Returns None if the source
+    /// exists but belongs to another tenant — equivalent to NotFound for
+    /// info-leak avoidance.
+    async fn get_source_in(&self, tenant: &Tenant, id: &SourceId) -> Result<Option<Source>>;
+    async fn list_sources(&self, tenant: &Tenant, folder_prefix: &str, limit: i64) -> Result<Vec<Source>>;
     async fn update_status(&self, id: &SourceId, status: SourceStatus) -> Result<()>;
     async fn update_language(&self, id: &SourceId, language: &str) -> Result<()>;
     async fn update_classification(&self, id: &SourceId, classification: &serde_json::Value) -> Result<()>;
@@ -75,10 +83,11 @@ impl SourceStore for SqliteStore {
         let classification_json = src.classification.as_ref().map(|v| v.to_string());
         sqlx::query(
             "INSERT INTO sources \
-             (id, folder_path, filename, mime, sha256, size_bytes, acl_json, status, language, created_at, ingested_at, classification_json) \
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+             (id, tenant, folder_path, filename, mime, sha256, size_bytes, acl_json, status, language, created_at, ingested_at, classification_json) \
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(src.id.as_str())
+        .bind(src.tenant.as_str())
         .bind(&src.folder_path)
         .bind(&src.filename)
         .bind(&src.mime)
@@ -105,10 +114,21 @@ impl SourceStore for SqliteStore {
         row.map(row_to_source).transpose()
     }
 
-    async fn list_sources(&self, folder_prefix: &str, limit: i64) -> Result<Vec<Source>> {
+    async fn get_source_in(&self, tenant: &Tenant, id: &SourceId) -> Result<Option<Source>> {
+        let row = sqlx::query("SELECT * FROM sources WHERE id = ? AND tenant = ?")
+            .bind(id.as_str())
+            .bind(tenant.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        row.map(row_to_source).transpose()
+    }
+
+    async fn list_sources(&self, tenant: &Tenant, folder_prefix: &str, limit: i64) -> Result<Vec<Source>> {
         let rows = sqlx::query(
-            "SELECT * FROM sources WHERE folder_path LIKE ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM sources WHERE tenant = ? AND folder_path LIKE ? ORDER BY created_at DESC LIMIT ?",
         )
+        .bind(tenant.as_str())
         .bind(format!("{folder_prefix}%"))
         .bind(limit)
         .fetch_all(&self.pool)
@@ -163,6 +183,7 @@ impl SourceStore for SqliteStore {
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub tenant: Tenant,
     pub user_id: String,
     pub email: Option<String>,
     pub name: Option<String>,
@@ -181,6 +202,7 @@ impl SqliteStore {
     pub async fn create_session(
         &self,
         token_hash: &str,
+        tenant: &Tenant,
         user_id: &str,
         email: Option<&str>,
         name: Option<&str>,
@@ -191,10 +213,11 @@ impl SqliteStore {
         let expires = now + ttl_secs * 1000;
         sqlx::query(
             "INSERT OR REPLACE INTO sessions \
-             (token_hash, user_id, user_email, user_name, groups_json, expires_at, created_at) \
-             VALUES (?,?,?,?,?,?,?)",
+             (token_hash, tenant, user_id, user_email, user_name, groups_json, expires_at, created_at) \
+             VALUES (?,?,?,?,?,?,?,?)",
         )
         .bind(token_hash)
+        .bind(tenant.as_str())
         .bind(user_id)
         .bind(email)
         .bind(name)
@@ -210,7 +233,7 @@ impl SqliteStore {
     pub async fn lookup_session(&self, token_hash: &str) -> Result<Option<Session>> {
         let now = Utc::now().timestamp_millis();
         let row = sqlx::query(
-            "SELECT user_id, user_email, user_name, groups_json, expires_at \
+            "SELECT tenant, user_id, user_email, user_name, groups_json, expires_at \
              FROM sessions WHERE token_hash = ? AND expires_at > ?",
         )
         .bind(token_hash)
@@ -223,8 +246,10 @@ impl SqliteStore {
         let groups_json: String = row.try_get("groups_json").map_err(map_sqlx)?;
         let groups: Vec<String> = serde_json::from_str(&groups_json)?;
         let expires_ms: i64 = row.try_get("expires_at").map_err(map_sqlx)?;
+        let tenant: String = row.try_get("tenant").map_err(map_sqlx)?;
 
         Ok(Some(Session {
+            tenant: Tenant::from(tenant),
             user_id: row.try_get("user_id").map_err(map_sqlx)?,
             email: row.try_get("user_email").map_err(map_sqlx)?,
             name: row.try_get("user_name").map_err(map_sqlx)?,
@@ -252,14 +277,15 @@ impl SqliteStore {
         let now = Utc::now().timestamp_millis();
         sqlx::query(
             "INSERT OR REPLACE INTO auth_pending \
-             (state, pkce_verifier, nonce, redirect_after, created_at) \
-             VALUES (?,?,?,?,?)",
+             (state, pkce_verifier, nonce, redirect_after, created_at, tenant) \
+             VALUES (?,?,?,?,?,?)",
         )
         .bind(state)
         .bind(pkce_verifier)
         .bind(nonce)
         .bind(redirect_after)
         .bind(now)
+        .bind("default") // tenant inferred at callback time from claims
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -289,10 +315,12 @@ impl SqliteStore {
 
     // ---------- folder ACLs ----------
 
-    pub async fn list_folder_acls(&self) -> Result<Vec<(String, Acl, DateTime<Utc>, String)>> {
+    pub async fn list_folder_acls(&self, tenant: &Tenant) -> Result<Vec<(String, Acl, DateTime<Utc>, String)>> {
         let rows = sqlx::query(
-            "SELECT folder_path, acl_json, updated_at, updated_by FROM folder_acls ORDER BY folder_path",
+            "SELECT folder_path, acl_json, updated_at, updated_by FROM folder_acls \
+             WHERE tenant = ? ORDER BY folder_path",
         )
+        .bind(tenant.as_str())
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -308,13 +336,14 @@ impl SqliteStore {
         Ok(out)
     }
 
-    pub async fn set_folder_acl(&self, folder_path: &str, acl: &Acl, updated_by: &str) -> Result<()> {
+    pub async fn set_folder_acl(&self, tenant: &Tenant, folder_path: &str, acl: &Acl, updated_by: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         let acl_json = serde_json::to_string(acl)?;
         sqlx::query(
-            "INSERT OR REPLACE INTO folder_acls (folder_path, acl_json, updated_at, updated_by) \
-             VALUES (?,?,?,?)",
+            "INSERT OR REPLACE INTO folder_acls (tenant, folder_path, acl_json, updated_at, updated_by) \
+             VALUES (?,?,?,?,?)",
         )
+        .bind(tenant.as_str())
         .bind(normalize_folder(folder_path))
         .bind(acl_json)
         .bind(now)
@@ -325,8 +354,9 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn delete_folder_acl(&self, folder_path: &str) -> Result<()> {
-        sqlx::query("DELETE FROM folder_acls WHERE folder_path = ?")
+    pub async fn delete_folder_acl(&self, tenant: &Tenant, folder_path: &str) -> Result<()> {
+        sqlx::query("DELETE FROM folder_acls WHERE tenant = ? AND folder_path = ?")
+            .bind(tenant.as_str())
             .bind(normalize_folder(folder_path))
             .execute(&self.pool)
             .await
@@ -334,11 +364,11 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Find the closest ancestor ACL for `folder_path`. Returns Some when
-    /// any ancestor (or the path itself) has an explicit ACL row.
-    pub async fn resolve_folder_acl(&self, folder_path: &str) -> Result<Option<Acl>> {
+    /// Find the closest ancestor ACL for `folder_path` within `tenant`.
+    /// Returns Some when any ancestor (or the path itself) has an explicit
+    /// ACL row.
+    pub async fn resolve_folder_acl(&self, tenant: &Tenant, folder_path: &str) -> Result<Option<Acl>> {
         let normalized = normalize_folder(folder_path);
-        // Build the ancestor chain and look up the longest match.
         let mut candidates = vec![normalized.clone()];
         let mut cur = normalized.as_str();
         while let Some(idx) = cur.rfind('/') {
@@ -355,10 +385,11 @@ impl SqliteStore {
 
         let placeholders = candidates.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT folder_path, acl_json FROM folder_acls WHERE folder_path IN ({placeholders}) \
+            "SELECT folder_path, acl_json FROM folder_acls \
+             WHERE tenant = ? AND folder_path IN ({placeholders}) \
              ORDER BY length(folder_path) DESC LIMIT 1"
         );
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(&sql).bind(tenant.as_str());
         for c in &candidates {
             q = q.bind(c);
         }
@@ -388,6 +419,7 @@ fn row_to_source(row: sqlx::sqlite::SqliteRow) -> Result<Source> {
     let ingested_ms: Option<i64> = row.try_get("ingested_at").map_err(map_sqlx)?;
     let size: i64 = row.try_get("size_bytes").map_err(map_sqlx)?;
     let classification_json: Option<String> = row.try_get("classification_json").map_err(map_sqlx)?;
+    let tenant: String = row.try_get("tenant").map_err(map_sqlx)?;
 
     let acl: Acl = serde_json::from_str(&acl_json)?;
     // Parse status enum by re-quoting JSON.
@@ -398,6 +430,7 @@ fn row_to_source(row: sqlx::sqlite::SqliteRow) -> Result<Source> {
 
     Ok(Source {
         id: SourceId::from(id),
+        tenant: Tenant::from(tenant),
         folder_path: row.try_get("folder_path").map_err(map_sqlx)?,
         filename: row.try_get("filename").map_err(map_sqlx)?,
         mime: row.try_get("mime").map_err(map_sqlx)?,

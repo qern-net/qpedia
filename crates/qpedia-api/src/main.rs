@@ -31,7 +31,7 @@ use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
     sqlite::{JobQueue, SourceStore},
     weaviate::weaviate_from_env,
-    SearchHit, SqliteStore, WikiRepo,
+    SearchHit, SqliteStore, WikiRepoStore,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let db = SqliteStore::open(&db_path).await?;
     let blob = BlobStore::open(&raw_root)?;
-    let wiki = WikiRepo::open_or_init(&wiki_root, author_name, author_email).await?;
+    let wiki_store = WikiRepoStore::new(&wiki_root, author_name, author_email);
     let extractors = Arc::new(ExtractorRegistry::with_default());
     let llm = provider_from_env()?;
     if llm.is_none() {
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     // Weaviate is optional: degrades to fs-grep if unset/unreachable.
     let weaviate = weaviate_from_env().await.map(Arc::new);
 
-    let ctx = IngestContext::new(db, blob, wiki, extractors, llm, embedder, weaviate);
+    let ctx = IngestContext::new(db, blob, wiki_store, extractors, llm, embedder, weaviate);
 
     let auth = AuthState::from_env().await?;
 
@@ -175,6 +175,7 @@ async fn auth_me(user: User) -> Json<Value> {
         "email": user.email,
         "name": user.name,
         "groups": user.groups,
+        "tenant": user.tenant.as_str(),
         "is_admin": user.is_admin(),
     }))
 }
@@ -220,8 +221,7 @@ async fn list_sources(
 ) -> Result<Json<Vec<Source>>, ApiError> {
     let folder = q.folder.unwrap_or_else(|| "/".into());
     let limit = q.limit.unwrap_or(100).min(1000);
-    // Over-fetch slightly so post-filtering still returns a useful page.
-    let raw = s.ctx.db.list_sources(&folder, limit * 5).await?;
+    let raw = s.ctx.db.list_sources(&user.tenant, &folder, limit * 5).await?;
     let mut filtered = filter_sources(&user, raw);
     filtered.truncate(limit as usize);
     Ok(Json(filtered))
@@ -232,7 +232,7 @@ async fn get_source(
     user: User,
     Path(id): Path<String>,
 ) -> Result<Json<Source>, ApiError> {
-    match s.ctx.db.get_source(&SourceId::from(id)).await? {
+    match s.ctx.db.get_source_in(&user.tenant, &SourceId::from(id)).await? {
         Some(src) if user.can_read(&src.acl) => Ok(Json(src)),
         Some(_) => Err(ApiError::NotFound), // info-leak avoidance: 404 not 403
         None => Err(ApiError::NotFound),
@@ -247,7 +247,7 @@ async fn delete_source(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let sid = SourceId::from(id);
-    let Some(existing) = s.ctx.db.get_source(&sid).await? else {
+    let Some(existing) = s.ctx.db.get_source_in(&user.tenant, &sid).await? else {
         return Err(ApiError::NotFound);
     };
     if !user.can_read(&existing.acl) {
@@ -273,12 +273,12 @@ struct WikiListQuery {
 
 async fn list_wiki_pages(
     State(s): State<AppState>,
+    user: User,
     Query(q): Query<WikiListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let prefix = q.prefix.unwrap_or_default();
-    let pages = s
-        .ctx
-        .wiki
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let pages = wiki
         .list_pages(&prefix)
         .await
         .map_err(ApiError::Internal)?;
@@ -297,16 +297,14 @@ async fn search_wiki(
     Query(q): Query<WikiSearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = q.limit.unwrap_or(10).min(50);
-    let (mode, hits) = run_search(&s, &q.q, limit * 3).await?;
+    let (mode, hits) = run_search(&s, &user, &q.q, limit * 3).await?;
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
 
-    // Filter by ACL: per hit, parse frontmatter source_ids and check union.
     let mut allowed = Vec::with_capacity(hits.len());
     for h in hits {
-        if let Some(content) = s.ctx.wiki.read_page(&h.path).await.ok().flatten() {
+        if let Some(content) = wiki.read_page(&h.path).await.ok().flatten() {
             let source_ids = parse_source_ids(&content);
-            let acl = effective_wiki_acl(&s.ctx.db, &source_ids).await;
-            // Pages with no source_ids are top-level system pages (index, log,
-            // QPEDIA) — readable by everyone.
+            let acl = effective_wiki_acl(&s.ctx.db, &user.tenant, &source_ids).await;
             if source_ids.is_empty() || user.can_read(&acl) {
                 allowed.push(h);
                 if allowed.len() >= limit as usize { break; }
@@ -339,7 +337,12 @@ fn parse_source_ids(content: &str) -> Vec<String> {
     out
 }
 
-async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static str, Vec<SearchHit>), ApiError> {
+async fn run_search(
+    s: &AppState,
+    user: &User,
+    query: &str,
+    limit: usize,
+) -> Result<(&'static str, Vec<SearchHit>), ApiError> {
     if let (Some(embedder), Some(weaviate)) = (&s.ctx.embedder, &s.ctx.weaviate) {
         let qv = embedder
             .embed(&[query])
@@ -348,13 +351,14 @@ async fn run_search(s: &AppState, query: &str, limit: usize) -> Result<(&'static
             .into_iter()
             .next()
             .unwrap_or_default();
-        match weaviate.hybrid_search(query, &qv, limit).await {
+        match weaviate.hybrid_search(&user.tenant, query, &qv, limit).await {
             Ok(h) if !h.is_empty() => return Ok(("hybrid", h)),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "weaviate search failed; falling back"),
         }
     }
-    let hits = s.ctx.wiki.search_text(query, limit).await.map_err(ApiError::Internal)?;
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let hits = wiki.search_text(query, limit).await.map_err(ApiError::Internal)?;
     Ok(("filesystem", hits))
 }
 
@@ -362,10 +366,10 @@ async fn enqueue_lint(State(s): State<AppState>, user: User) -> Result<Json<Valu
     if !user.is_admin() {
         return Err(ApiError::Forbidden);
     }
-    let job = lint_job().map_err(ApiError::Internal)?;
+    let job = lint_job(&user.tenant).map_err(ApiError::Internal)?;
     let job_id = job.id.to_string();
     s.ctx.db.enqueue(&job).await?;
-    Ok(Json(json!({"job_id": job_id, "kind": "lint", "state": "queued"})))
+    Ok(Json(json!({"job_id": job_id, "kind": "lint", "tenant": user.tenant.as_str(), "state": "queued"})))
 }
 
 #[derive(Deserialize)]
@@ -389,7 +393,7 @@ async fn list_folder_acls(
     let rows = s
         .ctx
         .db
-        .list_folder_acls()
+        .list_folder_acls(&user.tenant)
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
     let items: Vec<Value> = rows
@@ -417,7 +421,7 @@ async fn set_folder_acl(
     let acl = Acl::from_iter(body.acl.iter().cloned());
     s.ctx
         .db
-        .set_folder_acl(&body.folder_path, &acl, &user.id)
+        .set_folder_acl(&user.tenant, &body.folder_path, &acl, &user.id)
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
     s.ctx
@@ -442,7 +446,7 @@ async fn delete_folder_acl(
     }
     s.ctx
         .db
-        .delete_folder_acl(&q.folder_path)
+        .delete_folder_acl(&user.tenant, &q.folder_path)
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
     s.ctx
@@ -456,7 +460,8 @@ async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<
     if !user.is_admin() {
         return Err(ApiError::Forbidden);
     }
-    match s.ctx.wiki.read_page("_meta/lint.json").await {
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    match wiki.read_page("_meta/lint.json").await {
         Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
             Ok(v) => Ok(Json(v)),
             Err(_) => Ok(Json(json!({"raw": text}))),
@@ -475,13 +480,15 @@ async fn chat(
         ApiError::Bad("chat requires an LLM provider — set ANTHROPIC_API_KEY or OPENAI_API_KEY".into())
     })?;
 
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
     let retriever = Retriever {
         embedder: s.ctx.embedder.clone(),
         weaviate: s.ctx.weaviate.clone(),
-        wiki: s.ctx.wiki.clone(),
+        wiki,
         db: s.ctx.db.clone(),
         llm,
         user_groups: user.groups.clone(),
+        tenant: user.tenant.clone(),
     };
 
     let event_stream = retriever.chat(req).map(|ev| {
@@ -513,14 +520,15 @@ async fn get_wiki_page(
 ) -> Result<axum::response::Response, ApiError> {
     use axum::http::header;
     use axum::response::IntoResponse as _;
-    let content = match s.ctx.wiki.read_page(&path).await {
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let content = match wiki.read_page(&path).await {
         Ok(Some(c)) => c,
         Ok(None) => return Err(ApiError::NotFound),
         Err(e) => return Err(ApiError::Internal(e)),
     };
     let source_ids = parse_source_ids(&content);
     if !source_ids.is_empty() {
-        let acl = effective_wiki_acl(&s.ctx.db, &source_ids).await;
+        let acl = effective_wiki_acl(&s.ctx.db, &user.tenant, &source_ids).await;
         if !user.can_read(&acl) {
             return Err(ApiError::NotFound);
         }
@@ -572,12 +580,13 @@ async fn upload_source(
     // ACL resolution: prefer a folder-level ACL (closest ancestor wins);
     // fall back to the uploader's groups so single-user / dev mode keeps
     // working without configuration.
-    let upload_acl = match s.ctx.db.resolve_folder_acl(&folder_path).await? {
+    let upload_acl = match s.ctx.db.resolve_folder_acl(&user.tenant, &folder_path).await? {
         Some(acl) => acl,
         None => Acl::from_iter(user.groups.iter().cloned()),
     };
     let src = Source {
         id: id.clone(),
+        tenant: user.tenant.clone(),
         folder_path,
         filename: filename.clone(),
         mime: mime.clone(),

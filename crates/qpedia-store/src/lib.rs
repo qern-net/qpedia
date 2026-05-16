@@ -10,5 +10,5 @@ pub mod blob;
 
 pub use sqlite::{SqliteStore, SourceStore, JobQueue};
 pub use weaviate::WeaviateStore;
-pub use wikirepo::{WikiRepo, SearchHit};
+pub use wikirepo::{WikiRepo, WikiRepoStore, SearchHit};
 pub use blob::{BlobStore, BlobStorage, BlobKind};

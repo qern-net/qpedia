@@ -8,7 +8,7 @@
 use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use qpedia_core::{source::SourceStatus, SourceId};
+use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
 use qpedia_store::{sqlite::SourceStore, weaviate::WikiPageRecord};
 use tracing::{info, warn};
 
@@ -22,9 +22,15 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         return Ok(());
     }
 
+    let src = ctx
+        .db
+        .get_source(source_id)
+        .await?
+        .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
+
     ctx.db.update_status(source_id, SourceStatus::Embedding).await?;
 
-    let touched = embed_changed_pages(ctx).await?;
+    let touched = embed_changed_pages(ctx, &src.tenant).await?;
     if touched.is_empty() {
         warn!(id = %source_id, "embed: no markdown pages touched in HEAD");
     }
@@ -35,7 +41,7 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
             "qpedia-bot",
             "wiki.embedded",
             Some(source_id.as_str()),
-            Some(&serde_json::json!({"pages": touched})),
+            Some(&serde_json::json!({"pages": touched, "tenant": src.tenant.as_str()})),
         )
         .await?;
 
@@ -49,12 +55,13 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 ///
 /// Returns the list of paths embedded. No-ops cleanly when embedder or
 /// Weaviate is missing.
-pub async fn embed_changed_pages(ctx: &IngestContext) -> Result<Vec<String>> {
+pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result<Vec<String>> {
     let (Some(embedder), Some(weaviate)) = (ctx.embedder.as_ref(), ctx.weaviate.as_ref()) else {
         return Ok(Vec::new());
     };
 
-    let touched = ctx.wiki.changed_in_head().await?;
+    let wiki = ctx.wiki_store.get(tenant).await?;
+    let touched = wiki.changed_in_head().await?;
     if touched.is_empty() {
         return Ok(touched);
     }
@@ -63,7 +70,7 @@ pub async fn embed_changed_pages(ctx: &IngestContext) -> Result<Vec<String>> {
     let mut embed_inputs: Vec<String> = Vec::new();
 
     for path in &touched {
-        let Some(content) = ctx.wiki.read_page(path).await? else { continue };
+        let Some(content) = wiki.read_page(path).await? else { continue };
         let fm = parse_frontmatter(&content);
         let title = fm.title.clone().unwrap_or_else(|| path.clone());
         let body = strip_frontmatter(&content);
@@ -93,6 +100,7 @@ pub async fn embed_changed_pages(ctx: &IngestContext) -> Result<Vec<String>> {
     for ((path, title, content, fm), vector) in records.into_iter().zip(vectors) {
         let record = WikiPageRecord {
             page_id: fm.id.unwrap_or_else(|| path.clone()),
+            tenant: tenant.clone(),
             path: path.clone(),
             kind: fm.kind.unwrap_or_default(),
             title,

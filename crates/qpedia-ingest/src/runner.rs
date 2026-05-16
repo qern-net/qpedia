@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
     job::{Job, JobKind, JobState},
+    tenant::Tenant,
     JobId, SourceId,
 };
 use qpedia_embed::Embedder;
@@ -15,7 +16,7 @@ use qpedia_store::{
     blob::BlobStore,
     sqlite::JobQueue,
     weaviate::WeaviateStore,
-    SqliteStore, WikiRepo,
+    SqliteStore, WikiRepoStore,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -26,7 +27,9 @@ use tracing::{error, info, warn};
 pub struct IngestContext {
     pub db: SqliteStore,
     pub blob: BlobStore,
-    pub wiki: WikiRepo,
+    /// Per-tenant wiki repo factory. Handlers resolve `wiki_store.get(&tenant).await?`
+    /// for the tenant of the source / job they're processing.
+    pub wiki_store: WikiRepoStore,
     pub extractors: Arc<ExtractorRegistry>,
     pub llm: Option<Arc<dyn LlmProvider>>,
     pub embedder: Option<Arc<dyn Embedder>>,
@@ -37,19 +40,24 @@ impl IngestContext {
     pub fn new(
         db: SqliteStore,
         blob: BlobStore,
-        wiki: WikiRepo,
+        wiki_store: WikiRepoStore,
         extractors: Arc<ExtractorRegistry>,
         llm: Option<Arc<dyn LlmProvider>>,
         embedder: Option<Arc<dyn Embedder>>,
         weaviate: Option<Arc<WeaviateStore>>,
     ) -> Self {
-        Self { db, blob, wiki, extractors, llm, embedder, weaviate }
+        Self { db, blob, wiki_store, extractors, llm, embedder, weaviate }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestPayload {
     pub source_id: SourceId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LintPayload {
+    pub tenant: Tenant,
 }
 
 /// Build an Ingest job for a given source.
@@ -69,13 +77,13 @@ pub fn ingest_job(source_id: &SourceId) -> Result<Job> {
     })
 }
 
-/// Build a Lint job (no payload — operates on the whole wiki).
-pub fn lint_job() -> Result<Job> {
+/// Build a Lint job for a tenant's wiki.
+pub fn lint_job(tenant: &Tenant) -> Result<Job> {
     let now = Utc::now();
     Ok(Job {
         id: JobId::new(),
         kind: JobKind::Lint,
-        payload: serde_json::Value::Null,
+        payload: serde_json::to_value(LintPayload { tenant: tenant.clone() })?,
         state: JobState::Queued,
         attempt: 0,
         max_attempts: 3,
@@ -107,7 +115,7 @@ impl JobRunner {
             llm = self.ctx.llm.as_ref().map(|p| p.name()),
             embedder = self.ctx.embedder.as_ref().map(|e| e.name()),
             weaviate = self.ctx.weaviate.is_some(),
-            wiki = %self.ctx.wiki.root().display(),
+            wiki_root = %self.ctx.wiki_store.root().display(),
             "job runner started"
         );
         loop {
@@ -140,7 +148,10 @@ impl JobRunner {
                 let p: handlers::remove::RemovePayload = serde_json::from_value(job.payload)?;
                 handlers::remove::run(&self.ctx, &p.source_id).await
             }
-            JobKind::Lint => handlers::lint::run(&self.ctx).await,
+            JobKind::Lint => {
+                let p: LintPayload = serde_json::from_value(job.payload)?;
+                handlers::lint::run(&self.ctx, &p.tenant).await
+            }
             JobKind::Reembed => {
                 warn!(job = %job.id, "Reembed handler not yet implemented");
                 Ok(())

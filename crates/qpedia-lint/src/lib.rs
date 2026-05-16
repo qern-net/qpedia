@@ -11,7 +11,7 @@
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use qpedia_core::SourceId;
+use qpedia_core::{tenant::Tenant, SourceId};
 use qpedia_llm::{current_model, CompleteReq, LlmProvider};
 use qpedia_store::{sqlite::SourceStore, weaviate::WeaviateStore, SqliteStore, WikiRepo};
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,7 @@ pub struct Linter {
     pub db: SqliteStore,
     pub weaviate: Option<Arc<WeaviateStore>>,
     pub llm: Option<Arc<dyn LlmProvider>>,
+    pub tenant: Tenant,
 }
 
 impl Linter {
@@ -92,8 +93,9 @@ impl Linter {
         db: SqliteStore,
         weaviate: Option<Arc<WeaviateStore>>,
         llm: Option<Arc<dyn LlmProvider>>,
+        tenant: Tenant,
     ) -> Self {
-        Self { wiki, db, weaviate, llm }
+        Self { wiki, db, weaviate, llm, tenant }
     }
 
     pub async fn run(&self) -> Result<LintReport> {
@@ -178,7 +180,7 @@ impl Linter {
                 if SKIP_FROM_ORPHAN_CHECK.iter().any(|s| s == path) {
                     continue;
                 }
-                match weaviate.nearest_neighbor(path).await {
+                match weaviate.nearest_neighbor(&self.tenant, path).await {
                     Ok(Some((other, certainty))) if certainty >= DUPLICATE_CERTAINTY => {
                         let pair = sorted_pair(path, &other);
                         if seen_pairs.insert(pair.clone()) {

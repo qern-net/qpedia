@@ -1,4 +1,4 @@
-use crate::{acl::Acl, SourceId};
+use crate::{acl::Acl, tenant::Tenant, SourceId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub id: SourceId,
+    #[serde(default)]
+    pub tenant: Tenant,
     pub folder_path: String,
     pub filename: String,
     pub mime: String,

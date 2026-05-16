@@ -7,9 +7,12 @@
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use qpedia_core::wiki::{DiffBundle, DiffOp};
+use qpedia_core::{tenant::Tenant, wiki::{DiffBundle, DiffOp}};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 /// QPEDIA.md template — the schema/style guide loaded into every agent call.
@@ -330,6 +333,56 @@ fn walk_md(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
 /// Convenience helper for callers that want a current ISO-8601 timestamp string.
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// Manages one git repo per tenant. Lazy-initializes on first lookup so
+/// every tenant — including ones that materialize on a user's first
+/// sign-in — gets a fresh wiki without manual setup.
+#[derive(Clone)]
+pub struct WikiRepoStore {
+    root: PathBuf,
+    author_name: String,
+    author_email: String,
+    cache: Arc<Mutex<HashMap<String, WikiRepo>>>,
+}
+
+impl WikiRepoStore {
+    pub fn new(
+        root: impl AsRef<Path>,
+        author_name: impl Into<String>,
+        author_email: impl Into<String>,
+    ) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+            author_name: author_name.into(),
+            author_email: author_email.into(),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Open or initialize the wiki repo for `tenant`. Repos live under
+    /// `<root>/<tenant>/`, one git history per tenant. WikiRepo is
+    /// cheap-Clone (PathBuf + a couple of strings), so callers get
+    /// their own copy without needing Arc.
+    pub async fn get(&self, tenant: &Tenant) -> Result<WikiRepo> {
+        {
+            let guard = self.cache.lock().await;
+            if let Some(r) = guard.get(tenant.as_str()) {
+                return Ok(r.clone());
+            }
+        }
+        let path = self.root.join(tenant.as_str());
+        let repo = WikiRepo::open_or_init(&path, &self.author_name, &self.author_email).await?;
+        let mut guard = self.cache.lock().await;
+        guard
+            .entry(tenant.as_str().to_string())
+            .or_insert_with(|| repo.clone());
+        Ok(repo)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

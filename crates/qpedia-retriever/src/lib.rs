@@ -14,6 +14,7 @@
 
 use anyhow::{anyhow, Result};
 use futures::stream::{Stream, StreamExt};
+use qpedia_core::tenant::Tenant;
 use qpedia_embed::Embedder;
 use qpedia_llm::{
     current_model, CompleteReq, LlmProvider, Message, Role, ToolCall, ToolDef,
@@ -115,6 +116,8 @@ pub struct Retriever {
     /// Caller-provided groups. Empty = anonymous (admin-only ACL pages
     /// won't be readable). Set to ["admin"] for unrestricted access.
     pub user_groups: Vec<String>,
+    /// Tenant scope; flowed into Weaviate filters and ACL lookups.
+    pub tenant: Tenant,
 }
 
 // ---------- gathered page ----------
@@ -347,7 +350,7 @@ impl Retriever {
     async fn do_search(&self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
         if let (Some(emb), Some(wv)) = (&self.embedder, &self.weaviate) {
             let qv = emb.embed(&[query]).await?.into_iter().next().unwrap_or_default();
-            match wv.hybrid_search(query, &qv, k).await {
+            match wv.hybrid_search(&self.tenant, query, &qv, k).await {
                 Ok(h) if !h.is_empty() => return Ok(h),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "weaviate search failed; falling back"),
@@ -366,7 +369,7 @@ impl Retriever {
         }
         let mut acl: BTreeSet<String> = BTreeSet::new();
         for sid in source_ids {
-            if let Ok(Some(src)) = self.db.get_source(&sid.into()).await {
+            if let Ok(Some(src)) = self.db.get_source_in(&self.tenant, &sid.into()).await {
                 for g in src.acl.0.iter() {
                     acl.insert(g.clone());
                 }

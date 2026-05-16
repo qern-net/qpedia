@@ -23,11 +23,14 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         .await?
         .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
 
+    let wiki = ctx.wiki_store.get(&src.tenant).await?;
+
     ctx.db.update_status(source_id, SourceStatus::AgentDistilling).await?;
 
     let deps = AgentDeps {
         llm: llm.clone(),
-        wiki: &ctx.wiki,
+        wiki: &wiki,
+        tenant: src.tenant.clone(),
         blob: &ctx.blob,
         db: &ctx.db,
         embedder: ctx.embedder.clone(),
@@ -41,7 +44,7 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         return Ok(());
     }
 
-    let report = validator::validate(&bundle, &ctx.wiki).await?;
+    let report = validator::validate(&bundle, &wiki).await?;
     if !report.errors.is_empty() {
         let summary: String = report
             .errors
@@ -57,7 +60,7 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         ));
     }
 
-    let sha = ctx.wiki.commit_bundle(&bundle).await?;
+    let sha = wiki.commit_bundle(&bundle).await?;
 
     ctx.db.update_status(source_id, SourceStatus::Committed).await?;
     ctx.db

@@ -9,4 +9,4 @@ pub mod validator;
 
 pub use handlers::remove::remove_job;
 pub use pipeline::IngestPipeline;
-pub use runner::{ingest_job, lint_job, IngestContext, IngestPayload, JobRunner};
+pub use runner::{ingest_job, lint_job, IngestContext, IngestPayload, JobRunner, LintPayload};

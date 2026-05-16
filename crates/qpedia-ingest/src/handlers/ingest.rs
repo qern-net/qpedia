@@ -20,7 +20,7 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
             .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
         let before = src.status;
 
-        info!(id = %source_id, status = ?src.status, "ingest tick");
+        info!(id = %source_id, tenant = %src.tenant, status = ?src.status, "ingest tick");
 
         match src.status {
             SourceStatus::Pending | SourceStatus::Extracting | SourceStatus::Failed => {
@@ -55,7 +55,6 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
             }
         }
 
-        // Guard against infinite loops if a phase didn't advance status.
         let after = ctx
             .db
             .get_source(source_id)

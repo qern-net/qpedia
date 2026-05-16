@@ -7,6 +7,7 @@
 
 use crate::wikirepo::SearchHit;
 use anyhow::{anyhow, Context, Result};
+use qpedia_core::tenant::Tenant;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -62,6 +63,7 @@ impl WeaviateStore {
             "vectorIndexType": "hnsw",
             "properties": [
                 {"name": "page_id",    "dataType": ["text"]},
+                {"name": "tenant",     "dataType": ["text"]},
                 {"name": "path",       "dataType": ["text"]},
                 {"name": "kind",       "dataType": ["text"]},
                 {"name": "title",      "dataType": ["text"]},
@@ -83,9 +85,10 @@ impl WeaviateStore {
     }
 
     /// Insert or replace a page. Uses a deterministic UUID derived from
-    /// the page path so reingests target the same object.
+    /// `(tenant, path)` so reingests target the same object and different
+    /// tenants get distinct objects even for identical paths.
     pub async fn upsert_page(&self, page: &WikiPageRecord, vector: Vec<f32>) -> Result<()> {
-        let id = page_uuid(&page.path);
+        let id = page_uuid_for(&page.tenant, &page.path);
         // Weaviate uses PUT for replace-by-id; falls back to POST when missing.
         let put_url = format!("{}/v1/objects/{CLASS_WIKI_PAGE}/{id}", self.base_url);
         let body = serde_json::json!({
@@ -93,6 +96,7 @@ impl WeaviateStore {
             "id": id.to_string(),
             "properties": {
                 "page_id": page.page_id,
+                "tenant": page.tenant.as_str(),
                 "path": page.path,
                 "kind": page.kind,
                 "title": page.title,
@@ -124,16 +128,17 @@ impl WeaviateStore {
         Err(anyhow!("weaviate PUT object ({status}): {text}"))
     }
 
-    /// Find the nearest neighbor of a page by its embedding vector,
-    /// excluding the page itself. Returns (path, certainty) where
-    /// certainty is Weaviate's 0..1 cosine-similarity proxy.
-    pub async fn nearest_neighbor(&self, path: &str) -> Result<Option<(String, f32)>> {
-        let id = page_uuid(path);
+    /// Find the nearest neighbor of a page within `tenant`, excluding the
+    /// page itself. Returns (path, certainty).
+    pub async fn nearest_neighbor(&self, tenant: &Tenant, path: &str) -> Result<Option<(String, f32)>> {
+        let id = page_uuid_for(tenant, path);
+        let tenant_esc = tenant.as_str().replace('"', "\\\"");
         let gql = format!(
             r#"{{
               Get {{
                 {class}(
                   nearObject: {{ id: "{id}" }}
+                  where: {{ path: ["tenant"], operator: Equal, valueText: "{t}" }}
                   limit: 2
                 ) {{
                   path
@@ -142,6 +147,7 @@ impl WeaviateStore {
               }}
             }}"#,
             class = CLASS_WIKI_PAGE,
+            t = tenant_esc,
         );
         let url = format!("{}/v1/graphql", self.base_url);
         let resp = self
@@ -181,8 +187,8 @@ impl WeaviateStore {
         Ok(None)
     }
 
-    pub async fn delete_page(&self, path: &str) -> Result<()> {
-        let id = page_uuid(path);
+    pub async fn delete_page(&self, tenant: &Tenant, path: &str) -> Result<()> {
+        let id = page_uuid_for(tenant, path);
         let url = format!("{}/v1/objects/{CLASS_WIKI_PAGE}/{id}", self.base_url);
         let resp = self.client.delete(&url).send().await?;
         if resp.status().is_success() || resp.status().as_u16() == 404 {
@@ -191,28 +197,29 @@ impl WeaviateStore {
         Err(anyhow!("weaviate DELETE ({}): {}", resp.status(), resp.text().await.unwrap_or_default()))
     }
 
-    /// Hybrid (BM25 + vector) search. `alpha` is vector weight (0..=1);
-    /// 0.7 by default matches DESIGN.md §2.4.
+    /// Hybrid (BM25 + vector) search scoped to a tenant. `alpha` is the
+    /// vector weight (0..=1); 0.7 by default per DESIGN.md §2.4.
     pub async fn hybrid_search(
         &self,
+        tenant: &Tenant,
         query: &str,
         vector: &[f32],
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         let alpha = 0.7;
-        // Inline the vector since GraphQL variables for arrays can be tricky
-        // across server versions; this stays explicit and version-stable.
         let vec_str = vector
             .iter()
             .map(|f| format!("{f:.6}"))
             .collect::<Vec<_>>()
             .join(",");
         let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
+        let tenant_esc = tenant.as_str().replace('"', "\\\"");
         let gql = format!(
             r#"{{
               Get {{
                 {class}(
                   hybrid: {{ query: "{q}", vector: [{vec}], alpha: {a} }}
+                  where: {{ path: ["tenant"], operator: Equal, valueText: "{t}" }}
                   limit: {limit}
                 ) {{
                   path
@@ -226,6 +233,7 @@ impl WeaviateStore {
             q = escaped,
             vec = vec_str,
             a = alpha,
+            t = tenant_esc,
             limit = limit,
         );
         let url = format!("{}/v1/graphql", self.base_url);
@@ -264,8 +272,12 @@ impl WeaviateStore {
     }
 }
 
-fn page_uuid(path: &str) -> Uuid {
-    Uuid::new_v5(&NAMESPACE, path.as_bytes())
+/// Deterministic UUID v5 from `(tenant, path)` so the same logical page
+/// always maps to the same Weaviate object across reingests, and so
+/// different tenants get distinct objects even for identical paths.
+fn page_uuid_for(tenant: &Tenant, path: &str) -> Uuid {
+    let key = format!("{}/{}", tenant.as_str(), path);
+    Uuid::new_v5(&NAMESPACE, key.as_bytes())
 }
 
 fn snippet_from(content: &str, query: &str) -> String {
@@ -282,6 +294,7 @@ fn snippet_from(content: &str, query: &str) -> String {
 #[derive(Debug, Clone, Serialize)]
 pub struct WikiPageRecord {
     pub page_id: String,
+    pub tenant: Tenant,
     pub path: String,
     pub kind: String,
     pub title: String,

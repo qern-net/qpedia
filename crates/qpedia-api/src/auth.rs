@@ -27,7 +27,7 @@ use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
-use qpedia_core::{acl::Acl, source::Source};
+use qpedia_core::{acl::Acl, source::Source, tenant::Tenant};
 use qpedia_store::{sqlite::SourceStore, SqliteStore};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -130,15 +130,21 @@ pub struct User {
     pub email: Option<String>,
     pub name: Option<String>,
     pub groups: Vec<String>,
+    pub tenant: Tenant,
 }
 
 impl User {
     pub fn dev_admin() -> Self {
+        let tenant = std::env::var("QPEDIA_DEV_TENANT")
+            .ok()
+            .map(Tenant::new)
+            .unwrap_or_else(Tenant::default_tenant);
         Self {
             id: "dev:admin".into(),
             email: Some("admin@dev.local".into()),
             name: Some("dev admin".into()),
             groups: vec!["admin".into()],
+            tenant,
         }
     }
     pub fn is_admin(&self) -> bool {
@@ -156,11 +162,12 @@ impl User {
 }
 
 /// Compute the effective ACL for a wiki page — union of ACLs of every
-/// Source it cites in frontmatter `source_ids`.
-pub async fn effective_wiki_acl(db: &SqliteStore, source_ids: &[String]) -> Acl {
+/// Source (within the user's tenant) that the page cites in frontmatter
+/// `source_ids`. Cross-tenant source references contribute nothing.
+pub async fn effective_wiki_acl(db: &SqliteStore, tenant: &Tenant, source_ids: &[String]) -> Acl {
     let mut union: BTreeSet<String> = BTreeSet::new();
     for sid in source_ids {
-        if let Ok(Some(src)) = db.get_source(&sid.clone().into()).await {
+        if let Ok(Some(src)) = db.get_source_in(tenant, &sid.clone().into()).await {
             for g in src.acl.0.iter() {
                 union.insert(g.clone());
             }
@@ -247,6 +254,7 @@ where
                     email: session.email,
                     name: session.name,
                     groups: session.groups,
+                    tenant: session.tenant,
                 })
             }
         }
@@ -367,11 +375,18 @@ pub async fn oidc_callback(
     // possible, otherwise look in standard claims by JSON-roundtrip.
     let groups = extract_groups(claims, &cfg.groups_claim);
 
+    // Tenant: read from a configurable claim (default 'tenant_id'); fall
+    // back to 'default' if missing.
+    let tenant_claim = std::env::var("QPEDIA_OIDC_TENANT_CLAIM")
+        .unwrap_or_else(|_| "tenant_id".into());
+    let tenant = extract_tenant(claims, &tenant_claim);
+
     // Mint a session.
     let token = random_token(32);
     let token_hash = hash_token(&token);
     db.create_session(
         &token_hash,
+        &tenant,
         &user_id,
         email.as_deref(),
         name.as_deref(),
@@ -385,8 +400,22 @@ pub async fn oidc_callback(
     headers.append(axum::http::header::SET_COOKIE, set_session_cookie(&token, SESSION_TTL_SECS));
 
     let dest = pending.redirect_after.unwrap_or_else(|| "/".into());
-    info!(user = %user_id, groups = ?groups, "oidc login");
+    info!(user = %user_id, tenant = %tenant, groups = ?groups, "oidc login");
     Ok((headers, Redirect::to(&dest)))
+}
+
+fn extract_tenant(
+    claims: &openidconnect::IdTokenClaims<openidconnect::EmptyAdditionalClaims, openidconnect::core::CoreGenderClaim>,
+    claim: &str,
+) -> Tenant {
+    let v = match serde_json::to_value(claims) {
+        Ok(v) => v,
+        Err(_) => return Tenant::default_tenant(),
+    };
+    if let Some(s) = v.get(claim).and_then(|x| x.as_str()) {
+        return Tenant::new(s);
+    }
+    Tenant::default_tenant()
 }
 
 pub async fn oidc_logout(
