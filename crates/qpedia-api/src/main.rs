@@ -100,6 +100,41 @@ async fn main() -> anyhow::Result<()> {
     let runner = JobRunner::new(ctx.clone(), "worker-1");
     tokio::spawn(runner.run());
 
+    // Connector scheduler: every QPEDIA_SYNC_INTERVAL_SECS (default 300),
+    // enqueue a Sync job for each enabled connector whose last_run_at is
+    // older than QPEDIA_SYNC_STALE_SECS (default 900). Idempotent — if a
+    // sync is already pending for a connector, the next due tick simply
+    // queues another, which the runner serializes one-per-connector via
+    // the connector's own update_connector_cursor on completion.
+    {
+        let sched_ctx = ctx.clone();
+        let tick_secs: u64 = std::env::var("QPEDIA_SYNC_INTERVAL_SECS")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+        let stale_ms: i64 = std::env::var("QPEDIA_SYNC_STALE_SECS")
+            .ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(900) * 1000;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+            tick.tick().await; // skip the immediate first fire
+            loop {
+                tick.tick().await;
+                match sched_ctx.db.due_connectors(stale_ms, 50).await {
+                    Ok(due) if !due.is_empty() => {
+                        for c in due {
+                            if let Ok(job) = qpedia_ingest::sync_job(&c.id) {
+                                if let Err(e) = sched_ctx.db.enqueue(&job).await {
+                                    tracing::warn!(connector = %c.name, error = %e, "scheduler: enqueue failed");
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "scheduler: due_connectors failed"),
+                }
+            }
+        });
+        info!(tick_secs, stale_ms, "connector sync scheduler started");
+    }
+
     let state = AppState { ctx, auth };
 
     let bind: SocketAddr = std::env::var("QPEDIA_BIND")
