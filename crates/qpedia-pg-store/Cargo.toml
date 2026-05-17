@@ -1,0 +1,25 @@
+[package]
+name = "qpedia-pg-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+qpedia-core.workspace = true
+qpedia-connectors.workspace = true
+sqlx = { workspace = true, features = ["postgres"] }
+pgvector.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+url.workspace = true
+bytes.workspace = true
+uuid.workspace = true

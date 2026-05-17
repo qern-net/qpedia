@@ -99,9 +99,30 @@ pub fn sync_job(connector_id: &str) -> Result<Job> {
     })
 }
 
-/// Build a Lint job for a tenant's wiki.
-pub fn lint_job(tenant: &Tenant) -> Result<Job> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReembedPayload {
+    pub tenant: Tenant,
+}
+
+/// Build a Reembed job: clear Weaviate for the tenant and rebuild from git.
+pub fn reembed_job(tenant: &Tenant) -> Result<Job> {
     let now = Utc::now();
+    Ok(Job {
+        id: JobId::new(),
+        kind: JobKind::Reembed,
+        payload: serde_json::to_value(ReembedPayload { tenant: tenant.clone() })?,
+        state: JobState::Queued,
+        attempt: 0,
+        max_attempts: 3,
+        next_run_at: now,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// Build a Lint job for a tenant's wiki.
+pub fn lint_job(tenant: &Tenant) -> Result<Job> {    let now = Utc::now();
     Ok(Job {
         id: JobId::new(),
         kind: JobKind::Lint,
@@ -175,8 +196,8 @@ impl JobRunner {
                 handlers::lint::run(&self.ctx, &p.tenant).await
             }
             JobKind::Reembed => {
-                warn!(job = %job.id, "Reembed handler not yet implemented");
-                Ok(())
+                let p: ReembedPayload = serde_json::from_value(job.payload)?;
+                handlers::reembed::run(&self.ctx, &p.tenant).await
             }
             JobKind::Sync => {
                 let p: SyncPayload = serde_json::from_value(job.payload)?;

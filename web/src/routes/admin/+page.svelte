@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import {
     deleteFolderAcl,
+    enqueueReembed,
     getMe,
     listFolderAcls,
     listStalledSources,
@@ -25,6 +26,11 @@
   let stalledLoaded = $state(false);
   let resuming = $state(false);
   let resumeMsg = $state<string | null>(null);
+
+  // Reembed state
+  let reembedding = $state(false);
+  let reembedMsg = $state<string | null>(null);
+  let reembedError = $state<string | null>(null);
 
   // New / edit form state.
   let formPath = $state('/');
@@ -114,6 +120,23 @@
     }
   }
 
+  async function onReembed() {
+    if (!confirm(
+      'Rebuild Weaviate search index from the git wiki repo?\n\n' +
+      'This clears all existing vectors for this tenant and re-embeds every page. ' +
+      'Search will be unavailable until the job completes. Continue?'
+    )) return;
+    reembedding = true; reembedMsg = null; reembedError = null;
+    try {
+      const r = await enqueueReembed();
+      reembedMsg = `Reembed job queued (${r.job_id.slice(0, 10)}…). Search will rebuild in the background.`;
+    } catch (e: any) {
+      reembedError = String(e?.message ?? e);
+    } finally {
+      reembedding = false;
+    }
+  }
+
   function fmtDate(s: string) {
     return s ? new Date(s).toLocaleString() : '—';
   }
@@ -186,6 +209,30 @@
             </tbody>
           </table>
         </div>
+      {/if}
+    </div>
+
+    <!-- ── Rebuild Search Index ── -->
+    <div class="card">
+      <div class="row" style="margin-bottom: 8px;">
+        <div>
+          <h2 style="margin: 0 0 4px;">Rebuild Search Index</h2>
+          <p class="muted" style="margin: 0; font-size: 12px;">
+            Clears Weaviate and re-embeds every page from the git wiki repo.
+            Use when search is broken, the embedding model changed, or Weaviate data was lost.
+            Git is the source of truth.
+          </p>
+        </div>
+        <span class="spacer"></span>
+        <button onclick={onReembed} disabled={reembedding} style="white-space: nowrap;">
+          {reembedding ? 'Queuing…' : 'Rebuild from git'}
+        </button>
+      </div>
+      {#if reembedError}
+        <div style="color: var(--err); font-size: 12px;">{reembedError}</div>
+      {/if}
+      {#if reembedMsg}
+        <div style="color: var(--ok); font-size: 12px;">{reembedMsg}</div>
       {/if}
     </div>
 

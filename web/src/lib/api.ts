@@ -133,6 +133,10 @@ export async function resumeStalledSources(): Promise<{ enqueued: number }> {
   return json(await fetch('/api/v1/admin/sources/resume', { method: 'POST' }));
 }
 
+export async function enqueueReembed(): Promise<{ job_id: string; kind: string }> {
+  return json(await fetch('/api/v1/admin/reembed', { method: 'POST' }));
+}
+
 export async function listWikiPages(prefix: string = ''): Promise<{ prefix: string; pages: string[] }> {
   return json(await fetch(`/api/v1/wiki/list?prefix=${encodeURIComponent(prefix)}`));
 }

@@ -6,20 +6,48 @@ services:
     image: qpedia/app:${QPEDIA_VERSION:-dev}
     env_file: .env
     volumes:
-      - wiki-data:/data/wiki
-      - raw-data:/data/raw
-      - sqlite-data:/data/sqlite
-      - models-cache:/data/models
+      # Bind mounts to ./data/ so wiki, raw docs, and the DB are visible on
+      # the host, survive `docker compose down` (including -v), and can be
+      # backed up with a simple rsync or git bundle.
+      # The data/ directory is gitignored so these files never end up in the repo.
+      - ./data/wiki:/data/wiki
+      - ./data/raw:/data/raw
+      - ./data/sqlite:/data/sqlite
+      - ./data/models:/data/models
     ports:
       - "8080:8080"
     depends_on:
-      weaviate:
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: qpedia_admin
+      POSTGRES_PASSWORD: ${QPEDIA_DB_PASSWORD:-qpedia-dev}
+      POSTGRES_DB: qpedia
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qpedia_admin -d qpedia"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Legacy: kept under the `legacy` profile so existing deployments can run
+  # qpedia-migrate against it before tearing it down. Default `docker compose
+  # up` no longer starts it.
   weaviate:
+    profiles: [legacy]
     image: semitechnologies/weaviate:1.27.0
     volumes:
+      # Named volume for Weaviate — its internal format isn't useful to
+      # inspect directly, and it's fully rebuildable from the git wiki repo
+      # via a re-embed job.
       - weaviate-data:/var/lib/weaviate
     environment:
       PERSISTENCE_DATA_PATH: /var/lib/weaviate
@@ -39,6 +67,7 @@ services:
     build:
       context: ./sidecar/marker
     image: qpedia/marker:${QPEDIA_VERSION:-dev}
+    profiles: [marker]
     ports:
       - "18081:8000"
     volumes:
@@ -46,9 +75,9 @@ services:
     restart: unless-stopped
 
 volumes:
-  wiki-data:
-  raw-data:
-  sqlite-data:
-  models-cache:
+  # Postgres (canonical store) and marker model cache use named volumes —
+  # everything else is a bind mount to ./data/ above. Weaviate's named
+  # volume kept for one release so qpedia-migrate can read from it.
+  postgres-data:
   weaviate-data:
   marker-cache:

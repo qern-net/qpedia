@@ -251,6 +251,7 @@ GET    /api/v1/admin/sources/stalled    Sources stuck mid-pipeline
 POST   /api/v1/admin/sources/resume     Re-enqueue all stalled sources
 POST   /api/v1/admin/lint               Trigger lint job
 GET    /api/v1/admin/lint               Last lint report
+POST   /api/v1/admin/reembed            Trigger reembed job (rebuild Weaviate from git)
 GET    /api/v1/admin/folder-acls        List folder ACL rules
 PUT    /api/v1/admin/folder-acls        Set a folder ACL
 DELETE /api/v1/admin/folder-acls        Remove a folder ACL
@@ -292,9 +293,11 @@ For table-heavy, multi-column, or formula-heavy PDFs, enable the optional Marker
 docker compose --profile marker up -d marker
 ```
 
-Then set `QPEDIA_MARKER_URL=http://marker:8000` in `.env`. The Rust extractor delegates to Marker and falls back to pdfium on any failure.
+Then set `QPEDIA_MARKER_URL=http://marker:8000` in `.env` (already set by default). The Rust extractor delegates to Marker when the PDF text layer is sparse (< 20 chars/page average) and falls back to pdfium on any sidecar failure.
 
 Cost: ~5 GB image, 30–90 s cold start, seconds to minutes per PDF on CPU. GPU recommended for throughput.
+
+**Note on image size:** The Dockerfile installs PyTorch CPU-only from the PyTorch wheel index before `marker-pdf`. This prevents pip from pulling the CUDA build of torch, which would otherwise drag in `triton` (a 200 MB GPU kernel compiler that is completely unused on CPU).
 
 ---
 

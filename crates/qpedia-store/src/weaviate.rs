@@ -204,6 +204,36 @@ impl WeaviateStore {
         Err(anyhow!("weaviate DELETE ({}): {}", resp.status(), resp.text().await.unwrap_or_default()))
     }
 
+    /// Delete all WikiPage objects for a tenant using Weaviate's batch delete.
+    /// Used by the Reembed job to clear stale vectors before rebuilding from git.
+    pub async fn delete_tenant_pages(&self, tenant: &Tenant) -> Result<usize> {
+        let url = format!("{}/v1/batch/objects", self.base_url);
+        let body = serde_json::json!({
+            "match": {
+                "class": CLASS_WIKI_PAGE,
+                "where": {
+                    "path": ["tenant"],
+                    "operator": "Equal",
+                    "valueText": tenant.as_str()
+                }
+            },
+            "output": "minimal",
+            "dryRun": false
+        });
+        let resp = self.client.delete(&url).json(&body).send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("weaviate batch delete ({status}): {text}"));
+        }
+        // Response: { "results": { "successful": N, "failed": M } }
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let deleted = v.pointer("/results/successful")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as usize;
+        Ok(deleted)
+    }
+
     /// Hybrid (BM25 + vector) search scoped to a tenant. `alpha` is the
     /// vector weight (0..=1); 0.7 by default per DESIGN.md §2.4.
     pub async fn hybrid_search(

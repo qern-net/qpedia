@@ -25,7 +25,7 @@ use qpedia_core::{
 };
 use qpedia_embed::embedder_from_env;
 use qpedia_extract::ExtractorRegistry;
-use qpedia_ingest::{ingest_job, lint_job, remove_job, sync_job, IngestContext, JobRunner};
+use qpedia_ingest::{ingest_job, lint_job, reembed_job, remove_job, sync_job, IngestContext, JobRunner};
 use qpedia_llm::provider_from_env;
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
         .route("/api/v1/chat", post(chat))
         .route("/api/v1/admin/lint", post(enqueue_lint).get(last_lint_report))
+        .route("/api/v1/admin/reembed", post(enqueue_reembed))
         .route(
             "/api/v1/admin/folder-acls",
             get(list_folder_acls).put(set_folder_acl).delete(delete_folder_acl),
@@ -442,6 +443,17 @@ async fn enqueue_lint(State(s): State<AppState>, user: User) -> Result<Json<Valu
     let job_id = job.id.to_string();
     s.ctx.db.enqueue(&job).await?;
     Ok(Json(json!({"job_id": job_id, "kind": "lint", "tenant": user.tenant.as_str(), "state": "queued"})))
+}
+
+async fn enqueue_reembed(State(s): State<AppState>, user: User) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let job = reembed_job(&user.tenant).map_err(ApiError::Internal)?;
+    let job_id = job.id.to_string();
+    s.ctx.db.enqueue(&job).await?;
+    info!(tenant = %user.tenant, job_id = %job_id, "reembed job enqueued");
+    Ok(Json(json!({"job_id": job_id, "kind": "reembed", "tenant": user.tenant.as_str(), "state": "queued"})))
 }
 
 #[derive(Deserialize)]
