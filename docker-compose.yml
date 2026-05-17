@@ -38,31 +38,6 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # Legacy: kept under the `legacy` profile so existing deployments can run
-  # qpedia-migrate against it before tearing it down. Default `docker compose
-  # up` no longer starts it.
-  weaviate:
-    profiles: [legacy]
-    image: semitechnologies/weaviate:1.27.0
-    volumes:
-      # Named volume for Weaviate — its internal format isn't useful to
-      # inspect directly, and it's fully rebuildable from the git wiki repo
-      # via a re-embed job.
-      - weaviate-data:/var/lib/weaviate
-    environment:
-      PERSISTENCE_DATA_PATH: /var/lib/weaviate
-      DEFAULT_VECTORIZER_MODULE: "none"
-      ENABLE_MODULES: ""
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      QUERY_DEFAULTS_LIMIT: "25"
-      CLUSTER_HOSTNAME: "node1"
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/v1/.well-known/ready"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
   marker:
     build:
       context: ./sidecar/marker
@@ -75,9 +50,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  # Postgres (canonical store) and marker model cache use named volumes —
-  # everything else is a bind mount to ./data/ above. Weaviate's named
-  # volume kept for one release so qpedia-migrate can read from it.
+  # Postgres (canonical store) and the marker model cache use named
+  # volumes — everything else is a bind mount to ./data/ above.
   postgres-data:
-  weaviate-data:
   marker-cache:

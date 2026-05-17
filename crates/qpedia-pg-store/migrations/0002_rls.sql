@@ -17,7 +17,6 @@ ALTER TABLE audit         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folder_acls   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE connectors    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE auth_pending  ENABLE ROW LEVEL SECURITY;
 
 DO $$ BEGIN
     CREATE POLICY tenant_isolation ON sources       FOR ALL TO qpedia_app
@@ -57,12 +56,6 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
     CREATE POLICY tenant_isolation ON connectors    FOR ALL TO qpedia_app
-        USING      (tenant_id = current_setting('qpedia.tenant', true))
-        WITH CHECK (tenant_id = current_setting('qpedia.tenant', true));
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-    CREATE POLICY tenant_isolation ON auth_pending  FOR ALL TO qpedia_app
         USING      (tenant_id = current_setting('qpedia.tenant', true))
         WITH CHECK (tenant_id = current_setting('qpedia.tenant', true));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

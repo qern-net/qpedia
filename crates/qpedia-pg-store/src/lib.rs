@@ -7,8 +7,11 @@
 
 pub mod sources;
 pub mod sessions;
+pub mod slug;
 pub mod tenants;
 pub mod wiki;
+
+pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
 
 use anyhow::{Context, Result};
 use qpedia_core::tenant::Tenant;
