@@ -5,13 +5,21 @@
 //! Security; the application must call [`PgStore::set_tenant`] on every
 //! borrowed connection before issuing tenant-scoped queries.
 
-pub mod sources;
+pub mod audit;
+pub mod connectors;
+pub mod folder_acls;
+pub mod jobs;
 pub mod sessions;
 pub mod slug;
+pub mod sources;
 pub mod tenants;
+pub mod trait_impls;
 pub mod wiki;
 
 pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
+pub use sessions::SessionRow;
+pub use tenants::TenantRow;
+pub use wiki::{SearchHit, WikiPageUpsert};
 
 use anyhow::{Context, Result};
 use qpedia_core::tenant::Tenant;
@@ -59,14 +67,21 @@ impl PgStore {
         &self.pool
     }
 
-    /// Open a transaction scoped to `tenant`. Sets the `qpedia.tenant`
-    /// GUC inside the transaction so RLS policies allow access to
-    /// rows belonging to that tenant — and *only* that tenant.
-    ///
-    /// The caller commits via the returned `Transaction`. Dropping it
-    /// rolls back, which is the safe default if a handler errors out.
+    /// Open a transaction scoped to `tenant`. Two things happen inside
+    /// the tx so RLS engages even when the connecting role has
+    /// `BYPASSRLS` (which is true for dev where we connect as
+    /// `qpedia_admin`):
+    ///   1. `SET LOCAL ROLE qpedia_app` switches to the runtime role.
+    ///   2. `set_config('qpedia.tenant', ...)` populates the GUC the
+    ///      `tenant_isolation` policies read.
+    /// Both reset on commit/rollback. RLS rejects any cross-tenant
+    /// read/write inside the tx; misuse fails closed.
     pub async fn begin_for<'a>(&'a self, tenant: &Tenant) -> Result<Transaction<'a, Postgres>> {
         let mut tx = self.pool.begin().await.context("begin tx")?;
+        sqlx::query("SET LOCAL ROLE qpedia_app")
+            .execute(&mut *tx)
+            .await
+            .context("SET LOCAL ROLE qpedia_app")?;
         sqlx::query("SELECT set_config('qpedia.tenant', $1, true)")
             .bind(tenant.as_str())
             .execute(&mut *tx)

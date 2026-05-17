@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 qpedia-core.workspace = true
 qpedia-connectors.workspace = true
+qpedia-store.workspace = true
 sqlx = { workspace = true, features = ["postgres"] }
 pgvector.workspace = true
 async-trait.workspace = true

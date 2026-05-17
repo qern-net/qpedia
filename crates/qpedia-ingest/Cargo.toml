@@ -14,6 +14,7 @@ qpedia-llm.workspace = true
 qpedia-embed.workspace = true
 qpedia-lint.workspace = true
 qpedia-connectors.workspace = true
+qpedia-pg-store.workspace = true
 sha2.workspace = true
 hex.workspace = true
 async-trait.workspace = true
