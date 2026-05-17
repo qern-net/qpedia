@@ -1,4 +1,5 @@
 mod auth;
+mod firebase;
 
 use auth::{
     effective_wiki_acl, filter_sources, oidc_callback, oidc_login, oidc_logout,
@@ -152,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/login", get(auth_login_route))
         .route("/auth/callback", get(auth_callback_route))
         .route("/auth/logout", get(auth_logout_route).post(auth_logout_route))
+        .route("/api/v1/auth/firebase/login", post(firebase_login_route))
         .route(
             "/api/v1/sources",
             post(upload_source).get(list_sources).layer(DefaultBodyLimit::max(upload_limit)),
@@ -248,6 +250,86 @@ async fn auth_logout_route(
     headers: HeaderMap,
 ) -> (HeaderMap, Redirect) {
     oidc_logout(&s.auth, &s.ctx.db, &headers).await
+}
+
+#[derive(Deserialize)]
+struct FirebaseLoginBody {
+    id_token: String,
+}
+
+/// Exchange a Firebase ID token for a qpedia session cookie. Frontend
+/// signs the user in via the Firebase JS SDK (any provider — Google,
+/// GitHub, Microsoft, X, Apple, generic OIDC SSO) and POSTs the
+/// resulting ID token here.
+///
+/// Tenant resolution:
+///   1. Custom claim `tenant_id` if set via Firebase Admin SDK.
+///   2. Email domain lookup (sources email = alice@acme.com -> tenants
+///      row where email_domain='acme.com'). Skipped on SQLite path
+///      (the legacy store doesn't carry that mapping); the
+///      Postgres path will use it once Stage D lands.
+///   3. Fallback to "default".
+async fn firebase_login_route(
+    State(s): State<AppState>,
+    Json(body): Json<FirebaseLoginBody>,
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let verifier = s
+        .auth
+        .firebase
+        .as_ref()
+        .ok_or_else(|| ApiError::Bad("Firebase auth not configured (set QPEDIA_FIREBASE_PROJECT_ID)".into()))?;
+
+    let claims = verifier
+        .verify(&body.id_token)
+        .await
+        .map_err(|e| ApiError::Bad(format!("invalid Firebase ID token: {e}")))?;
+
+    let tenant = if let Some(t) = &claims.tenant_id {
+        qpedia_core::tenant::Tenant::new(t.clone())
+    } else {
+        // Email-domain lookup hooks in here once Stage D rewires the
+        // store. For now: fall through to the dev/configured default.
+        std::env::var("QPEDIA_DEV_TENANT")
+            .ok()
+            .map(qpedia_core::tenant::Tenant::new)
+            .unwrap_or_else(qpedia_core::tenant::Tenant::default_tenant)
+    };
+
+    let token = auth::random_token(32);
+    let token_hash = auth::hash_token(&token);
+    let user_id = format!("firebase:{}", claims.sub);
+    s.ctx
+        .db
+        .create_session(
+            &token_hash,
+            &tenant,
+            &user_id,
+            claims.email.as_deref(),
+            claims.name.as_deref(),
+            &claims.groups,
+            auth::SESSION_TTL_SECS,
+        )
+        .await?;
+
+    let mut headers = HeaderMap::new();
+    headers.append(
+        axum::http::header::SET_COOKIE,
+        auth::set_session_cookie(&token, auth::SESSION_TTL_SECS),
+    );
+
+    info!(user = %user_id, tenant = %tenant, provider = %claims.firebase.sign_in_provider, "firebase login");
+
+    Ok((
+        headers,
+        Json(json!({
+            "user_id": user_id,
+            "tenant": tenant.as_str(),
+            "email": claims.email,
+            "name": claims.name,
+            "provider": claims.firebase.sign_in_provider,
+            "groups": claims.groups,
+        })),
+    ))
 }
 
 #[derive(Deserialize)]

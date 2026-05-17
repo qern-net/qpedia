@@ -39,9 +39,15 @@ pub const SESSION_COOKIE: &str = "qpedia_session";
 pub const SESSION_TTL_SECS: i64 = 24 * 60 * 60;
 
 /// Per-process auth state. Shared across handlers via `AppState`.
+///
+/// `mode` covers the original Dev / OIDC paths. `firebase` is the v2
+/// addition — orthogonal to `mode`, so you can run dev mode with
+/// Firebase off (smoke tests), prod mode with Firebase as the only
+/// IdP, or both Firebase and OIDC enabled for migration windows.
 #[derive(Clone)]
 pub struct AuthState {
     pub mode: AuthMode,
+    pub firebase: Option<crate::firebase::FirebaseVerifier>,
 }
 
 #[derive(Clone)]
@@ -66,14 +72,24 @@ pub struct OidcConfig {
 
 impl AuthState {
     /// Build from env. Falls back to Dev mode when OIDC vars aren't all set.
+    /// Firebase is wired in independently when QPEDIA_FIREBASE_PROJECT_ID
+    /// is set — it composes with either mode.
     pub async fn from_env() -> Result<Self> {
         let mode = std::env::var("QPEDIA_AUTH_MODE").ok();
         let issuer = std::env::var("QPEDIA_OIDC_ISSUER").ok();
 
+        let firebase = std::env::var("QPEDIA_FIREBASE_PROJECT_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|pid| {
+                info!(project_id = %pid, "auth: Firebase verifier enabled");
+                crate::firebase::FirebaseVerifier::new(pid)
+            });
+
         match (mode.as_deref(), issuer) {
             (Some("dev"), _) | (None, None) => {
                 info!("auth: dev mode (anonymous admin)");
-                Ok(Self { mode: AuthMode::Dev })
+                Ok(Self { mode: AuthMode::Dev, firebase })
             }
             (_, Some(issuer)) => {
                 let client_id = std::env::var("QPEDIA_OIDC_CLIENT_ID")
@@ -117,6 +133,7 @@ impl AuthState {
                         groups_claim,
                         end_session_endpoint,
                     })),
+                    firebase,
                 })
             }
             (Some(other), _) => Err(anyhow!("unknown QPEDIA_AUTH_MODE: {other}")),
