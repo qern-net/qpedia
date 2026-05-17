@@ -11,6 +11,7 @@ members = [
     "crates/qpedia-lint",
     "crates/qpedia-api",
     "crates/qpedia-cli",
+    "crates/qpedia-connectors",
 ]
 
 [workspace.package]
@@ -65,6 +66,7 @@ qpedia-ingest = { path = "crates/qpedia-ingest" }
 qpedia-retriever = { path = "crates/qpedia-retriever" }
 qpedia-lint = { path = "crates/qpedia-lint" }
 qpedia-api = { path = "crates/qpedia-api" }
+qpedia-connectors = { path = "crates/qpedia-connectors" }
 
 [profile.release]
 lto = "thin"

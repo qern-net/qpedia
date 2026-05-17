@@ -37,6 +37,7 @@ RUN [ -f package.json ] && npm run build || mkdir -p build
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates tini \
+        git \
         tesseract-ocr tesseract-ocr-eng \
         pandoc \
         libssl3 libsqlite3-0 \

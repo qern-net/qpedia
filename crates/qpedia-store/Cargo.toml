@@ -24,3 +24,4 @@ ulid.workspace = true
 url.workspace = true
 bytes.workspace = true
 uuid.workspace = true
+qpedia-connectors.workspace = true

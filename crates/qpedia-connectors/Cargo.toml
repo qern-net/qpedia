@@ -1,5 +1,5 @@
 [package]
-name = "qpedia-ingest"
+name = "qpedia-connectors"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,6 @@ publish.workspace = true
 
 [dependencies]
 qpedia-core.workspace = true
-qpedia-store.workspace = true
-qpedia-extract.workspace = true
-qpedia-llm.workspace = true
-qpedia-embed.workspace = true
-qpedia-lint.workspace = true
-qpedia-connectors.workspace = true
-sha2.workspace = true
-hex.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -23,7 +15,8 @@ thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ulid.workspace = true
 chrono.workspace = true
-futures.workspace = true
-pulldown-cmark.workspace = true
+bytes.workspace = true
+reqwest.workspace = true
+url.workspace = true
+base64.workspace = true

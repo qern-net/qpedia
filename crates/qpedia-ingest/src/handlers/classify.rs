@@ -89,6 +89,18 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         ctx.db.update_language(source_id, lang).await?;
     }
     ctx.db.update_classification(source_id, &classification).await?;
+
+    // Auto-organize: move source into a folder named after its doc_type
+    // if it is still in the root folder ("/"). This keeps the sources list
+    // tidy without overriding any folder the user explicitly chose.
+    if src.folder_path == "/" {
+        if let Some(doc_type) = classification.get("doc_type").and_then(|v| v.as_str()) {
+            let auto_folder = format!("/{}", doc_type.trim());
+            ctx.db.update_folder_path(source_id, &auto_folder).await?;
+            info!(id = %source_id, folder = %auto_folder, "auto-organized into folder by doc_type");
+        }
+    }
+
     ctx.db.update_status(source_id, SourceStatus::Classified).await?;
     ctx.db
         .audit("qpedia-bot", "source.classified", Some(source_id.as_str()), Some(&classification))

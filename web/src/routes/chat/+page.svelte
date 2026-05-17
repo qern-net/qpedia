@@ -1,17 +1,9 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { marked } from 'marked';
-  import { streamChat, type Citation, type ChatTurn } from '$lib/api';
+  import { streamChat, type ChatTurn } from '$lib/api';
+  import { chatHistory, type ChatMsg } from '$lib/stores';
 
-  type Msg = {
-    role: 'user' | 'assistant';
-    content: string;
-    citations?: Citation[];
-    mode?: string;
-    error?: boolean;
-  };
-
-  let history = $state<Msg[]>([]);
   let input = $state('');
   let busy = $state(false);
   let scroller: HTMLDivElement | undefined = $state();
@@ -23,7 +15,7 @@
 
   function renderMarkdown(s: string): string {
     if (!s) return '';
-    // Same wikilink rewrite as the wiki page viewer.
+    // Rewrite [[wikilinks]] to /wiki/<path> hrefs so they're clickable.
     const linked = s.replace(/\[\[([^\]]+)\]\]/g, (_m, t) => `[${t}](/wiki/${t.trim()})`);
     return marked.parse(linked, { async: false }) as string;
   }
@@ -34,41 +26,34 @@
     input = '';
     busy = true;
 
-    // Snapshot prior turns BEFORE we append the new user/assistant pair.
-    const turnsBefore: ChatTurn[] = history.map((m) => ({ role: m.role, content: m.content }));
+    // Snapshot prior turns for the API (text only, no citations/metadata).
+    const turnsBefore: ChatTurn[] = chatHistory.msgs.map((m) => ({
+      role: m.role,
+      content: m.content
+    }));
 
-    history = [
-      ...history,
-      { role: 'user', content: q },
-      { role: 'assistant', content: '' }
-    ];
-    const idx = history.length - 1;
+    chatHistory.push({ role: 'user', content: q });
+    const idx = chatHistory.push({ role: 'assistant', content: '' });
     await scrollToEnd();
 
     try {
       for await (const ev of streamChat({ message: q, history: turnsBefore, max_pages: 5 })) {
-        const next = history.slice();
-        const cur = { ...next[idx] } as Msg;
         if (ev.type === 'meta') {
-          cur.citations = ev.retrieved;
-          cur.mode = ev.mode;
+          chatHistory.update(idx, { citations: ev.retrieved, mode: ev.mode });
         } else if (ev.type === 'token') {
-          cur.content += ev.text;
+          const cur = chatHistory.msgs[idx];
+          chatHistory.update(idx, { content: cur.content + ev.text });
+          await scrollToEnd();
         } else if (ev.type === 'error') {
-          cur.content = `error: ${ev.message}`;
-          cur.error = true;
-        } else if (ev.type === 'done') {
-          // nothing extra
+          chatHistory.update(idx, { content: `error: ${ev.message}`, error: true });
         }
-        next[idx] = cur;
-        history = next;
-        if (ev.type === 'token') await scrollToEnd();
         if (ev.type === 'done' || ev.type === 'error') break;
       }
     } catch (e: any) {
-      const next = history.slice();
-      next[idx] = { ...next[idx], content: `error: ${String(e?.message ?? e)}`, error: true };
-      history = next;
+      chatHistory.update(idx, {
+        content: `error: ${String(e?.message ?? e)}`,
+        error: true
+      });
     } finally {
       busy = false;
       await scrollToEnd();
@@ -81,21 +66,31 @@
       send();
     }
   }
+
+  function onClear() {
+    if (confirm('Clear chat history?')) chatHistory.clear();
+  }
 </script>
 
 <div class="chat-shell">
-  <h1>Chat</h1>
+  <div class="row" style="margin-bottom: 0;">
+    <h1 style="margin: 0;">Chat</h1>
+    <span class="spacer"></span>
+    {#if chatHistory.msgs.length > 0}
+      <button onclick={onClear} style="font-size: 12px; padding: 4px 10px;">Clear history</button>
+    {/if}
+  </div>
 
   <div class="chat-scroll" bind:this={scroller}>
-    {#if history.length === 0}
+    {#if chatHistory.msgs.length === 0}
       <div class="muted card">
         Ask a question grounded in your wiki. Retrieved pages appear as citations
-        beside the answer; the model is told to cite them inline as
-        <code>[[path/to/page.md]]</code> when it draws on them.
+        beside the answer; the model cites them inline as
+        <code>[[path/to/page.md]]</code> — click any link to open the page.
       </div>
     {/if}
 
-    {#each history as m, i (i)}
+    {#each chatHistory.msgs as m, i (i)}
       <div class="msg msg-{m.role}" class:msg-error={m.error}>
         <div class="msg-role">{m.role}</div>
 
@@ -110,14 +105,14 @@
           {#if m.citations && m.citations.length > 0}
             <div class="msg-citations">
               {#each m.citations as c}
-                <a href={`/wiki/${c.path}`} class="cite">{c.title || c.path}</a>
+                <a href={`/wiki/${c.path}`} class="cite" title={c.path}>{c.title || c.path}</a>
               {/each}
             </div>
           {/if}
           <div class="msg-body markdown">
             {#if m.content}
               {@html renderMarkdown(m.content)}
-            {:else if busy}
+            {:else if busy && i === chatHistory.msgs.length - 1}
               <span class="muted">…</span>
             {/if}
           </div>
@@ -178,6 +173,10 @@
     padding: 2px 8px;
     border-radius: 999px;
     font-size: 12px;
+  }
+  .cite:hover {
+    background: var(--bg-3);
+    text-decoration: none;
   }
   .user-body {
     background: var(--bg-3);

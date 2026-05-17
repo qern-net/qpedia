@@ -88,6 +88,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .chip-committed    { background: #14532d; color: #bbf7d0; }
 .chip-embedding    { background: #1e3a8a; color: #bfdbfe; }
 .chip-done         { background: #14532d; color: #bbf7d0; }
+.chip-tainted      { background: #78350f; color: #fde68a; border: 1px solid #d97706; }
 .chip-failed, .chip-dead { background: #7f1d1d; color: #fecaca; }
 
 table { width: 100%; border-collapse: collapse; }

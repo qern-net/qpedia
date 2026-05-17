@@ -1,27 +1,29 @@
 //! Marker sidecar extractor — high-fidelity PDF via the optional
 //! marker-pdf Python service (DESIGN.md §16, sidecar/marker/).
 //!
-//! Activated only when `QPEDIA_MARKER_URL` is set. Falls back to
-//! pdfium-render on any sidecar failure so a broken Marker doesn't
-//! take ingestion down.
+//! `MarkerExtractor` only calls the remote sidecar. It does NOT embed a
+//! `PdfExtractor` fallback — that would create a construction cycle:
+//!   PdfExtractor::try_new → MarkerExtractor::try_new → PdfExtractor::try_new → ∞
+//!
+//! Fallback on sidecar failure is handled by the caller (`PdfExtractor`),
+//! which already holds the pdfium-extracted text from phase 1 and returns
+//! that when Marker returns an error.
 
-use crate::{Extraction, Extractor, PdfExtractor};
+use crate::{Extraction, Extractor};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 pub struct MarkerExtractor {
     base_url: String,
     client: reqwest::Client,
-    fallback: PdfExtractor,
 }
 
 impl MarkerExtractor {
     pub fn try_new(base_url: impl Into<String>) -> Result<Self> {
-        let fallback = PdfExtractor::try_new()?;
         let client = reqwest::Client::builder()
             // Marker on CPU can take minutes per PDF.
             .timeout(Duration::from_secs(600))
@@ -29,11 +31,19 @@ impl MarkerExtractor {
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client,
-            fallback,
         })
     }
+}
 
-    async fn extract_remote(&self, bytes: Bytes) -> Result<Extraction> {
+#[async_trait]
+impl Extractor for MarkerExtractor {
+    fn handles_mime(&self, mime: &str) -> bool {
+        mime == "application/pdf" || mime == "application/x-pdf"
+    }
+
+    /// Call the Marker sidecar. Returns `Err` on any failure — the caller
+    /// is responsible for fallback behaviour.
+    async fn extract(&self, _mime: &str, bytes: Bytes) -> Result<Extraction> {
         let url = format!("{}/extract", self.base_url);
         let part = reqwest::multipart::Part::bytes(bytes.to_vec())
             .file_name("input.pdf")
@@ -56,32 +66,13 @@ impl MarkerExtractor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        info!(chars = parsed.markdown.len(), "marker extraction succeeded");
         Ok(Extraction {
             text: parsed.markdown,
             language,
             pages: Vec::new(),
             notes: vec!["extracted via marker sidecar".into()],
         })
-    }
-}
-
-#[async_trait]
-impl Extractor for MarkerExtractor {
-    fn handles_mime(&self, mime: &str) -> bool {
-        mime == "application/pdf" || mime == "application/x-pdf"
-    }
-
-    async fn extract(&self, mime: &str, bytes: Bytes) -> Result<Extraction> {
-        match self.extract_remote(bytes.clone()).await {
-            Ok(e) => {
-                info!(chars = e.text.len(), "marker extraction succeeded");
-                Ok(e)
-            }
-            Err(e) => {
-                warn!(error = %e, "marker failed; falling back to pdfium");
-                self.fallback.extract(mime, bytes).await
-            }
-        }
     }
 }
 

@@ -3,31 +3,30 @@
 //! Steps:
 //!   1. Find every wiki page whose frontmatter `source_ids` includes :id.
 //!   2. For each affected page:
-//!      - Only source -> stage Delete.
-//!      - Other sources remain -> stage Patch removing :id from frontmatter.
-//!        (Content body is left intact; admins can re-trigger an ingest of
-//!        a remaining source if a fresh re-synthesis is desired.)
-//!   3. Commit the bundle as a single git commit.
-//!   4. Delete deleted-page objects from Weaviate; re-embed patched pages.
-//!   5. rm -rf the source's blob directory.
-//!   6. DELETE the row from `sources`.
+//!      - Only source → stage Delete.
+//!      - Other sources remain → stage Patch removing :id from frontmatter.
+//!   3. Update index.md to remove links to deleted pages.
+//!   4. Append a line to log.md.
+//!   5. Commit the bundle as a single git commit.
+//!   6. Delete removed-page objects from Weaviate; re-embed patched pages.
+//!   7. rm -rf the source's blob directory.
+//!   8. DELETE the row from `sources`.
 //!
-//! Best-effort cleanup: any failure leaves the source row in place so the
-//! job can retry without losing track of what's still half-removed.
+//! Idempotent: if the source row is already gone the job exits cleanly.
+//! If the git commit already happened (retry after partial failure) the
+//! pages won't be found in the wiki and the bundle will be empty — the
+//! handler skips the commit and proceeds to blob/DB cleanup.
 
 use crate::handlers::embed::embed_changed_pages;
 use crate::runner::IngestContext;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
+    job::{Job, JobKind, JobState},
     wiki::{DiffBundle, DiffOp},
     JobId, SourceId,
 };
-use qpedia_core::job::{Job, JobKind, JobState};
-use qpedia_store::{
-    blob::BlobStorage,
-    sqlite::SourceStore,
-};
+use qpedia_store::{blob::BlobStorage, sqlite::SourceStore};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -56,29 +55,37 @@ pub fn remove_job(source_id: &SourceId) -> Result<Job> {
 pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
     info!(id = %source_id, "remove: start");
 
-    // Fetch the source first so we know which tenant's wiki to touch.
-    let src = ctx
-        .db
-        .get_source(source_id)
-        .await?
-        .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
+    // Fetch the source so we know which tenant's wiki to touch.
+    // If the row is already gone (idempotent retry) skip straight to cleanup.
+    let src = match ctx.db.get_source(source_id).await? {
+        Some(s) => s,
+        None => {
+            info!(id = %source_id, "remove: source already gone, cleaning up blobs");
+            let _ = ctx.blob.delete_all(source_id).await;
+            return Ok(());
+        }
+    };
     let tenant = src.tenant.clone();
     let wiki = ctx.wiki_store.get(&tenant).await?;
 
-    // 1. Plan: walk wiki, decide delete vs patch per affected page.
+    // ── 1. Plan: walk wiki, decide delete vs patch per affected page ──────
+
     let mut to_delete: Vec<String> = Vec::new();
     let mut to_patch: Vec<(String, String)> = Vec::new();
 
     for path in wiki.list_pages("").await? {
+        // Skip system files — they're handled separately below.
+        if is_system_path(&path) {
+            continue;
+        }
         let Some(content) = wiki.read_page(&path).await? else { continue };
         let source_ids = extract_source_ids(&content);
         if !source_ids.iter().any(|s| s == source_id.as_str()) {
             continue;
         }
         let remaining: Vec<String> = source_ids
-            .iter()
+            .into_iter()
             .filter(|s| s.as_str() != source_id.as_str())
-            .cloned()
             .collect();
 
         if remaining.is_empty() {
@@ -96,26 +103,69 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         "remove: planned"
     );
 
-    // 2. Commit (only if there's something to do).
-    if !to_delete.is_empty() || !to_patch.is_empty() {
-        let mut ops: Vec<DiffOp> = Vec::new();
-        for path in &to_delete {
-            ops.push(DiffOp::Delete {
-                path: path.clone(),
-                rationale: format!("source {source_id} removed"),
-            });
+    // ── 2. Build the diff bundle ──────────────────────────────────────────
+
+    let mut ops: Vec<DiffOp> = Vec::new();
+
+    for path in &to_delete {
+        ops.push(DiffOp::Delete {
+            path: path.clone(),
+            rationale: format!("source {source_id} removed"),
+        });
+    }
+    for (path, new_content) in &to_patch {
+        ops.push(DiffOp::Patch {
+            path: path.clone(),
+            new_content: new_content.clone(),
+            rationale: format!("source {source_id} removed (other sources remain)"),
+        });
+    }
+
+    // ── 3. Update index.md — remove links to deleted pages ───────────────
+
+    if !to_delete.is_empty() {
+        if let Some(index_content) = wiki.read_page("index.md").await? {
+            let new_index = remove_wikilinks_from_index(&index_content, &to_delete);
+            if new_index != index_content {
+                ops.push(DiffOp::Patch {
+                    path: "index.md".into(),
+                    new_content: new_index,
+                    rationale: format!(
+                        "remove {} page(s) deleted with source {source_id}",
+                        to_delete.len()
+                    ),
+                });
+            }
         }
-        for (path, new_content) in &to_patch {
-            ops.push(DiffOp::Patch {
-                path: path.clone(),
-                new_content: new_content.clone(),
-                rationale: format!("source {source_id} removed (other sources remain)"),
-            });
-        }
+    }
+
+    // ── 4. Append to log.md ───────────────────────────────────────────────
+
+    if let Some(log_content) = wiki.read_page("log.md").await? {
+        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let log_line = if to_delete.is_empty() && to_patch.is_empty() {
+            format!("\n- {timestamp} remove({source_id}): no wiki pages affected\n")
+        } else {
+            format!(
+                "\n- {timestamp} remove({source_id}): deleted {} page(s), patched {} page(s)\n",
+                to_delete.len(),
+                to_patch.len()
+            )
+        };
+        ops.push(DiffOp::Patch {
+            path: "log.md".into(),
+            new_content: format!("{}{}", log_content.trim_end(), log_line),
+            rationale: format!("log source {source_id} removal"),
+        });
+    }
+
+    // ── 5. Commit ─────────────────────────────────────────────────────────
+
+    if !ops.is_empty() {
         let bundle = DiffBundle {
             ingest_id: format!("remove-{source_id}"),
             summary: format!(
-                "source {source_id} removed: {} delete, {} patch",
+                "source {source_id} removed: {} deleted, {} patched",
                 to_delete.len(),
                 to_patch.len()
             ),
@@ -124,34 +174,40 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         let sha = wiki.commit_bundle(&bundle).await?;
         info!(id = %source_id, sha = %sha, "remove: wiki committed");
 
-        // 3a. Drop deleted pages from Weaviate.
+        // ── 6a. Drop deleted pages from Weaviate ─────────────────────────
         if let Some(weaviate) = &ctx.weaviate {
             for path in &to_delete {
                 if let Err(e) = weaviate.delete_page(&tenant, path).await {
-                    warn!(path = %path, error = %e, "weaviate delete failed");
+                    warn!(path = %path, error = %e, "weaviate delete failed (non-fatal)");
                 }
             }
         }
 
-        // 3b. Re-embed patched pages (HEAD diff captures the patches).
+        // ── 6b. Re-embed patched pages (HEAD diff captures the patches) ───
         if !to_patch.is_empty() {
-            let embedded = embed_changed_pages(ctx, &tenant).await.unwrap_or_default();
-            info!(id = %source_id, embedded = embedded.len(), "remove: re-embedded patched pages");
+            match embed_changed_pages(ctx, &tenant).await {
+                Ok(embedded) => info!(id = %source_id, embedded = embedded.len(), "remove: re-embedded patched pages"),
+                Err(e) => warn!(id = %source_id, error = %e, "remove: re-embed failed (non-fatal)"),
+            }
         }
+    } else {
+        info!(id = %source_id, "remove: no wiki changes needed");
     }
 
-    // 4. Drop raw blobs.
+    // ── 7. Drop raw blobs ─────────────────────────────────────────────────
+
     if let Err(e) = ctx.blob.delete_all(source_id).await {
-        warn!(id = %source_id, error = %e, "remove: blob cleanup failed");
+        warn!(id = %source_id, error = %e, "remove: blob cleanup failed (non-fatal)");
     }
 
-    // 5. Drop the DB row.
+    // ── 8. Drop the DB row ────────────────────────────────────────────────
+
     ctx.db.delete_source(source_id).await?;
 
     let _ = ctx
         .db
         .audit(
-            "user",
+            "qpedia-bot",
             "source.removed",
             Some(source_id.as_str()),
             Some(&serde_json::json!({
@@ -165,7 +221,11 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
     Ok(())
 }
 
-// ---------- helpers ----------
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn is_system_path(path: &str) -> bool {
+    matches!(path, "index.md" | "log.md" | "QPEDIA.md") || path.starts_with("_meta/")
+}
 
 fn extract_source_ids(content: &str) -> Vec<String> {
     let trimmed = content.trim_start();
@@ -188,8 +248,8 @@ fn extract_source_ids(content: &str) -> Vec<String> {
     out
 }
 
-/// Rewrite the frontmatter `source_ids` line to a new list. If the page
-/// has no frontmatter at all, return content unchanged.
+/// Rewrite the frontmatter `source_ids` line to the given remaining list.
+/// Returns content unchanged if no frontmatter is found.
 fn remove_source_id_from_frontmatter(content: &str, remaining: &[String]) -> String {
     let leading_ws_len = content.len() - content.trim_start().len();
     let leading_ws = &content[..leading_ws_len];
@@ -214,7 +274,6 @@ fn remove_source_id_from_frontmatter(content: &str, remaining: &[String]) -> Str
     let mut replaced = false;
     for line in fm.lines() {
         if line.trim_start().starts_with("source_ids:") {
-            // Preserve any leading whitespace.
             let indent_end = line.len() - line.trim_start().len();
             new_fm_lines.push(format!("{}source_ids: [{new_list}]", &line[..indent_end]));
             replaced = true;
@@ -226,6 +285,45 @@ fn remove_source_id_from_frontmatter(content: &str, remaining: &[String]) -> Str
         new_fm_lines.push(format!("source_ids: [{new_list}]"));
     }
     let new_fm = new_fm_lines.join("\n");
-
     format!("{leading_ws}---{new_fm}{after_fm}")
+}
+
+/// Remove all `[[path]]` wikilinks from index.md that point to any of the
+/// deleted paths. Handles both bare `[[path]]` and inline list items like
+/// `- [[path]] — description`. Lines that become empty after removal are
+/// dropped entirely to keep the index tidy.
+fn remove_wikilinks_from_index(content: &str, deleted_paths: &[String]) -> String {
+    let deleted_set: std::collections::HashSet<&str> =
+        deleted_paths.iter().map(|s| s.as_str()).collect();
+
+    content
+        .lines()
+        .filter(|line| {
+            // Keep the line unless it contains a wikilink to a deleted page.
+            let mut keep = true;
+            let mut bytes = line.as_bytes();
+            while let Some(start) = find_subseq(bytes, b"[[") {
+                let after = &bytes[start + 2..];
+                if let Some(end) = find_subseq(after, b"]]") {
+                    if let Ok(target) = std::str::from_utf8(&after[..end]) {
+                        let path_only = target.trim().split('#').next().unwrap_or(target.trim());
+                        if deleted_set.contains(path_only) {
+                            keep = false;
+                            break;
+                        }
+                    }
+                    bytes = &after[end + 2..];
+                } else {
+                    break;
+                }
+            }
+            keep
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

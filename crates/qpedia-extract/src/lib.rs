@@ -56,19 +56,9 @@ impl ExtractorRegistry {
         let mut reg = Self::new();
         reg.register(Box::new(TextExtractor));
 
-        if let Ok(url) = std::env::var("QPEDIA_MARKER_URL") {
-            let url = url.trim().to_string();
-            if !url.is_empty() {
-                match MarkerExtractor::try_new(url.clone()) {
-                    Ok(m) => {
-                        tracing::info!(url = %url, "MarkerExtractor active (high-fidelity PDFs)");
-                        reg.register(Box::new(m));
-                    }
-                    Err(e) => tracing::warn!(error = %e, "MarkerExtractor unavailable; falling through to pdfium"),
-                }
-            }
-        }
-
+        // PdfExtractor wires up Marker internally as an OCR fallback when
+        // QPEDIA_MARKER_URL is set — no need to register MarkerExtractor
+        // separately in the registry.
         match PdfExtractor::try_new() {
             Ok(pdf) => reg.register(Box::new(pdf)),
             Err(e) => tracing::warn!(error = %e, "PdfExtractor disabled — run scripts/fetch-pdfium.sh"),

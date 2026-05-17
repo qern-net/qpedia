@@ -77,6 +77,28 @@ pub fn ingest_job(source_id: &SourceId) -> Result<Job> {
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPayload {
+    pub connector_id: String,
+}
+
+/// Build a Sync job for an external connector.
+pub fn sync_job(connector_id: &str) -> Result<Job> {
+    let now = Utc::now();
+    Ok(Job {
+        id: JobId::new(),
+        kind: JobKind::Sync,
+        payload: serde_json::to_value(SyncPayload { connector_id: connector_id.to_string() })?,
+        state: JobState::Queued,
+        attempt: 0,
+        max_attempts: 3,
+        next_run_at: now,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
 /// Build a Lint job for a tenant's wiki.
 pub fn lint_job(tenant: &Tenant) -> Result<Job> {
     let now = Utc::now();
@@ -155,6 +177,10 @@ impl JobRunner {
             JobKind::Reembed => {
                 warn!(job = %job.id, "Reembed handler not yet implemented");
                 Ok(())
+            }
+            JobKind::Sync => {
+                let p: SyncPayload = serde_json::from_value(job.payload)?;
+                handlers::sync::run(&self.ctx, &p.connector_id).await
             }
         }
     }

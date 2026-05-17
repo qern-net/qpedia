@@ -112,8 +112,17 @@ impl WeaviateStore {
         if resp.status().is_success() {
             return Ok(());
         }
-        // 404 → object doesn't exist, fall back to POST.
-        if resp.status().as_u16() == 404 {
+        let put_status = resp.status();
+        let put_body = resp.text().await.unwrap_or_default();
+
+        // Fall back to POST when the object doesn't exist yet.
+        // Weaviate should return 404 for a missing object, but in practice
+        // some versions return 500 with "no object with id" in the body.
+        let not_found = put_status.as_u16() == 404
+            || (put_status.as_u16() == 422 && put_body.contains("no object with id"))
+            || (put_status.as_u16() == 500 && put_body.contains("no object with id"));
+
+        if not_found {
             let post_url = format!("{}/v1/objects", self.base_url);
             let resp = self.client.post(&post_url).json(&body).send().await?;
             if !resp.status().is_success() {
@@ -123,9 +132,7 @@ impl WeaviateStore {
             }
             return Ok(());
         }
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        Err(anyhow!("weaviate PUT object ({status}): {text}"))
+        Err(anyhow!("weaviate PUT object ({put_status}): {put_body}"))
     }
 
     /// Find the nearest neighbor of a page within `tenant`, excluding the

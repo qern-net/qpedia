@@ -154,6 +154,14 @@ impl Retriever {
 
             // Phase 2: synthesize a streaming answer with no tools.
             let messages = build_synthesis_messages(&req, &gathered);
+            let context_chars: usize = gathered.iter().map(|p| p.content.len()).sum();
+            let context_pages = gathered.len();
+            info!(
+                pages = context_pages,
+                context_chars,
+                model = %current_model(),
+                "retriever: synthesizing answer"
+            );
             let llm_req = CompleteReq {
                 model: current_model(),
                 system: Some(SYNTHESIS_SYSTEM.into()),

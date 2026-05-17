@@ -29,6 +29,7 @@ export type SourceStatus =
   | 'committed'
   | 'embedding'
   | 'done'
+  | 'tainted'
   | 'failed'
   | 'dead';
 
@@ -70,6 +71,11 @@ export async function uploadSource(folderPath: string, file: File): Promise<Sour
 /** Enqueue a Remove job. Cleanup happens async; the row may linger briefly. */
 export async function deleteSource(id: string): Promise<{ job_id: string }> {
   return json<{ job_id: string }>(await fetch(`/api/v1/sources/${id}`, { method: 'DELETE' }));
+}
+
+/** Returns the URL for downloading the original file. Use as href or window.open. */
+export function sourceOriginalUrl(id: string): string {
+  return `/api/v1/sources/${id}/original`;
 }
 
 // ---------- auth ----------
@@ -119,6 +125,14 @@ export async function deleteFolderAcl(folder_path: string): Promise<void> {
   if (!r.ok) throw new Error(`delete folder acl: ${r.status}`);
 }
 
+export async function listStalledSources(): Promise<{ sources: Source[]; count: number }> {
+  return json(await fetch('/api/v1/admin/sources/stalled'));
+}
+
+export async function resumeStalledSources(): Promise<{ enqueued: number }> {
+  return json(await fetch('/api/v1/admin/sources/resume', { method: 'POST' }));
+}
+
 export async function listWikiPages(prefix: string = ''): Promise<{ prefix: string; pages: string[] }> {
   return json(await fetch(`/api/v1/wiki/list?prefix=${encodeURIComponent(prefix)}`));
 }
@@ -134,7 +148,7 @@ export async function searchWiki(q: string, limit = 10): Promise<SearchResp> {
 }
 
 /** Terminal states that don't transition further. */
-export const TERMINAL: ReadonlySet<SourceStatus> = new Set(['done', 'failed', 'dead'] as const);
+export const TERMINAL: ReadonlySet<SourceStatus> = new Set(['done', 'failed', 'dead', 'tainted'] as const);
 
 // ---------- chat ----------
 

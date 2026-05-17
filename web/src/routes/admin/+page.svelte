@@ -4,16 +4,27 @@
     deleteFolderAcl,
     getMe,
     listFolderAcls,
+    listStalledSources,
+    resumeStalledSources,
     setFolderAcl,
     type FolderAcl,
-    type Me
+    type Me,
+    type Source
   } from '$lib/api';
+  import StatusChip from '$lib/components/StatusChip.svelte';
 
   let me = $state<Me | null>(null);
   let loaded = $state(false);
   let acls = $state<FolderAcl[]>([]);
   let error = $state<string | null>(null);
   let busy = $state(false);
+
+  // Stalled sources state
+  let stalled = $state<Source[]>([]);
+  let stalledError = $state<string | null>(null);
+  let stalledLoaded = $state(false);
+  let resuming = $state(false);
+  let resumeMsg = $state<string | null>(null);
 
   // New / edit form state.
   let formPath = $state('/');
@@ -29,10 +40,24 @@
     }
   }
 
+  async function refreshStalled() {
+    stalledError = null;
+    try {
+      const r = await listStalledSources();
+      stalled = r.sources;
+    } catch (e: any) {
+      stalledError = String(e?.message ?? e);
+    } finally {
+      stalledLoaded = true;
+    }
+  }
+
   onMount(async () => {
     try { me = await getMe(); } catch {}
     loaded = true;
-    if (me?.is_admin) await refresh();
+    if (me?.is_admin) {
+      await Promise.all([refresh(), refreshStalled()]);
+    }
   });
 
   function parseGroups(s: string): string[] {
@@ -74,9 +99,27 @@
       busy = false;
     }
   }
+
+  async function onResume() {
+    if (!confirm(`Re-enqueue all ${stalled.length} stalled source(s) for processing?`)) return;
+    resuming = true; resumeMsg = null;
+    try {
+      const r = await resumeStalledSources();
+      resumeMsg = `${r.enqueued} source(s) re-enqueued.`;
+      await refreshStalled();
+    } catch (e: any) {
+      stalledError = String(e?.message ?? e);
+    } finally {
+      resuming = false;
+    }
+  }
+
+  function fmtDate(s: string) {
+    return s ? new Date(s).toLocaleString() : '—';
+  }
 </script>
 
-<h1>Admin · Folder ACLs</h1>
+<h1>Admin</h1>
 
 {#if !loaded}
   <div class="muted">Loading…</div>
@@ -89,9 +132,66 @@
     Admin access required. Your groups: <span class="mono">{me.groups.join(', ') || '(none)'}</span>
   </div>
 {:else}
-  <div class="col" style="gap: 24px;">
+  <div class="col" style="gap: 32px;">
+
+    <!-- ── Stalled Sources ── -->
+    <div>
+      <div class="row" style="margin-bottom: 12px;">
+        <h2 style="margin: 0;">Stalled Sources</h2>
+        <span class="spacer"></span>
+        <button onclick={refreshStalled}>Refresh</button>
+        {#if stalled.length > 0}
+          <button class="primary" onclick={onResume} disabled={resuming}>
+            {resuming ? 'Resuming…' : `Resume all (${stalled.length})`}
+          </button>
+        {/if}
+      </div>
+
+      {#if stalledError}
+        <div class="card" style="border-color: var(--err); color: var(--err); margin-bottom: 12px;">{stalledError}</div>
+      {/if}
+      {#if resumeMsg}
+        <div class="card" style="border-color: var(--ok); color: var(--ok); margin-bottom: 12px;">{resumeMsg}</div>
+      {/if}
+
+      {#if !stalledLoaded}
+        <div class="muted">Loading…</div>
+      {:else if stalled.length === 0}
+        <div class="card muted">No stalled sources — pipeline is healthy.</div>
+      {:else}
+        <div class="card" style="padding: 0; overflow: hidden;">
+          <table>
+            <thead>
+              <tr>
+                <th>Filename</th>
+                <th>Status</th>
+                <th>Folder</th>
+                <th>Uploaded</th>
+                <th>ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each stalled as src (src.id)}
+                <tr>
+                  <td>
+                    <div>{src.filename}</div>
+                    <div class="muted" style="font-size: 11px;">{src.mime}</div>
+                  </td>
+                  <td><StatusChip status={src.status} /></td>
+                  <td class="mono muted">{src.folder_path}</td>
+                  <td class="muted" style="font-size: 12px;">{fmtDate(src.created_at)}</td>
+                  <td class="mono muted" style="font-size: 11px;">{src.id}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </div>
+
+    <!-- ── Folder ACLs ── -->
     <div class="card">
-      <h2 style="margin-top: 0;">Set ACL</h2>
+      <h2 style="margin-top: 0;">Set Folder ACL</h2>
       <p class="muted" style="margin: 0 0 12px;">
         Uploads to <span class="mono">/finance/q4</span> inherit from the
         closest ancestor that has a rule (e.g. <span class="mono">/finance</span>);
@@ -129,7 +229,7 @@
 
     <div>
       <div class="row" style="margin-bottom: 12px;">
-        <h2 style="margin: 0;">Current rules</h2>
+        <h2 style="margin: 0;">Current Folder ACL Rules</h2>
         <span class="spacer"></span>
         <button onclick={refresh}>Refresh</button>
       </div>
@@ -169,5 +269,6 @@
         </div>
       {/if}
     </div>
+
   </div>
 {/if}

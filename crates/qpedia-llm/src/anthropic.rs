@@ -78,7 +78,17 @@ impl LlmProvider for AnthropicDirect {
         let parsed: AnthropicResponse = serde_json::from_str(&text)
             .map_err(|e| LlmError::Provider(format!("decode response: {e}\nbody: {text}")))?;
 
-        Ok(parsed.into())
+        let resp: CompleteResp = parsed.into();
+        tracing::info!(
+            model = %req.model,
+            input_tokens = resp.usage.input_tokens,
+            output_tokens = resp.usage.output_tokens,
+            total_tokens = resp.usage.input_tokens + resp.usage.output_tokens,
+            msgs = req.messages.len(),
+            tools = req.tools.len(),
+            "anthropic complete"
+        );
+        Ok(resp)
     }
 
     async fn stream(&self, req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError> {

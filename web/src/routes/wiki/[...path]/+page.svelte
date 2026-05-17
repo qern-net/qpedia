@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
-  import { getWikiPage } from '$lib/api';
+  import { getWikiPage, sourceOriginalUrl } from '$lib/api';
   import { marked } from 'marked';
 
   let raw = $state('');
@@ -15,11 +15,10 @@
     getWikiPage(path).then((t) => (raw = t)).catch((e) => (error = String(e?.message ?? e)));
   });
 
-  // Split frontmatter from body, render body as markdown with [[wikilinks]]
-  // rewritten to /wiki/<path> hrefs.
+  // Split frontmatter from body.
   const parts = $derived.by(() => {
     if (!raw) return { frontmatter: '', body: '' };
-    const trimmed = raw.replace(/^﻿/, '');
+    const trimmed = raw.replace(/^/, '');
     if (trimmed.startsWith('---')) {
       const end = trimmed.indexOf('\n---', 3);
       if (end !== -1) {
@@ -30,6 +29,18 @@
       }
     }
     return { frontmatter: '', body: trimmed };
+  });
+
+  // Extract source_ids from frontmatter for download links.
+  const sourceIds = $derived.by(() => {
+    const fm = parts.frontmatter;
+    if (!fm) return [] as string[];
+    const match = fm.match(/source_ids:\s*\[([^\]]*)\]/);
+    if (!match) return [] as string[];
+    return match[1]
+      .split(',')
+      .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean);
   });
 
   const html = $derived(() => {
@@ -60,5 +71,36 @@
       <pre style="margin: 8px 0 0;">{parts.frontmatter}</pre>
     </details>
   {/if}
+
+  {#if sourceIds.length > 0}
+    <div class="row" style="margin-bottom: 12px; flex-wrap: wrap; gap: 6px;">
+      <span class="muted" style="font-size: 12px;">Sources:</span>
+      {#each sourceIds as sid}
+        <a
+          href={sourceOriginalUrl(sid)}
+          download
+          class="cite"
+          title="Download original file for source {sid}"
+          style="font-size: 12px;"
+        >↓ {sid.slice(0, 10)}…</a>
+      {/each}
+    </div>
+  {/if}
+
   <div class="markdown">{@html html()}</div>
 {/if}
+
+<style>
+  .cite {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    text-decoration: none;
+    color: var(--fg);
+  }
+  .cite:hover {
+    background: var(--bg-3);
+  }
+</style>

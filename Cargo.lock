@@ -3740,6 +3740,7 @@ dependencies = [
  "hex",
  "mime_guess",
  "openidconnect",
+ "qpedia-connectors",
  "qpedia-core",
  "qpedia-embed",
  "qpedia-extract",
@@ -3759,6 +3760,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "ulid",
  "url",
 ]
 
@@ -3774,6 +3776,25 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "qpedia-connectors"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "qpedia-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3829,7 +3850,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hex",
  "pulldown-cmark",
+ "qpedia-connectors",
  "qpedia-core",
  "qpedia-embed",
  "qpedia-extract",
@@ -3838,6 +3861,7 @@ dependencies = [
  "qpedia-store",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -3909,6 +3933,7 @@ dependencies = [
  "bytes",
  "chrono",
  "gix",
+ "qpedia-connectors",
  "qpedia-core",
  "reqwest",
  "serde",

@@ -23,6 +23,7 @@ pub enum JobKind {
     Remove,
     Lint,
     Reembed,
+    Sync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

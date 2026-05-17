@@ -30,7 +30,10 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
                 if ctx.llm.is_some() {
                     classify::run(ctx, source_id).await?;
                 } else {
-                    info!(id = %source_id, "no LLM configured — stopping at Extracted");
+                    info!(id = %source_id, "no LLM configured — marking Tainted at Extracted");
+                    ctx.db.update_status(source_id, SourceStatus::Tainted).await?;
+                    ctx.db.audit("qpedia-bot", "source.tainted", Some(source_id.as_str()),
+                        Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "extracted"}))).await?;
                     return Ok(());
                 }
             }
@@ -38,7 +41,10 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
                 if ctx.llm.is_some() {
                     distill::run(ctx, source_id).await?;
                 } else {
-                    info!(id = %source_id, "no LLM configured — stopping at Classified");
+                    info!(id = %source_id, "no LLM configured — marking Tainted at Classified");
+                    ctx.db.update_status(source_id, SourceStatus::Tainted).await?;
+                    ctx.db.audit("qpedia-bot", "source.tainted", Some(source_id.as_str()),
+                        Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "classified"}))).await?;
                     return Ok(());
                 }
             }

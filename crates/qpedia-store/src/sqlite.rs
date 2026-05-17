@@ -69,7 +69,14 @@ pub trait SourceStore: Send + Sync {
     async fn update_status(&self, id: &SourceId, status: SourceStatus) -> Result<()>;
     async fn update_language(&self, id: &SourceId, language: &str) -> Result<()>;
     async fn update_classification(&self, id: &SourceId, classification: &serde_json::Value) -> Result<()>;
+    async fn update_folder_path(&self, id: &SourceId, folder_path: &str) -> Result<()>;
     async fn delete_source(&self, id: &SourceId) -> Result<()>;
+    /// List sources in non-terminal, non-running states (tainted, extracted,
+    /// classified, committed) — i.e. stuck mid-pipeline. Admin use only.
+    async fn list_stalled(&self, tenant: &Tenant, limit: i64) -> Result<Vec<Source>>;
+    /// Sources in the root folder ("/") that have a classification — candidates
+    /// for re-organization into doc_type subfolders by the lint/reorganize job.
+    async fn list_unorganized(&self, tenant: &Tenant, limit: i64) -> Result<Vec<Source>>;
 }
 
 #[async_trait]
@@ -169,6 +176,16 @@ impl SourceStore for SqliteStore {
         Ok(())
     }
 
+    async fn update_folder_path(&self, id: &SourceId, folder_path: &str) -> Result<()> {
+        sqlx::query("UPDATE sources SET folder_path = ? WHERE id = ?")
+            .bind(folder_path)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     async fn delete_source(&self, id: &SourceId) -> Result<()> {
         sqlx::query("DELETE FROM sources WHERE id = ?")
             .bind(id.as_str())
@@ -176,6 +193,39 @@ impl SourceStore for SqliteStore {
             .await
             .map_err(map_sqlx)?;
         Ok(())
+    }
+
+    async fn list_stalled(&self, tenant: &Tenant, limit: i64) -> Result<Vec<Source>> {
+        // Stalled = not in a terminal state (done, failed, dead) and not
+        // actively running (pending, extracting, classifying, agent_distilling,
+        // embedding). Includes tainted (stopped due to missing dependency) and
+        // any source that got stuck mid-transition.
+        let rows = sqlx::query(
+            "SELECT * FROM sources \
+             WHERE tenant = ? \
+               AND status NOT IN ('done','failed','dead','pending','extracting','classifying','agent_distilling','embedding') \
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(tenant.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        rows.into_iter().map(row_to_source).collect()
+    }
+
+    async fn list_unorganized(&self, tenant: &Tenant, limit: i64) -> Result<Vec<Source>> {
+        let rows = sqlx::query(
+            "SELECT * FROM sources \
+             WHERE tenant = ? AND folder_path = '/' AND classification_json IS NOT NULL \
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(tenant.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        rows.into_iter().map(row_to_source).collect()
     }
 }
 
@@ -399,6 +449,119 @@ impl SqliteStore {
         Ok(Some(serde_json::from_str(&acl_json)?))
     }
 
+    // ---------- connectors ----------
+
+    pub async fn list_connectors(&self, tenant: &Tenant) -> Result<Vec<qpedia_connectors::ConnectorConfig>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant, kind, name, config_json, cursor, enabled, last_run_at, last_error \
+             FROM connectors WHERE tenant = ? ORDER BY created_at DESC",
+        )
+        .bind(tenant.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        rows.into_iter().map(row_to_connector).collect()
+    }
+
+    pub async fn get_connector(&self, id: &str) -> Result<Option<qpedia_connectors::ConnectorConfig>> {
+        let row = sqlx::query(
+            "SELECT id, tenant, kind, name, config_json, cursor, enabled, last_run_at, last_error \
+             FROM connectors WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        row.map(row_to_connector).transpose()
+    }
+
+    pub async fn get_connector_by_name(
+        &self,
+        tenant: &Tenant,
+        name: &str,
+    ) -> Result<Option<qpedia_connectors::ConnectorConfig>> {
+        let row = sqlx::query(
+            "SELECT id, tenant, kind, name, config_json, cursor, enabled, last_run_at, last_error \
+             FROM connectors WHERE tenant = ? AND name = ?",
+        )
+        .bind(tenant.as_str())
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        row.map(row_to_connector).transpose()
+    }
+
+    pub async fn insert_connector(&self, c: &qpedia_connectors::ConnectorConfig) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT INTO connectors \
+             (id, tenant, kind, name, config_json, cursor, enabled, last_run_at, last_error, created_at) \
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(&c.id)
+        .bind(&c.tenant)
+        .bind(&c.kind)
+        .bind(&c.name)
+        .bind(c.config_json.to_string())
+        .bind(c.cursor.as_deref())
+        .bind(c.enabled as i64)
+        .bind(c.last_run_at.map(|t| t.timestamp_millis()))
+        .bind(c.last_error.as_deref())
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    pub async fn update_connector_cursor(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        sqlx::query(
+            "UPDATE connectors SET cursor = ?, last_run_at = ?, last_error = ? WHERE id = ?",
+        )
+        .bind(cursor)
+        .bind(now)
+        .bind(error)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    pub async fn delete_connector(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM connectors WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    /// Connectors that should run now: enabled, and either never run or
+    /// `last_run_at` older than `older_than_ms`. Returns at most `limit`.
+    pub async fn due_connectors(&self, older_than_ms: i64, limit: i64) -> Result<Vec<qpedia_connectors::ConnectorConfig>> {
+        let cutoff = Utc::now().timestamp_millis() - older_than_ms;
+        let rows = sqlx::query(
+            "SELECT id, tenant, kind, name, config_json, cursor, enabled, last_run_at, last_error \
+             FROM connectors \
+             WHERE enabled = 1 AND (last_run_at IS NULL OR last_run_at < ?) \
+             ORDER BY last_run_at ASC NULLS FIRST LIMIT ?",
+        )
+        .bind(cutoff)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        rows.into_iter().map(row_to_connector).collect()
+    }
+
     /// Best-effort: clear stale pending rows so the table doesn't grow.
     pub async fn purge_pending(&self, older_than_secs: i64) -> Result<()> {
         let cutoff = Utc::now().timestamp_millis() - older_than_secs * 1000;
@@ -447,6 +610,30 @@ fn row_to_source(row: sqlx::sqlite::SqliteRow) -> Result<Source> {
 
 fn ms_to_dt(ms: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_else(Utc::now)
+}
+
+fn row_to_connector(row: sqlx::sqlite::SqliteRow) -> Result<qpedia_connectors::ConnectorConfig> {
+    let id: String = row.try_get("id").map_err(map_sqlx)?;
+    let tenant: String = row.try_get("tenant").map_err(map_sqlx)?;
+    let kind: String = row.try_get("kind").map_err(map_sqlx)?;
+    let name: String = row.try_get("name").map_err(map_sqlx)?;
+    let config_json: String = row.try_get("config_json").map_err(map_sqlx)?;
+    let cursor: Option<String> = row.try_get("cursor").map_err(map_sqlx)?;
+    let enabled: i64 = row.try_get("enabled").map_err(map_sqlx)?;
+    let last_run_ms: Option<i64> = row.try_get("last_run_at").map_err(map_sqlx)?;
+    let last_error: Option<String> = row.try_get("last_error").map_err(map_sqlx)?;
+
+    Ok(qpedia_connectors::ConnectorConfig {
+        id,
+        tenant,
+        kind,
+        name,
+        config_json: serde_json::from_str(&config_json)?,
+        cursor,
+        enabled: enabled != 0,
+        last_run_at: last_run_ms.map(ms_to_dt),
+        last_error,
+    })
 }
 
 /// Normalize a folder path: ensure leading "/", strip trailing "/" except for root.

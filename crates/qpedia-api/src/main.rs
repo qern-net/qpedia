@@ -25,7 +25,7 @@ use qpedia_core::{
 };
 use qpedia_embed::embedder_from_env;
 use qpedia_extract::ExtractorRegistry;
-use qpedia_ingest::{ingest_job, lint_job, remove_job, IngestContext, JobRunner};
+use qpedia_ingest::{ingest_job, lint_job, remove_job, sync_job, IngestContext, JobRunner};
 use qpedia_llm::provider_from_env;
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
             post(upload_source).get(list_sources).layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/api/v1/sources/:id", get(get_source).delete(delete_source))
+        .route("/api/v1/sources/:id/original", get(download_source_original))
         .route("/api/v1/wiki/list", get(list_wiki_pages))
         .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
@@ -131,6 +132,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/admin/folder-acls",
             get(list_folder_acls).put(set_folder_acl).delete(delete_folder_acl),
         )
+        .route("/api/v1/admin/sources/stalled", get(list_stalled_sources))
+        .route("/api/v1/admin/sources/resume", post(resume_stalled_sources))
+        .route("/api/v1/admin/connectors", get(list_connectors).post(create_connector))
+        .route("/api/v1/admin/connectors/:id", axum::routing::delete(delete_connector_route))
+        .route("/api/v1/admin/connectors/:id/sync", post(trigger_connector_sync))
         .with_state(state);
 
     // Optional static SPA. In dev the user runs `npm run dev` (vite) and hits
@@ -234,9 +240,40 @@ async fn get_source(
 ) -> Result<Json<Source>, ApiError> {
     match s.ctx.db.get_source_in(&user.tenant, &SourceId::from(id)).await? {
         Some(src) if user.can_read(&src.acl) => Ok(Json(src)),
-        Some(_) => Err(ApiError::NotFound), // info-leak avoidance: 404 not 403
+        Some(_) => Err(ApiError::NotFound),
         None => Err(ApiError::NotFound),
     }
+}
+
+async fn download_source_original(
+    State(s): State<AppState>,
+    user: User,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::header;
+    use axum::response::IntoResponse as _;
+    let sid = SourceId::from(id);
+    let src = match s.ctx.db.get_source_in(&user.tenant, &sid).await? {
+        Some(src) if user.can_read(&src.acl) => src,
+        Some(_) | None => return Err(ApiError::NotFound),
+    };
+    let ext = std::path::Path::new(&src.filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let bytes = s.ctx.blob.get(&sid, BlobKind::Original, ext).await
+        .map_err(|_| ApiError::NotFound)?;
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        src.filename.replace('"', "_")
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, src.mime.clone()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    ).into_response())
 }
 
 /// Enqueue a Remove job. Cleanup (wiki commit, Weaviate, blobs, row delete)
@@ -456,6 +493,100 @@ async fn delete_folder_acl(
     Ok(Json(json!({"deleted": q.folder_path})))
 }
 
+// ---------- connectors (admin) ----------
+
+#[derive(Deserialize)]
+struct CreateConnectorBody {
+    kind: String,
+    name: String,
+    config: Value,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+fn default_true() -> bool { true }
+
+async fn list_connectors(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() { return Err(ApiError::Forbidden); }
+    let rows = s.ctx.db.list_connectors(&user.tenant).await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    // Don't echo config_json — it carries credentials.
+    let items: Vec<Value> = rows.into_iter().map(|c| json!({
+        "id": c.id,
+        "tenant": c.tenant,
+        "kind": c.kind,
+        "name": c.name,
+        "cursor": c.cursor,
+        "enabled": c.enabled,
+        "last_run_at": c.last_run_at.map(|t| t.to_rfc3339()),
+        "last_error": c.last_error,
+    })).collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+async fn create_connector(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<CreateConnectorBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() { return Err(ApiError::Forbidden); }
+    let id = ulid::Ulid::new().to_string();
+    let cfg = qpedia_connectors::ConnectorConfig {
+        id: id.clone(),
+        tenant: user.tenant.as_str().to_string(),
+        kind: body.kind.clone(),
+        name: body.name.clone(),
+        config_json: body.config,
+        cursor: None,
+        enabled: body.enabled,
+        last_run_at: None,
+        last_error: None,
+    };
+    s.ctx.db.insert_connector(&cfg).await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    s.ctx.db.audit(&user.id, "connector.create", Some(&id),
+        Some(&json!({"kind": cfg.kind, "name": cfg.name, "tenant": cfg.tenant}))).await?;
+    Ok(Json(json!({"id": id, "kind": cfg.kind, "name": cfg.name, "enabled": cfg.enabled})))
+}
+
+async fn delete_connector_route(
+    State(s): State<AppState>,
+    user: User,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() { return Err(ApiError::Forbidden); }
+    let existing = s.ctx.db.get_connector(&id).await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?
+        .ok_or(ApiError::NotFound)?;
+    if existing.tenant != user.tenant.as_str() {
+        return Err(ApiError::NotFound);
+    }
+    s.ctx.db.delete_connector(&id).await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    s.ctx.db.audit(&user.id, "connector.delete", Some(&id), None).await?;
+    Ok(Json(json!({"deleted": id})))
+}
+
+async fn trigger_connector_sync(
+    State(s): State<AppState>,
+    user: User,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() { return Err(ApiError::Forbidden); }
+    let existing = s.ctx.db.get_connector(&id).await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?
+        .ok_or(ApiError::NotFound)?;
+    if existing.tenant != user.tenant.as_str() {
+        return Err(ApiError::NotFound);
+    }
+    let job = sync_job(&id).map_err(ApiError::Internal)?;
+    let job_id = job.id.to_string();
+    s.ctx.db.enqueue(&job).await?;
+    Ok(Json(json!({"job_id": job_id, "connector_id": id, "state": "queued"})))
+}
+
 async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<Value>, ApiError> {
     if !user.is_admin() {
         return Err(ApiError::Forbidden);
@@ -469,6 +600,37 @@ async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<
         Ok(None) => Err(ApiError::NotFound),
         Err(e) => Err(ApiError::Internal(e)),
     }
+}
+
+async fn list_stalled_sources(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let sources = s.ctx.db.list_stalled(&user.tenant, 200).await?;
+    let count = sources.len();
+    Ok(Json(json!({ "sources": sources, "count": count })))
+}
+
+async fn resume_stalled_sources(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let stalled = s.ctx.db.list_stalled(&user.tenant, 1000).await?;
+    let count = stalled.len();
+    for src in &stalled {
+        let job = ingest_job(&src.id).map_err(ApiError::Internal)?;
+        s.ctx.db.enqueue(&job).await?;
+    }
+    s.ctx.db.audit(&user.id, "admin.resume_stalled", None,
+        Some(&json!({"count": count, "tenant": user.tenant.as_str()}))).await?;
+    info!(count, tenant = %user.tenant, "stalled sources re-enqueued by admin");
+    Ok(Json(json!({ "enqueued": count })))
 }
 
 async fn chat(

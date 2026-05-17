@@ -85,37 +85,48 @@ fn check_page(
 
     // 2. Frontmatter sanity. Required: title, kind. We do a forgiving line-scan
     //    rather than full YAML parse to avoid choking on the agent's quoting.
-    let fm = extract_frontmatter(content);
-    match fm {
-        None => errors.push(ValidationError::Frontmatter {
-            path: path.into(),
-            reason: "no frontmatter block".into(),
-        }),
-        Some(fm) => {
-            if !line_has_key(&fm, "title") {
-                errors.push(ValidationError::Frontmatter {
-                    path: path.into(),
-                    reason: "missing 'title'".into(),
-                });
-            }
-            if !line_has_key(&fm, "kind") {
-                errors.push(ValidationError::Frontmatter {
-                    path: path.into(),
-                    reason: "missing 'kind'".into(),
-                });
+    //    System-managed files (index.md, log.md, QPEDIA.md, _meta/*) are exempt
+    //    because they are seeded without frontmatter and maintained by the bot.
+    let is_system = matches!(path, "index.md" | "log.md" | "QPEDIA.md")
+        || path.starts_with("_meta/");
+
+    if !is_system {
+        let fm = extract_frontmatter(content);
+        match fm {
+            None => errors.push(ValidationError::Frontmatter {
+                path: path.into(),
+                reason: "no frontmatter block".into(),
+            }),
+            Some(fm) => {
+                if !line_has_key(&fm, "title") {
+                    errors.push(ValidationError::Frontmatter {
+                        path: path.into(),
+                        reason: "missing 'title'".into(),
+                    });
+                }
+                if !line_has_key(&fm, "kind") {
+                    errors.push(ValidationError::Frontmatter {
+                        path: path.into(),
+                        reason: "missing 'kind'".into(),
+                    });
+                }
             }
         }
     }
 
-    // 3. Wikilinks resolve.
-    for target in extract_wikilinks(content) {
-        // Targets may be raw paths like "concepts/foo.md" or path#anchor.
-        let path_only = target.split('#').next().unwrap_or(&target).to_string();
-        if !universe.contains(&path_only) {
-            errors.push(ValidationError::UnresolvedLink {
-                path: path.into(),
-                target,
-            });
+    // 3. Wikilinks resolve. Skip system files — index.md and log.md are
+    //    maintained by the agent as catalogs/logs and may reference pages
+    //    from past or future bundles that aren't in the current universe.
+    if !is_system {
+        for target in extract_wikilinks(content) {
+            // Targets may be raw paths like "concepts/foo.md" or path#anchor.
+            let path_only = target.split('#').next().unwrap_or(&target).to_string();
+            if !universe.contains(&path_only) {
+                errors.push(ValidationError::UnresolvedLink {
+                    path: path.into(),
+                    target,
+                });
+            }
         }
     }
 }

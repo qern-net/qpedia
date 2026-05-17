@@ -40,6 +40,10 @@ pub enum SourceStatus {
     Committed,
     Embedding,
     Done,
+    /// Stopped mid-pipeline due to a missing dependency (e.g. no LLM configured).
+    /// The source can be resumed by re-enqueueing an Ingest job once the
+    /// dependency is available.
+    Tainted,
     Failed,
     Dead,
 }

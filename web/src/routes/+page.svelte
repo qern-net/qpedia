@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { deleteSource, listSources, TERMINAL, type Source } from '$lib/api';
+  import { deleteSource, listSources, sourceOriginalUrl, TERMINAL, type Source } from '$lib/api';
   import StatusChip from '$lib/components/StatusChip.svelte';
   import UploadPanel from '$lib/components/UploadPanel.svelte';
 
@@ -77,15 +77,16 @@
         <table>
           <thead>
             <tr>
-              <th>Filename</th>
-              <th>Type</th>
-              <th>Size</th>
-              <th>Status</th>
-              <th>Doc type</th>
-              <th>Lang</th>
-              <th>Hints</th>
-              <th></th>
-            </tr>
+                <th>Filename</th>
+                <th>Folder</th>
+                <th>Type</th>
+                <th>Size</th>
+                <th>Status</th>
+                <th>Doc type</th>
+                <th>Lang</th>
+                <th>Hints</th>
+                <th></th>
+              </tr>
           </thead>
           <tbody>
             {#each sources as src (src.id)}
@@ -94,6 +95,7 @@
                   <div>{src.filename}</div>
                   <div class="mono muted" style="font-size: 11px;">{src.id}</div>
                 </td>
+                <td class="mono muted" style="font-size: 12px;">{src.folder_path}</td>
                 <td class="mono muted">{src.mime}</td>
                 <td>{fmtSize(src.size_bytes)}</td>
                 <td><StatusChip status={src.status} /></td>
@@ -102,7 +104,13 @@
                 <td class="muted" style="max-width: 280px;">
                   {(src.classification?.hints ?? []).join(', ') || '—'}
                 </td>
-                <td>
+                <td style="white-space: nowrap;">
+                  <a
+                    href={sourceOriginalUrl(src.id)}
+                    download={src.filename}
+                    title="Download original file"
+                    style="font-size: 12px; padding: 4px 10px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); text-decoration: none; margin-right: 4px;"
+                  >↓</a>
                   <button
                     onclick={() => onDelete(src)}
                     disabled={pendingDelete.has(src.id)}

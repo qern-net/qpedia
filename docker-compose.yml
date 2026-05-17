@@ -36,7 +36,6 @@ services:
     restart: unless-stopped
 
   marker:
-    profiles: [marker]
     build:
       context: ./sidecar/marker
     image: qpedia/marker:${QPEDIA_VERSION:-dev}
