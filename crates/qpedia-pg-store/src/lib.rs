@@ -20,7 +20,7 @@ pub mod sources;
 pub mod tenants;
 pub mod wiki;
 
-pub use events::{EventSink, NoopEventSink};
+pub use events::{EventSink, NoopEventSink, NoopTenantHook, TenantHook};
 pub use folders::FolderRow;
 pub use oidc_pending::PendingLogin;
 pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
@@ -43,6 +43,7 @@ use tracing::info;
 pub struct PgStore {
     pool: PgPool,
     event_sinks: Arc<RwLock<Vec<Arc<dyn EventSink>>>>,
+    tenant_hooks: Arc<RwLock<Vec<Arc<dyn TenantHook>>>>,
 }
 
 impl PgStore {
@@ -72,6 +73,7 @@ impl PgStore {
         Ok(Self {
             pool,
             event_sinks: Arc::new(RwLock::new(Vec::new())),
+            tenant_hooks: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -93,6 +95,25 @@ impl PgStore {
     /// to fire them after committing.
     pub(crate) fn event_sinks_snapshot(&self) -> Vec<Arc<dyn EventSink>> {
         self.event_sinks
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Register a tenant lifecycle hook. Every successful
+    /// [`PgStore::upsert_tenant`] call will fire `on_upsert` on a
+    /// detached task after the row is durably committed; future tenant
+    /// delete plumbing will fire `on_delete` similarly.
+    pub fn register_tenant_hook(&self, hook: Arc<dyn TenantHook>) {
+        if let Ok(mut g) = self.tenant_hooks.write() {
+            g.push(hook);
+        }
+    }
+
+    /// Snapshot the currently registered tenant hooks.
+    pub(crate) fn tenant_hooks_snapshot(&self) -> Vec<Arc<dyn TenantHook>> {
+        self.tenant_hooks
             .read()
             .ok()
             .map(|g| g.clone())

@@ -93,37 +93,15 @@ impl axum::extract::FromRef<AppState> for AuthExtractorState {
 
 pub use qpedia_pg_store::{EventSink, NoopEventSink};
 
-// ---------- TenantHook (surface defined here; integration in 0.3) ------------
+// ---------- TenantHook: re-exported from pg-store; integrated in Band 0.3 ----
+//
+// Same shape as EventSink: trait + NoopTenantHook live in
+// `qpedia_pg_store::events`. Hooks fire from `PgStore::upsert_tenant`
+// on a detached task after the row is durably committed. The
+// `/api/v1/admin/bootstrap` route inherits firing automatically since
+// it calls `db.upsert_tenant(...)`.
 
-/// Hook fired on tenant lifecycle events. Default is a no-op.
-///
-/// Overlays use this to provision billing rows, send onboarding email,
-/// trigger a SaaS workflow, etc.
-///
-/// **Note (Band 0.1):** trait defined for early-stable surface; firing
-/// at `/api/v1/admin/bootstrap` and the (future) tenant CRUD sites lands
-/// in Band 0.3.
-#[async_trait::async_trait]
-pub trait TenantHook: Send + Sync + 'static {
-    /// A tenant was just created or upserted.
-    async fn on_upsert(&self, tenant: &Tenant, display_name: &str, email_domain: Option<&str>);
-    /// A tenant is about to be deleted. Default: no-op.
-    async fn on_delete(&self, _tenant: &Tenant) {}
-}
-
-/// Default no-op hook.
-pub struct NoopTenantHook;
-
-#[async_trait::async_trait]
-impl TenantHook for NoopTenantHook {
-    async fn on_upsert(
-        &self,
-        _tenant: &Tenant,
-        _display_name: &str,
-        _email_domain: Option<&str>,
-    ) {
-    }
-}
+pub use qpedia_pg_store::{NoopTenantHook, TenantHook};
 
 // ---------- AppBuilder ---------------------------------------------------------
 
@@ -138,7 +116,6 @@ pub struct AppBuilder {
     upload_limit_bytes: usize,
     extension_map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     extra_routers: Vec<Router<AppState>>,
-    tenant_hooks: Vec<Arc<dyn TenantHook>>,
     spawn_workers: bool,
 }
 
@@ -218,7 +195,6 @@ impl AppBuilder {
             upload_limit_bytes: DEFAULT_UPLOAD_LIMIT_BYTES,
             extension_map: HashMap::new(),
             extra_routers: Vec::new(),
-            tenant_hooks: Vec::new(),
             spawn_workers: true,
         })
     }
@@ -248,9 +224,12 @@ impl AppBuilder {
         self
     }
 
-    /// Register a [`TenantHook`]. See trait docs.
-    pub fn with_tenant_hook<H: TenantHook>(mut self, hook: H) -> Self {
-        self.tenant_hooks.push(Arc::new(hook));
+    /// Register a [`TenantHook`]. Delegates to
+    /// [`PgStore::register_tenant_hook`], so every `db.upsert_tenant(...)`
+    /// caller (including `/api/v1/admin/bootstrap`) fires the hook after
+    /// committing the tenant row. See trait docs.
+    pub fn with_tenant_hook<H: TenantHook>(self, hook: H) -> Self {
+        self.ctx.db.register_tenant_hook(Arc::new(hook));
         self
     }
 

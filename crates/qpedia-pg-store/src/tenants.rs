@@ -34,6 +34,28 @@ impl PgStore {
         .execute(self.pool())
         .await
         .context("upsert tenant")?;
+
+        // Fire registered tenant hooks best-effort after the row is
+        // durably committed. Detached so the originating handler returns
+        // immediately; hooks can't slow it down or fail it. Mirrors the
+        // EventSink integration in `audit::write_audit`.
+        let hooks = self.tenant_hooks_snapshot();
+        if !hooks.is_empty() {
+            let tenant = id.clone();
+            let display_name = display_name.to_string();
+            let email_domain = email_domain.map(|s| s.to_string());
+            tokio::spawn(async move {
+                for hook in hooks {
+                    hook.on_upsert(
+                        &tenant,
+                        &display_name,
+                        email_domain.as_deref(),
+                    )
+                    .await;
+                }
+            });
+        }
+
         Ok(())
     }
 
