@@ -1,4 +1,6 @@
-//! Sources CRUD via RLS-scoped transactions.
+//! Sources CRUD. Public identifier is the slug (`SourceId` carries it);
+//! the BIGSERIAL `id` column is internal-only and never escapes this
+//! module. All queries are RLS-scoped via `begin_for(&tenant)`.
 
 use crate::PgStore;
 use anyhow::{Context, Result};
@@ -13,7 +15,7 @@ use sqlx::Row;
 use std::collections::BTreeSet;
 
 impl PgStore {
-    pub async fn pg_insert_source(&self, src: &Source) -> Result<()> {
+    pub async fn insert_source(&self, src: &Source) -> Result<()> {
         let mut tx = self.begin_for(&src.tenant).await?;
         let status = serde_json::to_string(&src.status)?;
         let status = status.trim_matches('"').to_string();
@@ -21,12 +23,12 @@ impl PgStore {
 
         sqlx::query(
             "INSERT INTO sources \
-             (id, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
+             (tenant_id, slug, folder_path, filename, mime, sha256, size_bytes, \
               acl, status, language, classification, created_at, ingested_at) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         )
-        .bind(src.id.as_str())
         .bind(src.tenant.as_str())
+        .bind(src.id.as_str())
         .bind(&src.folder_path)
         .bind(&src.filename)
         .bind(&src.mime)
@@ -46,18 +48,18 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn pg_get_source_in(
+    pub async fn get_source_in(
         &self,
         tenant: &Tenant,
-        id: &SourceId,
+        slug: &SourceId,
     ) -> Result<Option<Source>> {
         let mut tx = self.begin_for(tenant).await?;
         let row = sqlx::query(
-            "SELECT id, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
+            "SELECT slug, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
                     acl, status, language, classification, created_at, ingested_at \
-             FROM sources WHERE id = $1",
+             FROM sources WHERE slug = $1",
         )
-        .bind(id.as_str())
+        .bind(slug.as_str())
         .fetch_optional(&mut *tx)
         .await
         .context("get_source_in")?;
@@ -65,7 +67,7 @@ impl PgStore {
         row.map(row_to_source).transpose()
     }
 
-    pub async fn pg_list_sources(
+    pub async fn list_sources(
         &self,
         tenant: &Tenant,
         folder_prefix: &str,
@@ -73,7 +75,7 @@ impl PgStore {
     ) -> Result<Vec<Source>> {
         let mut tx = self.begin_for(tenant).await?;
         let rows = sqlx::query(
-            "SELECT id, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
+            "SELECT slug, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
                     acl, status, language, classification, created_at, ingested_at \
              FROM sources \
              WHERE folder_path LIKE $1 \
@@ -89,18 +91,18 @@ impl PgStore {
         rows.into_iter().map(row_to_source).collect()
     }
 
-    pub async fn pg_update_status(
+    pub async fn update_status(
         &self,
         tenant: &Tenant,
-        id: &SourceId,
+        slug: &SourceId,
         status: SourceStatus,
     ) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
         let s = serde_json::to_string(&status)?;
         let s = s.trim_matches('"').to_string();
-        sqlx::query("UPDATE sources SET status = $1 WHERE id = $2")
+        sqlx::query("UPDATE sources SET status = $1 WHERE slug = $2")
             .bind(s)
-            .bind(id.as_str())
+            .bind(slug.as_str())
             .execute(&mut *tx)
             .await
             .context("update_status")?;
@@ -108,16 +110,16 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn pg_update_classification(
+    pub async fn update_classification(
         &self,
         tenant: &Tenant,
-        id: &SourceId,
+        slug: &SourceId,
         classification: &serde_json::Value,
     ) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
-        sqlx::query("UPDATE sources SET classification = $1 WHERE id = $2")
+        sqlx::query("UPDATE sources SET classification = $1 WHERE slug = $2")
             .bind(classification)
-            .bind(id.as_str())
+            .bind(slug.as_str())
             .execute(&mut *tx)
             .await
             .context("update_classification")?;
@@ -125,16 +127,16 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn pg_update_language(
+    pub async fn update_language(
         &self,
         tenant: &Tenant,
-        id: &SourceId,
+        slug: &SourceId,
         language: &str,
     ) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
-        sqlx::query("UPDATE sources SET language = $1 WHERE id = $2")
+        sqlx::query("UPDATE sources SET language = $1 WHERE slug = $2")
             .bind(language)
-            .bind(id.as_str())
+            .bind(slug.as_str())
             .execute(&mut *tx)
             .await
             .context("update_language")?;
@@ -142,16 +144,16 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn pg_update_folder_path(
+    pub async fn update_folder_path(
         &self,
         tenant: &Tenant,
-        id: &SourceId,
+        slug: &SourceId,
         folder_path: &str,
     ) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
-        sqlx::query("UPDATE sources SET folder_path = $1 WHERE id = $2")
+        sqlx::query("UPDATE sources SET folder_path = $1 WHERE slug = $2")
             .bind(folder_path)
-            .bind(id.as_str())
+            .bind(slug.as_str())
             .execute(&mut *tx)
             .await
             .context("update_folder_path")?;
@@ -159,15 +161,66 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn pg_delete_source(&self, tenant: &Tenant, id: &SourceId) -> Result<()> {
+    pub async fn delete_source(&self, tenant: &Tenant, slug: &SourceId) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
-        sqlx::query("DELETE FROM sources WHERE id = $1")
-            .bind(id.as_str())
+        sqlx::query("DELETE FROM sources WHERE slug = $1")
+            .bind(slug.as_str())
             .execute(&mut *tx)
             .await
             .context("delete_source")?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Sources still sitting at folder_path = "/" but with a classification —
+    /// candidates for the lint pass's auto-organize sweep.
+    pub async fn list_unorganized(
+        &self,
+        tenant: &Tenant,
+        limit: i64,
+    ) -> Result<Vec<Source>> {
+        let mut tx = self.begin_for(tenant).await?;
+        let rows = sqlx::query(
+            "SELECT slug, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
+                    acl, status, language, classification, created_at, ingested_at \
+             FROM sources \
+             WHERE folder_path = '/' AND classification IS NOT NULL \
+             ORDER BY created_at DESC \
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .context("list_unorganized")?;
+        tx.commit().await.ok();
+        rows.into_iter().map(row_to_source).collect()
+    }
+
+    /// Sources stuck in mid-pipeline states for too long — admin "resume"
+    /// surfaces these so an operator can re-enqueue them.
+    pub async fn list_stalled(
+        &self,
+        tenant: &Tenant,
+        older_than_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<Source>> {
+        let mut tx = self.begin_for(tenant).await?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(older_than_secs);
+        let rows = sqlx::query(
+            "SELECT slug, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
+                    acl, status, language, classification, created_at, ingested_at \
+             FROM sources \
+             WHERE status NOT IN ('done','tainted','failed') AND created_at < $1 \
+             ORDER BY created_at ASC \
+             LIMIT $2",
+        )
+        .bind(cutoff)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .context("list_stalled")?;
+        tx.commit().await.ok();
+        rows.into_iter().map(row_to_source).collect()
     }
 }
 
@@ -181,10 +234,10 @@ fn row_to_source(row: sqlx::postgres::PgRow) -> Result<Source> {
     let ingested_at: Option<DateTime<Utc>> = row.try_get("ingested_at").ok();
     let size: i64 = row.try_get("size_bytes").context("size_bytes")?;
     let tenant_id: String = row.try_get("tenant_id").context("tenant_id")?;
-    let id: String = row.try_get("id").context("id")?;
+    let slug: String = row.try_get("slug").context("slug")?;
 
     Ok(Source {
-        id: SourceId::from(id),
+        id: SourceId::from(slug),
         tenant: Tenant::new(tenant_id),
         folder_path: row.try_get("folder_path").context("folder_path")?,
         filename: row.try_get("filename").context("filename")?,

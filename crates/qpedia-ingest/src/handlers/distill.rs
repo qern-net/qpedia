@@ -1,17 +1,16 @@
 //! Distill phase: runs the multi-page agent loop, validates the produced
 //! DiffBundle, and commits it to the wiki repo.
 //!
-//! See DESIGN.md §5 (state machine), §6 (agent), §6.4 (validator).
+//! See SPEC-v2.md §5 (state machine), §6 (agent), §6.4 (validator).
 
 use crate::agent::{run_agent, AgentDeps};
 use crate::runner::IngestContext;
 use crate::validator;
 use anyhow::{anyhow, Result};
-use qpedia_core::{source::SourceStatus, SourceId};
-use qpedia_store::sqlite::SourceStore;
+use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
 use tracing::{info, warn};
 
-pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
+pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
     let llm = ctx
         .llm
         .clone()
@@ -19,13 +18,13 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
     let src = ctx
         .db
-        .get_source(source_id)
+        .get_source_in(tenant, source_id)
         .await?
         .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
 
     let wiki = ctx.wiki_store.get(&src.tenant).await?;
 
-    ctx.db.update_status(source_id, SourceStatus::AgentDistilling).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::AgentDistilling).await?;
 
     let deps = AgentDeps {
         llm: llm.clone(),
@@ -34,13 +33,12 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         blob: &ctx.blob,
         db: &ctx.db,
         embedder: ctx.embedder.clone(),
-        weaviate: ctx.weaviate.clone(),
     };
 
     let bundle = run_agent(&deps, &src).await?;
     if bundle.operations.is_empty() {
         warn!(id = %source_id, "agent returned empty bundle; nothing to commit");
-        ctx.db.update_status(source_id, SourceStatus::Committed).await?;
+        ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;
         return Ok(());
     }
 
@@ -62,9 +60,10 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
     let sha = wiki.commit_bundle(&bundle).await?;
 
-    ctx.db.update_status(source_id, SourceStatus::Committed).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;
     ctx.db
-        .audit(
+        .write_audit(
+            tenant,
             "qpedia-bot",
             "wiki.committed",
             Some(source_id.as_str()),

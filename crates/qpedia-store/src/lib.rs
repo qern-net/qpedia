@@ -1,14 +1,11 @@
-//! Storage layer: SQLite (jobs/audit/sources), Weaviate (vectors + wiki objects),
-//! git (wiki markdown), and filesystem (raw docs).
+//! Filesystem-only storage primitives. SQL is in `qpedia-pg-store`.
 //!
-//! Each submodule exposes a trait so tests can swap in-memory impls.
+//! This crate owns:
+//!   - `WikiRepo` / `WikiRepoStore`: per-tenant git repos on disk.
+//!   - `BlobStore`: raw + extracted blobs under `/data/raw/<id>/`.
 
-pub mod sqlite;
-pub mod weaviate;
-pub mod wikirepo;
 pub mod blob;
+pub mod wikirepo;
 
-pub use sqlite::{SqliteStore, SourceStore, JobQueue};
-pub use weaviate::WeaviateStore;
-pub use wikirepo::{WikiRepo, WikiRepoStore, SearchHit};
-pub use blob::{BlobStore, BlobStorage, BlobKind};
+pub use blob::{BlobKind, BlobStorage, BlobStore};
+pub use wikirepo::{SearchHit, WikiRepo, WikiRepoStore};

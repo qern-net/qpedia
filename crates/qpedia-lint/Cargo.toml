@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 qpedia-core.workspace = true
 qpedia-store.workspace = true
+qpedia-pg-store.workspace = true
 qpedia-llm.workspace = true
 qpedia-embed.workspace = true
 tokio.workspace = true

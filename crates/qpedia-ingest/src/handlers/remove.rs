@@ -1,4 +1,4 @@
-//! Remove pipeline: a source is being deleted. See DESIGN.md §7.
+//! Remove pipeline: a source is being deleted. See SPEC-v2.md §7.
 //!
 //! Steps:
 //!   1. Find every wiki page whose frontmatter `source_ids` includes :id.
@@ -8,7 +8,7 @@
 //!   3. Update index.md to remove links to deleted pages.
 //!   4. Append a line to log.md.
 //!   5. Commit the bundle as a single git commit.
-//!   6. Delete removed-page objects from Weaviate; re-embed patched pages.
+//!   6. Delete removed-page rows from wiki_pages; re-embed patched pages.
 //!   7. rm -rf the source's blob directory.
 //!   8. DELETE the row from `sources`.
 //!
@@ -22,51 +22,24 @@ use crate::runner::IngestContext;
 use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
-    job::{Job, JobKind, JobState},
+    tenant::Tenant,
     wiki::{DiffBundle, DiffOp},
-    JobId, SourceId,
+    SourceId,
 };
-use qpedia_store::{blob::BlobStorage, sqlite::SourceStore};
-use serde::{Deserialize, Serialize};
+use qpedia_store::blob::BlobStorage;
 use tracing::{info, warn};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemovePayload {
-    pub source_id: SourceId,
-}
-
-/// Build a Remove job for a given source.
-pub fn remove_job(source_id: &SourceId) -> Result<Job> {
-    let now = Utc::now();
-    Ok(Job {
-        id: JobId::new(),
-        kind: JobKind::Remove,
-        payload: serde_json::to_value(RemovePayload { source_id: source_id.clone() })?,
-        state: JobState::Queued,
-        attempt: 0,
-        max_attempts: 5,
-        next_run_at: now,
-        last_error: None,
-        created_at: now,
-        updated_at: now,
-    })
-}
-
-pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
+pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
     info!(id = %source_id, "remove: start");
 
-    // Fetch the source so we know which tenant's wiki to touch.
+    // Fetch the source so we know we're operating on the right tenant's wiki.
     // If the row is already gone (idempotent retry) skip straight to cleanup.
-    let src = match ctx.db.get_source(source_id).await? {
-        Some(s) => s,
-        None => {
-            info!(id = %source_id, "remove: source already gone, cleaning up blobs");
-            let _ = ctx.blob.delete_all(source_id).await;
-            return Ok(());
-        }
-    };
-    let tenant = src.tenant.clone();
-    let wiki = ctx.wiki_store.get(&tenant).await?;
+    if ctx.db.get_source_in(tenant, source_id).await?.is_none() {
+        info!(id = %source_id, "remove: source already gone, cleaning up blobs");
+        let _ = ctx.blob.delete_all(source_id).await;
+        return Ok(());
+    }
+    let wiki = ctx.wiki_store.get(tenant).await?;
 
     // ── 1. Plan: walk wiki, decide delete vs patch per affected page ──────
 
@@ -174,18 +147,16 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         let sha = wiki.commit_bundle(&bundle).await?;
         info!(id = %source_id, sha = %sha, "remove: wiki committed");
 
-        // ── 6a. Drop deleted pages from Weaviate ─────────────────────────
-        if let Some(weaviate) = &ctx.weaviate {
-            for path in &to_delete {
-                if let Err(e) = weaviate.delete_page(&tenant, path).await {
-                    warn!(path = %path, error = %e, "weaviate delete failed (non-fatal)");
-                }
+        // ── 6a. Drop deleted pages from wiki_pages ─────────────────────────
+        for path in &to_delete {
+            if let Err(e) = ctx.db.delete_wiki_page(tenant, path).await {
+                warn!(path = %path, error = %e, "wiki_pages delete failed (non-fatal)");
             }
         }
 
         // ── 6b. Re-embed patched pages (HEAD diff captures the patches) ───
         if !to_patch.is_empty() {
-            match embed_changed_pages(ctx, &tenant).await {
+            match embed_changed_pages(ctx, tenant).await {
                 Ok(embedded) => info!(id = %source_id, embedded = embedded.len(), "remove: re-embedded patched pages"),
                 Err(e) => warn!(id = %source_id, error = %e, "remove: re-embed failed (non-fatal)"),
             }
@@ -202,11 +173,12 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
     // ── 8. Drop the DB row ────────────────────────────────────────────────
 
-    ctx.db.delete_source(source_id).await?;
+    ctx.db.delete_source(tenant, source_id).await?;
 
     let _ = ctx
         .db
-        .audit(
+        .write_audit(
+            tenant,
             "qpedia-bot",
             "source.removed",
             Some(source_id.as_str()),

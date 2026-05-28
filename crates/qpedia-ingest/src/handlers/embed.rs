@@ -1,47 +1,42 @@
 //! Embedding phase: walk the pages touched by the latest wiki commit,
-//! embed each, and upsert into Weaviate. See DESIGN.md §5.1.
+//! embed each, and upsert into the `wiki_pages` table (pgvector + tsvector).
+//! See SPEC-v2.md §5.1.
 //!
-//! Idempotent: deterministic UUIDs in Weaviate mean re-embedding the same
-//! page replaces in place. Degrades cleanly when no embedder/weaviate is
+//! Idempotent: `wiki_pages` is keyed on (tenant_id, path) so re-embedding
+//! the same page replaces in place. Degrades cleanly when no embedder is
 //! configured (transitions straight to Done so the queue doesn't stall).
 
 use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
-use qpedia_store::{sqlite::SourceStore, weaviate::WikiPageRecord};
+use qpedia_pg_store::WikiPageUpsert;
 use tracing::{info, warn};
 
 const MAX_EMBED_CHARS: usize = 8000;
 
 /// Per-source ingest phase: update status, embed pages from HEAD, audit.
-pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
-    if ctx.embedder.is_none() || ctx.weaviate.is_none() {
-        info!(id = %source_id, "no embedder/weaviate — marking Done");
-        ctx.db.update_status(source_id, SourceStatus::Done).await?;
+pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
+    if ctx.embedder.is_none() {
+        info!(id = %source_id, "no embedder — marking Done");
+        ctx.db.update_status(tenant, source_id, SourceStatus::Done).await?;
         return Ok(());
     }
 
-    let src = ctx
-        .db
-        .get_source(source_id)
-        .await?
-        .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Embedding).await?;
 
-    ctx.db.update_status(source_id, SourceStatus::Embedding).await?;
-
-    let touched = embed_changed_pages(ctx, &src.tenant).await?;
+    let touched = embed_changed_pages(ctx, tenant).await?;
     if touched.is_empty() {
         warn!(id = %source_id, "embed: no markdown pages touched in HEAD");
     }
 
-    ctx.db.update_status(source_id, SourceStatus::Done).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Done).await?;
     ctx.db
-        .audit(
+        .write_audit(
+            tenant,
             "qpedia-bot",
             "wiki.embedded",
             Some(source_id.as_str()),
-            Some(&serde_json::json!({"pages": touched, "tenant": src.tenant.as_str()})),
+            Some(&serde_json::json!({"pages": touched, "tenant": tenant.as_str()})),
         )
         .await?;
 
@@ -49,14 +44,13 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
     Ok(())
 }
 
-/// Re-embed exactly the pages touched by HEAD and upsert into Weaviate.
+/// Re-embed exactly the pages touched by HEAD and upsert into pgvector.
 /// Used by both the per-source embed phase and the remove pipeline (which
 /// re-embeds patched pages after stripping a removed source from frontmatter).
 ///
-/// Returns the list of paths embedded. No-ops cleanly when embedder or
-/// Weaviate is missing.
+/// Returns the list of paths embedded. No-ops cleanly when embedder is missing.
 pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result<Vec<String>> {
-    let (Some(embedder), Some(weaviate)) = (ctx.embedder.as_ref(), ctx.weaviate.as_ref()) else {
+    let Some(embedder) = ctx.embedder.as_ref() else {
         return Ok(Vec::new());
     };
 
@@ -66,7 +60,7 @@ pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result
         return Ok(touched);
     }
 
-    let mut records: Vec<(String, String, String, Frontmatter)> = Vec::new();
+    let mut records: Vec<(String, WikiPageUpsert)> = Vec::new();
     let mut embed_inputs: Vec<String> = Vec::new();
 
     for path in &touched {
@@ -78,7 +72,16 @@ pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result
             .chars()
             .take(MAX_EMBED_CHARS)
             .collect();
-        records.push((path.clone(), title, content, fm));
+        let upsert = WikiPageUpsert {
+            page_id: fm.id.unwrap_or_else(|| path.clone()),
+            path: path.clone(),
+            kind: fm.kind.unwrap_or_default(),
+            title,
+            content,
+            tags: fm.tags,
+            source_ids: fm.source_ids,
+        };
+        records.push((path.clone(), upsert));
         embed_inputs.push(embed_text);
     }
 
@@ -96,20 +99,11 @@ pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result
         ));
     }
 
-    let now = Utc::now().to_rfc3339();
-    for ((path, title, content, fm), vector) in records.into_iter().zip(vectors) {
-        let record = WikiPageRecord {
-            page_id: fm.id.unwrap_or_else(|| path.clone()),
-            tenant: tenant.clone(),
-            path: path.clone(),
-            kind: fm.kind.unwrap_or_default(),
-            title,
-            content,
-            tags: fm.tags,
-            source_ids: fm.source_ids,
-            updated_at: now.clone(),
-        };
-        weaviate.upsert_page(&record, vector).await.map_err(|e| anyhow!("weaviate upsert {}: {e}", path))?;
+    for ((path, upsert), vector) in records.into_iter().zip(vectors) {
+        ctx.db
+            .upsert_wiki_page(tenant, &upsert, vector)
+            .await
+            .map_err(|e| anyhow!("wiki_pages upsert {}: {e}", path))?;
     }
     Ok(touched)
 }

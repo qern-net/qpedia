@@ -31,7 +31,7 @@ pub struct SearchHit {
 
 impl PgStore {
     /// Insert-or-replace a wiki page row.
-    pub async fn pg_upsert_wiki_page(
+    pub async fn upsert_wiki_page(
         &self,
         tenant: &Tenant,
         page: &WikiPageUpsert,
@@ -39,23 +39,24 @@ impl PgStore {
     ) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
         let vec = Vector::from(embedding);
+        // Column names must match migrations/0001_init.sql: the table has no
+        // `page_id` (identity is (tenant_id, path)) and the array column is
+        // `source_slugs`. `page.source_ids` carries slugs (SourceId == slug).
         sqlx::query(
             "INSERT INTO wiki_pages \
-             (tenant_id, path, page_id, kind, title, content, tags, source_ids, embedding, updated_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now()) \
+             (tenant_id, path, kind, title, content, tags, source_slugs, embedding, updated_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now()) \
              ON CONFLICT (tenant_id, path) DO UPDATE SET \
-               page_id    = EXCLUDED.page_id, \
-               kind       = EXCLUDED.kind, \
-               title      = EXCLUDED.title, \
-               content    = EXCLUDED.content, \
-               tags       = EXCLUDED.tags, \
-               source_ids = EXCLUDED.source_ids, \
-               embedding  = EXCLUDED.embedding, \
-               updated_at = now()",
+               kind         = EXCLUDED.kind, \
+               title        = EXCLUDED.title, \
+               content      = EXCLUDED.content, \
+               tags         = EXCLUDED.tags, \
+               source_slugs = EXCLUDED.source_slugs, \
+               embedding    = EXCLUDED.embedding, \
+               updated_at   = now()",
         )
         .bind(tenant.as_str())
         .bind(&page.path)
-        .bind(&page.page_id)
         .bind(&page.kind)
         .bind(&page.title)
         .bind(&page.content)
@@ -69,7 +70,7 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn pg_delete_wiki_page(&self, tenant: &Tenant, path: &str) -> Result<()> {
+    pub async fn delete_wiki_page(&self, tenant: &Tenant, path: &str) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
         sqlx::query("DELETE FROM wiki_pages WHERE path = $1")
             .bind(path)
@@ -83,7 +84,7 @@ impl PgStore {
     /// Hybrid search: combines vector cosine similarity with `ts_rank_cd`
     /// keyword ranking. `alpha` weights vector vs. BM25 (0..=1, default
     /// 0.7 — matches DESIGN.md §2.4).
-    pub async fn pg_hybrid_search(
+    pub async fn hybrid_search(
         &self,
         tenant: &Tenant,
         query: &str,
@@ -130,7 +131,7 @@ impl PgStore {
     }
 
     /// Near-duplicate pairs above `min_similarity`. Used by the lint pass.
-    pub async fn pg_near_duplicates(
+    pub async fn near_duplicates(
         &self,
         tenant: &Tenant,
         min_similarity: f32,

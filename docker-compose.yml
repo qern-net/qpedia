@@ -5,6 +5,12 @@ services:
       dockerfile: Dockerfile
     image: qpedia/app:${QPEDIA_VERSION:-dev}
     env_file: .env
+    # Compose owns the container's DB URL explicitly so it always points at
+    # the `postgres` service (not whatever host a developer set in .env for
+    # local `cargo run`) and shares the single password source with the
+    # postgres service below. `environment:` overrides `env_file:`.
+    environment:
+      QPEDIA_DB_URL: postgres://qpedia_admin:${QPEDIA_DB_PASSWORD:-qpedia-dev}@postgres:5432/qpedia?sslmode=disable
     volumes:
       # Bind mounts to ./data/ so wiki, raw docs, and the DB are visible on
       # the host, survive `docker compose down` (including -v), and can be
@@ -12,7 +18,6 @@ services:
       # The data/ directory is gitignored so these files never end up in the repo.
       - ./data/wiki:/data/wiki
       - ./data/raw:/data/raw
-      - ./data/sqlite:/data/sqlite
       - ./data/models:/data/models
     ports:
       - "8080:8080"

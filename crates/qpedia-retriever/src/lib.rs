@@ -19,9 +19,8 @@ use qpedia_embed::Embedder;
 use qpedia_llm::{
     current_model, CompleteReq, LlmProvider, Message, Role, ToolCall, ToolDef,
 };
-use qpedia_store::{
-    sqlite::SourceStore, weaviate::WeaviateStore, SearchHit, SqliteStore, WikiRepo,
-};
+use qpedia_pg_store::PgStore;
+use qpedia_store::{SearchHit, WikiRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
@@ -109,14 +108,13 @@ pub enum ChatEvent {
 #[derive(Clone)]
 pub struct Retriever {
     pub embedder: Option<Arc<dyn Embedder>>,
-    pub weaviate: Option<Arc<WeaviateStore>>,
     pub wiki: WikiRepo,
-    pub db: SqliteStore,
+    pub db: PgStore,
     pub llm: Arc<dyn LlmProvider>,
     /// Caller-provided groups. Empty = anonymous (admin-only ACL pages
     /// won't be readable). Set to ["admin"] for unrestricted access.
     pub user_groups: Vec<String>,
-    /// Tenant scope; flowed into Weaviate filters and ACL lookups.
+    /// Tenant scope; flowed into pgvector search and ACL lookups.
     pub tenant: Tenant,
 }
 
@@ -143,7 +141,7 @@ impl Retriever {
                 }
             };
 
-            let mode = if self.weaviate.is_some() { "hybrid+graph" } else { "filesystem+graph" };
+            let mode = if self.embedder.is_some() { "hybrid+graph" } else { "filesystem+graph" };
             yield ChatEvent::Meta {
                 retrieved: gathered.iter().map(|p| Citation {
                     path: p.path.clone(),
@@ -356,12 +354,21 @@ impl Retriever {
     }
 
     async fn do_search(&self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
-        if let (Some(emb), Some(wv)) = (&self.embedder, &self.weaviate) {
+        if let Some(emb) = &self.embedder {
             let qv = emb.embed(&[query]).await?.into_iter().next().unwrap_or_default();
-            match wv.hybrid_search(&self.tenant, query, &qv, k).await {
-                Ok(h) if !h.is_empty() => return Ok(h),
+            match self.db.hybrid_search(&self.tenant, query, qv, 0.7, k as i64).await {
+                Ok(rows) if !rows.is_empty() => {
+                    return Ok(rows
+                        .into_iter()
+                        .map(|r| SearchHit {
+                            path: r.path,
+                            title: r.title,
+                            snippet: r.snippet,
+                        })
+                        .collect());
+                }
                 Ok(_) => {}
-                Err(e) => warn!(error = %e, "weaviate search failed; falling back"),
+                Err(e) => warn!(error = %e, "pg hybrid search failed; falling back"),
             }
         }
         Ok(self.wiki.search_text(query, k).await?)

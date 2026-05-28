@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 qpedia-core.workspace = true
 qpedia-store.workspace = true
+qpedia-pg-store.workspace = true
 qpedia-extract.workspace = true
 qpedia-ingest.workspace = true
 qpedia-retriever.workspace = true
@@ -43,3 +44,4 @@ serde_json.workspace = true
 chrono.workspace = true
 bytes.workspace = true
 mime_guess.workspace = true
+dotenvy.workspace = true

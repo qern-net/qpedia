@@ -1,21 +1,18 @@
 //! Ingest job handler: walks a source through every phase that's currently
-//! implemented in a single job tick. See DESIGN.md §5.1.
+//! implemented in a single job tick. See SPEC-v2.md §5.1.
 
 use crate::handlers::{classify, distill, embed};
 use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
-use qpedia_core::{source::SourceStatus, SourceId};
-use qpedia_store::{
-    blob::{BlobKind, BlobStorage},
-    sqlite::SourceStore,
-};
+use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
+use qpedia_store::blob::{BlobKind, BlobStorage};
 use tracing::{info, warn};
 
-pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
+pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
     loop {
         let src = ctx
             .db
-            .get_source(source_id)
+            .get_source_in(tenant, source_id)
             .await?
             .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
         let before = src.status;
@@ -24,32 +21,32 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
         match src.status {
             SourceStatus::Pending | SourceStatus::Extracting | SourceStatus::Failed => {
-                extract_phase(ctx, source_id, &src.mime, &src.filename).await?;
+                extract_phase(ctx, tenant, source_id, &src.mime, &src.filename).await?;
             }
             SourceStatus::Extracted | SourceStatus::Classifying => {
                 if ctx.llm.is_some() {
-                    classify::run(ctx, source_id).await?;
+                    classify::run(ctx, tenant, source_id).await?;
                 } else {
                     info!(id = %source_id, "no LLM configured — marking Tainted at Extracted");
-                    ctx.db.update_status(source_id, SourceStatus::Tainted).await?;
-                    ctx.db.audit("qpedia-bot", "source.tainted", Some(source_id.as_str()),
+                    ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
+                    ctx.db.write_audit(tenant, "qpedia-bot", "source.tainted", Some(source_id.as_str()),
                         Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "extracted"}))).await?;
                     return Ok(());
                 }
             }
             SourceStatus::Classified | SourceStatus::AgentDistilling => {
                 if ctx.llm.is_some() {
-                    distill::run(ctx, source_id).await?;
+                    distill::run(ctx, tenant, source_id).await?;
                 } else {
                     info!(id = %source_id, "no LLM configured — marking Tainted at Classified");
-                    ctx.db.update_status(source_id, SourceStatus::Tainted).await?;
-                    ctx.db.audit("qpedia-bot", "source.tainted", Some(source_id.as_str()),
+                    ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
+                    ctx.db.write_audit(tenant, "qpedia-bot", "source.tainted", Some(source_id.as_str()),
                         Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "classified"}))).await?;
                     return Ok(());
                 }
             }
             SourceStatus::Committed | SourceStatus::Embedding => {
-                embed::run(ctx, source_id).await?;
+                embed::run(ctx, tenant, source_id).await?;
             }
             SourceStatus::Done => {
                 info!(id = %source_id, "ingest reached terminus (Done)");
@@ -63,7 +60,7 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
         let after = ctx
             .db
-            .get_source(source_id)
+            .get_source_in(tenant, source_id)
             .await?
             .map(|s| s.status)
             .unwrap_or(before);
@@ -75,11 +72,12 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
 async fn extract_phase(
     ctx: &IngestContext,
+    tenant: &Tenant,
     source_id: &SourceId,
     mime: &str,
     filename: &str,
 ) -> Result<()> {
-    ctx.db.update_status(source_id, SourceStatus::Extracting).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Extracting).await?;
 
     let ext = std::path::Path::new(filename)
         .extension()
@@ -105,9 +103,9 @@ async fn extract_phase(
         .put_text(source_id, BlobKind::Manifest, &serde_json::to_string_pretty(&manifest)?)
         .await?;
 
-    ctx.db.update_status(source_id, SourceStatus::Extracted).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Extracted).await?;
     ctx.db
-        .audit("qpedia-bot", "source.extracted", Some(source_id.as_str()), Some(&manifest))
+        .write_audit(tenant, "qpedia-bot", "source.extracted", Some(source_id.as_str()), Some(&manifest))
         .await?;
 
     info!(

@@ -13,7 +13,8 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use qpedia_core::{tenant::Tenant, SourceId};
 use qpedia_llm::{current_model, CompleteReq, LlmProvider};
-use qpedia_store::{sqlite::SourceStore, weaviate::WeaviateStore, SqliteStore, WikiRepo};
+use qpedia_pg_store::PgStore;
+use qpedia_store::WikiRepo;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -81,8 +82,7 @@ pub struct IndexDrift {
 
 pub struct Linter {
     pub wiki: WikiRepo,
-    pub db: SqliteStore,
-    pub weaviate: Option<Arc<WeaviateStore>>,
+    pub db: PgStore,
     pub llm: Option<Arc<dyn LlmProvider>>,
     pub tenant: Tenant,
 }
@@ -90,12 +90,11 @@ pub struct Linter {
 impl Linter {
     pub fn new(
         wiki: WikiRepo,
-        db: SqliteStore,
-        weaviate: Option<Arc<WeaviateStore>>,
+        db: PgStore,
         llm: Option<Arc<dyn LlmProvider>>,
         tenant: Tenant,
     ) -> Self {
-        Self { wiki, db, weaviate, llm, tenant }
+        Self { wiki, db, llm, tenant }
     }
 
     pub async fn run(&self) -> Result<LintReport> {
@@ -166,38 +165,36 @@ impl Linter {
             }
         }
         for sid in &all_referenced {
-            if self.db.get_source(&SourceId::from(sid.clone())).await?.is_none() {
+            if self
+                .db
+                .get_source_in(&self.tenant, &SourceId::from(sid.clone()))
+                .await?
+                .is_none()
+            {
                 report.stale_source_ids.push(sid.clone());
             }
         }
         report.stale_source_ids.sort();
 
-        // Near-duplicates via Weaviate nearObject. Skip system pages
-        // (they're intentionally distinct and won't have neighbors anyway).
-        if let Some(weaviate) = &self.weaviate {
-            let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
-            for path in &pages {
-                if SKIP_FROM_ORPHAN_CHECK.iter().any(|s| s == path) {
-                    continue;
-                }
-                match weaviate.nearest_neighbor(&self.tenant, path).await {
-                    Ok(Some((other, certainty))) if certainty >= DUPLICATE_CERTAINTY => {
-                        let pair = sorted_pair(path, &other);
-                        if seen_pairs.insert(pair.clone()) {
-                            report.duplicates.push(Duplicate {
-                                a: pair.0,
-                                b: pair.1,
-                                certainty,
-                            });
-                        }
+        // Near-duplicates via pgvector self-join. The skip-list of system
+        // pages is enforced here by filtering the returned pairs.
+        match self
+            .db
+            .near_duplicates(&self.tenant, DUPLICATE_CERTAINTY, 200)
+            .await
+        {
+            Ok(pairs) => {
+                for (a, b, sim) in pairs {
+                    if SKIP_FROM_ORPHAN_CHECK.iter().any(|s| *s == a || *s == b) {
+                        continue;
                     }
-                    Ok(_) => {}
-                    Err(e) => warn!(path = %path, error = %e, "nearest_neighbor failed"),
+                    report.duplicates.push(Duplicate { a, b, certainty: sim });
                 }
+                report.duplicates.sort_by(|x, y| {
+                    y.certainty.partial_cmp(&x.certainty).unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
-            report
-                .duplicates
-                .sort_by(|x, y| y.certainty.partial_cmp(&x.certainty).unwrap_or(std::cmp::Ordering::Equal));
+            Err(e) => warn!(error = %e, "near_duplicates query failed"),
         }
 
         // Contradiction detection: cluster by shared tag, ask the LLM
@@ -357,14 +354,6 @@ fn parse_contradiction_response(text: &str) -> Result<Vec<ContradictionOut>> {
     let v: Vec<ContradictionOut> =
         serde_json::from_str(candidate).map_err(|e| anyhow!("not JSON: {e}"))?;
     Ok(v)
-}
-
-fn sorted_pair(a: &str, b: &str) -> (String, String) {
-    if a <= b {
-        (a.to_string(), b.to_string())
-    } else {
-        (b.to_string(), a.to_string())
-    }
 }
 
 // ---------- helpers ----------

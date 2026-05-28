@@ -15,11 +15,11 @@ use qpedia_core::{
 };
 use qpedia_embed::Embedder;
 use qpedia_llm::{current_model, CompleteReq, LlmProvider, Message, ToolCall, ToolDef};
+use qpedia_pg_store::PgStore;
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
-    weaviate::WeaviateStore,
     wikirepo::SearchHit,
-    SqliteStore, WikiRepo,
+    WikiRepo,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -95,9 +95,8 @@ pub struct AgentDeps<'a> {
     pub wiki: &'a WikiRepo,
     pub tenant: Tenant,
     pub blob: &'a BlobStore,
-    pub db: &'a SqliteStore,
+    pub db: &'a PgStore,
     pub embedder: Option<Arc<dyn Embedder>>,
-    pub weaviate: Option<Arc<WeaviateStore>>,
 }
 
 /// Run the agent on a source, producing a DiffBundle.
@@ -334,19 +333,30 @@ async fn execute_tool(
         "search_wiki" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            let hits: Vec<SearchHit> = match (&deps.embedder, &deps.weaviate) {
-                (Some(embedder), Some(weaviate)) => {
+            let hits: Vec<SearchHit> = match &deps.embedder {
+                Some(embedder) => {
                     let qv = embedder
                         .embed(&[query])
                         .await?
                         .into_iter()
                         .next()
                         .unwrap_or_default();
-                    match weaviate.hybrid_search(&deps.tenant, query, &qv, limit).await {
-                        Ok(h) if !h.is_empty() => h,
+                    match deps
+                        .db
+                        .hybrid_search(&deps.tenant, query, qv, 0.7, limit as i64)
+                        .await
+                    {
+                        Ok(rows) if !rows.is_empty() => rows
+                            .into_iter()
+                            .map(|r| SearchHit {
+                                path: r.path,
+                                title: r.title,
+                                snippet: r.snippet,
+                            })
+                            .collect(),
                         Ok(_) => deps.wiki.search_text(query, limit).await?,
                         Err(e) => {
-                            tracing::warn!(error = %e, "weaviate search failed, falling back to fs");
+                            tracing::warn!(error = %e, "pg hybrid search failed, falling back to fs");
                             deps.wiki.search_text(query, limit).await?
                         }
                     }

@@ -13,7 +13,7 @@ use qpedia_core::{
 use sqlx::Row;
 
 impl PgStore {
-    pub async fn enqueue_job(&self, tenant: &Tenant, job: &Job) -> Result<()> {
+    pub async fn enqueue(&self, tenant: &Tenant, job: &Job) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
         sqlx::query(
             "INSERT INTO jobs \

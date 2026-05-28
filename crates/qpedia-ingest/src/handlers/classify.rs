@@ -1,4 +1,4 @@
-//! Classifier phase. See DESIGN.md §5.3.
+//! Classifier phase. See SPEC-v2.md §5.3.
 //!
 //! Sends the start of the extracted text to the configured LLM and asks for
 //! a small JSON record: doc_type / language / sensitivity / hints. Updates
@@ -7,12 +7,9 @@
 
 use crate::runner::IngestContext;
 use anyhow::{anyhow, Context, Result};
-use qpedia_core::{source::SourceStatus, SourceId};
+use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
 use qpedia_llm::{current_model, CompleteReq};
-use qpedia_store::{
-    blob::{BlobKind, BlobStorage},
-    sqlite::SourceStore,
-};
+use qpedia_store::blob::{BlobKind, BlobStorage};
 use tracing::info;
 
 const CLASSIFIER_SYSTEM: &str = r#"You are a document classifier. Output ONE JSON object and nothing else.
@@ -33,7 +30,7 @@ Rules:
 
 const SNIPPET_CHARS: usize = 6000;
 
-pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
+pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
     let llm = ctx
         .llm
         .as_ref()
@@ -41,11 +38,11 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
 
     let src = ctx
         .db
-        .get_source(source_id)
+        .get_source_in(tenant, source_id)
         .await?
         .ok_or_else(|| anyhow!("source not found: {source_id}"))?;
 
-    ctx.db.update_status(source_id, SourceStatus::Classifying).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Classifying).await?;
 
     let extracted_bytes = ctx
         .blob
@@ -58,9 +55,9 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
     if snippet.trim().is_empty() {
         // Nothing to classify (e.g. scanned PDF awaiting OCR). Move on with an empty record.
         let empty = serde_json::json!({"doc_type": "other", "language": "und", "sensitivity": "low", "hints": [], "skipped": "empty_extracted_text"});
-        ctx.db.update_status(source_id, SourceStatus::Classified).await?;
+        ctx.db.update_status(tenant, source_id, SourceStatus::Classified).await?;
         ctx.db
-            .audit("qpedia-bot", "source.classified", Some(source_id.as_str()), Some(&empty))
+            .write_audit(tenant, "qpedia-bot", "source.classified", Some(source_id.as_str()), Some(&empty))
             .await?;
         info!(id = %source_id, "classify skipped — empty extracted text");
         return Ok(());
@@ -86,24 +83,29 @@ pub async fn run(ctx: &IngestContext, source_id: &SourceId) -> Result<()> {
         .with_context(|| format!("parsing classifier output: {}", resp.content))?;
 
     if let Some(lang) = classification.get("language").and_then(|v| v.as_str()) {
-        ctx.db.update_language(source_id, lang).await?;
+        ctx.db.update_language(tenant, source_id, lang).await?;
     }
-    ctx.db.update_classification(source_id, &classification).await?;
+    ctx.db.update_classification(tenant, source_id, &classification).await?;
 
     // Auto-organize: move source into a folder named after its doc_type
     // if it is still in the root folder ("/"). This keeps the sources list
     // tidy without overriding any folder the user explicitly chose.
+    // A user-pinned folder is off-limits: never auto-drop AI files there.
     if src.folder_path == "/" {
         if let Some(doc_type) = classification.get("doc_type").and_then(|v| v.as_str()) {
             let auto_folder = format!("/{}", doc_type.trim());
-            ctx.db.update_folder_path(source_id, &auto_folder).await?;
-            info!(id = %source_id, folder = %auto_folder, "auto-organized into folder by doc_type");
+            if ctx.db.is_folder_pinned(tenant, &auto_folder).await? {
+                info!(id = %source_id, folder = %auto_folder, "skip auto-organize: target folder is pinned");
+            } else {
+                ctx.db.update_folder_path(tenant, source_id, &auto_folder).await?;
+                info!(id = %source_id, folder = %auto_folder, "auto-organized into folder by doc_type");
+            }
         }
     }
 
-    ctx.db.update_status(source_id, SourceStatus::Classified).await?;
+    ctx.db.update_status(tenant, source_id, SourceStatus::Classified).await?;
     ctx.db
-        .audit("qpedia-bot", "source.classified", Some(source_id.as_str()), Some(&classification))
+        .write_audit(tenant, "qpedia-bot", "source.classified", Some(source_id.as_str()), Some(&classification))
         .await?;
 
     info!(

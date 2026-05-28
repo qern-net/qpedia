@@ -2,7 +2,7 @@ mod auth;
 mod firebase;
 
 use auth::{
-    effective_wiki_acl, filter_sources, oidc_callback, oidc_login, oidc_logout,
+    effective_wiki_acl, filter_sources, mint_session, oidc_callback, oidc_login, oidc_logout,
     AuthExtractorState, AuthMode, AuthState, CallbackQuery, LoginQuery, User,
 };
 use axum::{
@@ -26,13 +26,14 @@ use qpedia_core::{
 };
 use qpedia_embed::embedder_from_env;
 use qpedia_extract::ExtractorRegistry;
-use qpedia_ingest::{ingest_job, lint_job, reembed_job, remove_job, sync_job, IngestContext, JobRunner};
+use qpedia_ingest::{
+    ingest_job, lint_job, reembed_job, remove_job, sync_job, IngestContext, JobRunner,
+};
 use qpedia_llm::provider_from_env;
+use qpedia_pg_store::{unique_source_slug, PgStore, SearchHit};
 use qpedia_store::{
     blob::{BlobKind, BlobStorage, BlobStore},
-    sqlite::{JobQueue, SourceStore},
-    weaviate::weaviate_from_env,
-    SearchHit, SqliteStore, WikiRepoStore,
+    WikiRepoStore,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -59,6 +60,11 @@ impl axum::extract::FromRef<AppState> for AuthExtractorState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env for local (non-Docker) runs. Real environment variables
+    // always win over .env entries, so this is a no-op in Docker where
+    // compose injects them directly. Missing file is fine.
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "qpedia=info,tower_http=info".into()),
@@ -69,7 +75,6 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "./data".into())
         .into();
 
-    let db_path = data_dir.join("sqlite").join("qpedia.db");
     let raw_root = data_dir.join("raw");
     let wiki_root = data_dir.join("wiki");
 
@@ -78,7 +83,15 @@ async fn main() -> anyhow::Result<()> {
     let author_email = std::env::var("QPEDIA_WIKI_AUTHOR_EMAIL")
         .unwrap_or_else(|_| "bot@qpedia.local".into());
 
-    let db = SqliteStore::open(&db_path).await?;
+    // Canonical var is QPEDIA_DB_URL (see .env.example); DATABASE_URL is
+    // accepted as a fallback for tooling that sets the sqlx-conventional name.
+    let pg_dsn = std::env::var("QPEDIA_DB_URL")
+        .or_else(|_| std::env::var("QPEDIA_DATABASE_URL"))
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap_or_else(|_| {
+            "postgres://qpedia_admin:qpedia-dev@127.0.0.1:5432/qpedia?sslmode=disable".into()
+        });
+    let db = PgStore::connect(&pg_dsn).await?;
     let blob = BlobStore::open(&raw_root)?;
     let wiki_store = WikiRepoStore::new(&wiki_root, author_name, author_email);
     let extractors = Arc::new(ExtractorRegistry::with_default());
@@ -90,10 +103,7 @@ async fn main() -> anyhow::Result<()> {
     // Local embedder (always available; downloads model on first use).
     let embedder = Some(embedder_from_env(data_dir.join("models")));
 
-    // Weaviate is optional: degrades to fs-grep if unset/unreachable.
-    let weaviate = weaviate_from_env().await.map(Arc::new);
-
-    let ctx = IngestContext::new(db, blob, wiki_store, extractors, llm, embedder, weaviate);
+    let ctx = IngestContext::new(db, blob, wiki_store, extractors, llm, embedder);
 
     let auth = AuthState::from_env().await?;
 
@@ -103,10 +113,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connector scheduler: every QPEDIA_SYNC_INTERVAL_SECS (default 300),
     // enqueue a Sync job for each enabled connector whose last_run_at is
-    // older than QPEDIA_SYNC_STALE_SECS (default 900). Idempotent — if a
-    // sync is already pending for a connector, the next due tick simply
-    // queues another, which the runner serializes one-per-connector via
-    // the connector's own update_connector_cursor on completion.
+    // older than QPEDIA_SYNC_STALE_SECS (default 900).
     {
         let sched_ctx = ctx.clone();
         let tick_secs: u64 = std::env::var("QPEDIA_SYNC_INTERVAL_SECS")
@@ -121,8 +128,9 @@ async fn main() -> anyhow::Result<()> {
                 match sched_ctx.db.due_connectors(stale_ms, 50).await {
                     Ok(due) if !due.is_empty() => {
                         for c in due {
-                            if let Ok(job) = qpedia_ingest::sync_job(&c.id) {
-                                if let Err(e) = sched_ctx.db.enqueue(&job).await {
+                            let tenant = qpedia_core::tenant::Tenant::new(c.tenant.clone());
+                            if let Ok(job) = sync_job(&tenant, &c.id) {
+                                if let Err(e) = sched_ctx.db.enqueue(&tenant, &job).await {
                                     tracing::warn!(connector = %c.name, error = %e, "scheduler: enqueue failed");
                                 }
                             }
@@ -142,8 +150,6 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
         .parse()?;
 
-    // Allow uploads up to 256MB. Single docs in our scope rarely exceed
-    // this; truly huge corpora should ship via the bulk-ingest path (TODO).
     let upload_limit = 256 * 1024 * 1024;
 
     let app = Router::new()
@@ -160,6 +166,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/sources/:id", get(get_source).delete(delete_source))
         .route("/api/v1/sources/:id/original", get(download_source_original))
+        .route("/api/v1/sources/:id/move", post(move_source))
+        .route(
+            "/api/v1/folders",
+            get(list_folders).post(create_folder).patch(patch_folder).delete(delete_folder),
+        )
         .route("/api/v1/wiki/list", get(list_wiki_pages))
         .route("/api/v1/wiki/search", get(search_wiki))
         .route("/api/v1/wiki/pages/*path", get(get_wiki_page))
@@ -177,9 +188,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/admin/connectors/:id/sync", post(trigger_connector_sync))
         .with_state(state);
 
-    // Optional static SPA. In dev the user runs `npm run dev` (vite) and hits
-    // :5173 which proxies to us; in prod or after `npm run build` we serve
-    // from QPEDIA_WEB_DIR (default ./web/build, /app/web in container).
     let web_dir: PathBuf = std::env::var("QPEDIA_WEB_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -264,11 +272,8 @@ struct FirebaseLoginBody {
 ///
 /// Tenant resolution:
 ///   1. Custom claim `tenant_id` if set via Firebase Admin SDK.
-///   2. Email domain lookup (sources email = alice@acme.com -> tenants
-///      row where email_domain='acme.com'). Skipped on SQLite path
-///      (the legacy store doesn't carry that mapping); the
-///      Postgres path will use it once Stage D lands.
-///   3. Fallback to "default".
+///   2. Email domain lookup (`tenants.email_domain` → tenant id).
+///   3. Fallback to QPEDIA_DEV_TENANT, then "default".
 async fn firebase_login_route(
     State(s): State<AppState>,
     Json(body): Json<FirebaseLoginBody>,
@@ -286,9 +291,19 @@ async fn firebase_login_route(
 
     let tenant = if let Some(t) = &claims.tenant_id {
         qpedia_core::tenant::Tenant::new(t.clone())
+    } else if let Some(domain) = claims
+        .email
+        .as_deref()
+        .and_then(|e| e.split_once('@').map(|(_, d)| d.to_string()))
+    {
+        match s.ctx.db.tenant_by_email_domain(&domain).await {
+            Ok(Some(t)) => t,
+            _ => std::env::var("QPEDIA_DEV_TENANT")
+                .ok()
+                .map(qpedia_core::tenant::Tenant::new)
+                .unwrap_or_else(qpedia_core::tenant::Tenant::default_tenant),
+        }
     } else {
-        // Email-domain lookup hooks in here once Stage D rewires the
-        // store. For now: fall through to the dev/configured default.
         std::env::var("QPEDIA_DEV_TENANT")
             .ok()
             .map(qpedia_core::tenant::Tenant::new)
@@ -298,18 +313,19 @@ async fn firebase_login_route(
     let token = auth::random_token(32);
     let token_hash = auth::hash_token(&token);
     let user_id = format!("firebase:{}", claims.sub);
-    s.ctx
-        .db
-        .create_session(
-            &token_hash,
-            &tenant,
-            &user_id,
-            claims.email.as_deref(),
-            claims.name.as_deref(),
-            &claims.groups,
-            auth::SESSION_TTL_SECS,
-        )
-        .await?;
+    mint_session(
+        &s.ctx.db,
+        &token_hash,
+        &tenant,
+        &user_id,
+        claims.email.as_deref(),
+        claims.name.as_deref(),
+        Some(&claims.firebase.sign_in_provider),
+        &claims.groups,
+        auth::SESSION_TTL_SECS,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
 
     let mut headers = HeaderMap::new();
     headers.append(
@@ -345,7 +361,12 @@ async fn list_sources(
 ) -> Result<Json<Vec<Source>>, ApiError> {
     let folder = q.folder.unwrap_or_else(|| "/".into());
     let limit = q.limit.unwrap_or(100).min(1000);
-    let raw = s.ctx.db.list_sources(&user.tenant, &folder, limit * 5).await?;
+    let raw = s
+        .ctx
+        .db
+        .list_sources(&user.tenant, &folder, limit * 5)
+        .await
+        .map_err(ApiError::Internal)?;
     let mut filtered = filter_sources(&user, raw);
     filtered.truncate(limit as usize);
     Ok(Json(filtered))
@@ -356,7 +377,7 @@ async fn get_source(
     user: User,
     Path(id): Path<String>,
 ) -> Result<Json<Source>, ApiError> {
-    match s.ctx.db.get_source_in(&user.tenant, &SourceId::from(id)).await? {
+    match s.ctx.db.get_source_in(&user.tenant, &SourceId::from(id)).await.map_err(ApiError::Internal)? {
         Some(src) if user.can_read(&src.acl) => Ok(Json(src)),
         Some(_) => Err(ApiError::NotFound),
         None => Err(ApiError::NotFound),
@@ -371,7 +392,13 @@ async fn download_source_original(
     use axum::http::header;
     use axum::response::IntoResponse as _;
     let sid = SourceId::from(id);
-    let src = match s.ctx.db.get_source_in(&user.tenant, &sid).await? {
+    let src = match s
+        .ctx
+        .db
+        .get_source_in(&user.tenant, &sid)
+        .await
+        .map_err(ApiError::Internal)?
+    {
         Some(src) if user.can_read(&src.acl) => src,
         Some(_) | None => return Err(ApiError::NotFound),
     };
@@ -394,7 +421,7 @@ async fn download_source_original(
     ).into_response())
 }
 
-/// Enqueue a Remove job. Cleanup (wiki commit, Weaviate, blobs, row delete)
+/// Enqueue a Remove job. Cleanup (wiki commit, pgvector, blobs, row delete)
 /// happens async; the source row remains visible until the job completes.
 async fn delete_source(
     State(s): State<AppState>,
@@ -402,23 +429,187 @@ async fn delete_source(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let sid = SourceId::from(id);
-    let Some(existing) = s.ctx.db.get_source_in(&user.tenant, &sid).await? else {
+    let Some(existing) = s
+        .ctx
+        .db
+        .get_source_in(&user.tenant, &sid)
+        .await
+        .map_err(ApiError::Internal)?
+    else {
         return Err(ApiError::NotFound);
     };
     if !user.can_read(&existing.acl) {
         return Err(ApiError::NotFound);
     }
-    let job = remove_job(&sid).map_err(ApiError::Internal)?;
+    let job = remove_job(&user.tenant, &sid).map_err(ApiError::Internal)?;
     let job_id = job.id.to_string();
-    s.ctx.db.enqueue(&job).await?;
+    s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
     s.ctx
         .db
-        .audit(&user.id, "source.remove.requested", Some(sid.as_str()), None)
-        .await?;
+        .write_audit(&user.tenant, &user.id, "source.remove.requested", Some(sid.as_str()), None)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"job_id": job_id, "kind": "remove", "source_id": sid.as_str(), "state": "queued"})),
     ))
+}
+
+// ---------- folders + move ----------
+
+#[derive(Deserialize)]
+struct MoveSourceBody {
+    folder_path: String,
+}
+
+/// Move a source to a different folder (drag-and-drop target). Because the
+/// AI auto-organizer only ever acts on root-"/" files, moving a source into
+/// any non-root folder also locks it against future auto-organization.
+async fn move_source(
+    State(s): State<AppState>,
+    user: User,
+    Path(id): Path<String>,
+    Json(body): Json<MoveSourceBody>,
+) -> Result<Json<Value>, ApiError> {
+    let sid = SourceId::from(id);
+    let Some(existing) = s
+        .ctx
+        .db
+        .get_source_in(&user.tenant, &sid)
+        .await
+        .map_err(ApiError::Internal)?
+    else {
+        return Err(ApiError::NotFound);
+    };
+    if !user.can_read(&existing.acl) {
+        return Err(ApiError::NotFound);
+    }
+    let folder = qpedia_pg_store::slugify_folder(&body.folder_path);
+    s.ctx
+        .db
+        .update_folder_path(&user.tenant, &sid, &folder)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(
+            &user.tenant,
+            &user.id,
+            "source.move",
+            Some(sid.as_str()),
+            Some(&json!({"folder_path": folder})),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({"id": sid.as_str(), "folder_path": folder})))
+}
+
+async fn list_folders(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    let rows = s
+        .ctx
+        .db
+        .list_folders(&user.tenant)
+        .await
+        .map_err(ApiError::Internal)?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|f| json!({ "path": f.path, "pinned": f.pinned }))
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+struct CreateFolderBody {
+    path: String,
+    /// Manually-created folders are pinned by default (auto-pin on create).
+    #[serde(default = "default_true")]
+    pinned: bool,
+}
+
+async fn create_folder(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<CreateFolderBody>,
+) -> Result<Json<Value>, ApiError> {
+    if body.path.trim().is_empty() || body.path.trim() == "/" {
+        return Err(ApiError::Bad("folder path required".into()));
+    }
+    let path = s
+        .ctx
+        .db
+        .create_folder(&user.tenant, &body.path, body.pinned, &user.id)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "folder.create", Some(&path), Some(&json!({"pinned": body.pinned})))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "path": path, "pinned": body.pinned })))
+}
+
+#[derive(Deserialize)]
+struct PatchFolderBody {
+    path: String,
+    pinned: bool,
+}
+
+/// Lock/unlock a folder against the AI auto-organizer.
+async fn patch_folder(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<PatchFolderBody>,
+) -> Result<Json<Value>, ApiError> {
+    s.ctx
+        .db
+        .set_folder_pinned(&user.tenant, &body.path, body.pinned, &user.id)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "folder.set_pinned", Some(&body.path), Some(&json!({"pinned": body.pinned})))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "path": body.path, "pinned": body.pinned })))
+}
+
+#[derive(Deserialize)]
+struct DeleteFolderQuery {
+    path: String,
+}
+
+/// Delete an explicit (empty) folder. Refuses if it still holds any source
+/// at that path or below — move those out first.
+async fn delete_folder(
+    State(s): State<AppState>,
+    user: User,
+    Query(q): Query<DeleteFolderQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let n = s
+        .ctx
+        .db
+        .folder_source_count(&user.tenant, &q.path)
+        .await
+        .map_err(ApiError::Internal)?;
+    if n > 0 {
+        return Err(ApiError::Bad(format!(
+            "folder not empty: {n} file(s) here or in subfolders — move them out first"
+        )));
+    }
+    s.ctx
+        .db
+        .delete_folder(&user.tenant, &q.path)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "folder.delete", Some(&q.path), None)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "deleted": q.path })))
 }
 
 #[derive(Deserialize)]
@@ -461,7 +652,12 @@ async fn search_wiki(
             let source_ids = parse_source_ids(&content);
             let acl = effective_wiki_acl(&s.ctx.db, &user.tenant, &source_ids).await;
             if source_ids.is_empty() || user.can_read(&acl) {
-                allowed.push(h);
+                allowed.push(json!({
+                    "path": h.path,
+                    "title": h.title,
+                    "snippet": h.snippet,
+                    "score": h.score,
+                }));
                 if allowed.len() >= limit as usize { break; }
             }
         }
@@ -498,7 +694,7 @@ async fn run_search(
     query: &str,
     limit: usize,
 ) -> Result<(&'static str, Vec<SearchHit>), ApiError> {
-    if let (Some(embedder), Some(weaviate)) = (&s.ctx.embedder, &s.ctx.weaviate) {
+    if let Some(embedder) = &s.ctx.embedder {
         let qv = embedder
             .embed(&[query])
             .await
@@ -506,14 +702,25 @@ async fn run_search(
             .into_iter()
             .next()
             .unwrap_or_default();
-        match weaviate.hybrid_search(&user.tenant, query, &qv, limit).await {
+        match s
+            .ctx
+            .db
+            .hybrid_search(&user.tenant, query, qv, 0.7, limit as i64)
+            .await
+        {
             Ok(h) if !h.is_empty() => return Ok(("hybrid", h)),
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "weaviate search failed; falling back"),
+            Err(e) => tracing::warn!(error = %e, "pg hybrid search failed; falling back"),
         }
     }
     let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
-    let hits = wiki.search_text(query, limit).await.map_err(ApiError::Internal)?;
+    let hits = wiki
+        .search_text(query, limit)
+        .await
+        .map_err(ApiError::Internal)?
+        .into_iter()
+        .map(|h| SearchHit { path: h.path, title: h.title, snippet: h.snippet, score: 0.0 })
+        .collect();
     Ok(("filesystem", hits))
 }
 
@@ -523,7 +730,7 @@ async fn enqueue_lint(State(s): State<AppState>, user: User) -> Result<Json<Valu
     }
     let job = lint_job(&user.tenant).map_err(ApiError::Internal)?;
     let job_id = job.id.to_string();
-    s.ctx.db.enqueue(&job).await?;
+    s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
     Ok(Json(json!({"job_id": job_id, "kind": "lint", "tenant": user.tenant.as_str(), "state": "queued"})))
 }
 
@@ -533,7 +740,7 @@ async fn enqueue_reembed(State(s): State<AppState>, user: User) -> Result<Json<V
     }
     let job = reembed_job(&user.tenant).map_err(ApiError::Internal)?;
     let job_id = job.id.to_string();
-    s.ctx.db.enqueue(&job).await?;
+    s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
     info!(tenant = %user.tenant, job_id = %job_id, "reembed job enqueued");
     Ok(Json(json!({"job_id": job_id, "kind": "reembed", "tenant": user.tenant.as_str(), "state": "queued"})))
 }
@@ -561,7 +768,7 @@ async fn list_folder_acls(
         .db
         .list_folder_acls(&user.tenant)
         .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+        .map_err(ApiError::Internal)?;
     let items: Vec<Value> = rows
         .into_iter()
         .map(|(path, acl, updated_at, updated_by)| {
@@ -589,16 +796,18 @@ async fn set_folder_acl(
         .db
         .set_folder_acl(&user.tenant, &body.folder_path, &acl, &user.id)
         .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+        .map_err(ApiError::Internal)?;
     s.ctx
         .db
-        .audit(
+        .write_audit(
+            &user.tenant,
             &user.id,
             "folder_acl.set",
             Some(&body.folder_path),
             Some(&json!({"acl": body.acl})),
         )
-        .await?;
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(Json(json!({"folder_path": body.folder_path, "acl": body.acl})))
 }
 
@@ -614,11 +823,12 @@ async fn delete_folder_acl(
         .db
         .delete_folder_acl(&user.tenant, &q.folder_path)
         .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+        .map_err(ApiError::Internal)?;
     s.ctx
         .db
-        .audit(&user.id, "folder_acl.delete", Some(&q.folder_path), None)
-        .await?;
+        .write_audit(&user.tenant, &user.id, "folder_acl.delete", Some(&q.folder_path), None)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(Json(json!({"deleted": q.folder_path})))
 }
 
@@ -639,8 +849,12 @@ async fn list_connectors(
     user: User,
 ) -> Result<Json<Value>, ApiError> {
     if !user.is_admin() { return Err(ApiError::Forbidden); }
-    let rows = s.ctx.db.list_connectors(&user.tenant).await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    let rows = s
+        .ctx
+        .db
+        .list_connectors(&user.tenant)
+        .await
+        .map_err(ApiError::Internal)?;
     // Don't echo config_json — it carries credentials.
     let items: Vec<Value> = rows.into_iter().map(|c| json!({
         "id": c.id,
@@ -661,9 +875,8 @@ async fn create_connector(
     Json(body): Json<CreateConnectorBody>,
 ) -> Result<Json<Value>, ApiError> {
     if !user.is_admin() { return Err(ApiError::Forbidden); }
-    let id = ulid::Ulid::new().to_string();
     let cfg = qpedia_connectors::ConnectorConfig {
-        id: id.clone(),
+        id: String::new(), // assigned on insert
         tenant: user.tenant.as_str().to_string(),
         kind: body.kind.clone(),
         name: body.name.clone(),
@@ -673,10 +886,24 @@ async fn create_connector(
         last_run_at: None,
         last_error: None,
     };
-    s.ctx.db.insert_connector(&cfg).await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
-    s.ctx.db.audit(&user.id, "connector.create", Some(&id),
-        Some(&json!({"kind": cfg.kind, "name": cfg.name, "tenant": cfg.tenant}))).await?;
+    let id = s
+        .ctx
+        .db
+        .insert_connector(&user.tenant, &cfg)
+        .await
+        .map_err(ApiError::Internal)?;
+    let id = id.to_string();
+    s.ctx
+        .db
+        .write_audit(
+            &user.tenant,
+            &user.id,
+            "connector.create",
+            Some(&id),
+            Some(&json!({"kind": cfg.kind, "name": cfg.name, "tenant": cfg.tenant})),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(Json(json!({"id": id, "kind": cfg.kind, "name": cfg.name, "enabled": cfg.enabled})))
 }
 
@@ -686,15 +913,26 @@ async fn delete_connector_route(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     if !user.is_admin() { return Err(ApiError::Forbidden); }
-    let existing = s.ctx.db.get_connector(&id).await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?
+    let existing = s
+        .ctx
+        .db
+        .get_connector(&user.tenant, &id)
+        .await
+        .map_err(ApiError::Internal)?
         .ok_or(ApiError::NotFound)?;
     if existing.tenant != user.tenant.as_str() {
         return Err(ApiError::NotFound);
     }
-    s.ctx.db.delete_connector(&id).await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
-    s.ctx.db.audit(&user.id, "connector.delete", Some(&id), None).await?;
+    s.ctx
+        .db
+        .delete_connector(&user.tenant, &id)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "connector.delete", Some(&id), None)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(Json(json!({"deleted": id})))
 }
 
@@ -704,15 +942,19 @@ async fn trigger_connector_sync(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     if !user.is_admin() { return Err(ApiError::Forbidden); }
-    let existing = s.ctx.db.get_connector(&id).await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?
+    let existing = s
+        .ctx
+        .db
+        .get_connector(&user.tenant, &id)
+        .await
+        .map_err(ApiError::Internal)?
         .ok_or(ApiError::NotFound)?;
     if existing.tenant != user.tenant.as_str() {
         return Err(ApiError::NotFound);
     }
-    let job = sync_job(&id).map_err(ApiError::Internal)?;
+    let job = sync_job(&user.tenant, &id).map_err(ApiError::Internal)?;
     let job_id = job.id.to_string();
-    s.ctx.db.enqueue(&job).await?;
+    s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
     Ok(Json(json!({"job_id": job_id, "connector_id": id, "state": "queued"})))
 }
 
@@ -731,6 +973,8 @@ async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<
     }
 }
 
+const STALLED_AFTER_SECS: i64 = 30 * 60;
+
 async fn list_stalled_sources(
     State(s): State<AppState>,
     user: User,
@@ -738,7 +982,12 @@ async fn list_stalled_sources(
     if !user.is_admin() {
         return Err(ApiError::Forbidden);
     }
-    let sources = s.ctx.db.list_stalled(&user.tenant, 200).await?;
+    let sources = s
+        .ctx
+        .db
+        .list_stalled(&user.tenant, STALLED_AFTER_SECS, 200)
+        .await
+        .map_err(ApiError::Internal)?;
     let count = sources.len();
     Ok(Json(json!({ "sources": sources, "count": count })))
 }
@@ -750,14 +999,32 @@ async fn resume_stalled_sources(
     if !user.is_admin() {
         return Err(ApiError::Forbidden);
     }
-    let stalled = s.ctx.db.list_stalled(&user.tenant, 1000).await?;
+    let stalled = s
+        .ctx
+        .db
+        .list_stalled(&user.tenant, STALLED_AFTER_SECS, 1000)
+        .await
+        .map_err(ApiError::Internal)?;
     let count = stalled.len();
     for src in &stalled {
-        let job = ingest_job(&src.id).map_err(ApiError::Internal)?;
-        s.ctx.db.enqueue(&job).await?;
+        let job = ingest_job(&user.tenant, &src.id).map_err(ApiError::Internal)?;
+        s.ctx
+            .db
+            .enqueue(&user.tenant, &job)
+            .await
+            .map_err(ApiError::Internal)?;
     }
-    s.ctx.db.audit(&user.id, "admin.resume_stalled", None,
-        Some(&json!({"count": count, "tenant": user.tenant.as_str()}))).await?;
+    s.ctx
+        .db
+        .write_audit(
+            &user.tenant,
+            &user.id,
+            "admin.resume_stalled",
+            None,
+            Some(&json!({"count": count, "tenant": user.tenant.as_str()})),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
     info!(count, tenant = %user.tenant, "stalled sources re-enqueued by admin");
     Ok(Json(json!({ "enqueued": count })))
 }
@@ -774,7 +1041,6 @@ async fn chat(
     let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
     let retriever = Retriever {
         embedder: s.ctx.embedder.clone(),
-        weaviate: s.ctx.weaviate.clone(),
         wiki,
         db: s.ctx.db.clone(),
         llm,
@@ -866,12 +1132,22 @@ async fn upload_source(
     hasher.update(&bytes);
     let sha256 = hex::encode(hasher.finalize());
 
-    let id = SourceId::new();
+    // Mint a Wikipedia-style slug from the filename; PgStore dedups with -2/-3/…
+    let slug = unique_source_slug(&s.ctx.db, &user.tenant, &filename)
+        .await
+        .map_err(ApiError::Internal)?;
+    let id = SourceId::from(slug);
     let now = Utc::now();
     // ACL resolution: prefer a folder-level ACL (closest ancestor wins);
     // fall back to the uploader's groups so single-user / dev mode keeps
     // working without configuration.
-    let upload_acl = match s.ctx.db.resolve_folder_acl(&user.tenant, &folder_path).await? {
+    let upload_acl = match s
+        .ctx
+        .db
+        .resolve_folder_acl(&user.tenant, &folder_path)
+        .await
+        .map_err(ApiError::Internal)?
+    {
         Some(acl) => acl,
         None => Acl::from_iter(user.groups.iter().cloned()),
     };
@@ -890,7 +1166,7 @@ async fn upload_source(
         ingested_at: None,
         classification: None,
     };
-    s.ctx.db.insert_source(&src).await?;
+    s.ctx.db.insert_source(&src).await.map_err(ApiError::Internal)?;
 
     // Persist raw bytes.
     let ext = std::path::Path::new(&filename)
@@ -900,9 +1176,13 @@ async fn upload_source(
     s.ctx.blob.put(&id, BlobKind::Original, ext, bytes).await?;
 
     // Hand off to the background runner.
-    let job = ingest_job(&id).map_err(|e| ApiError::Internal(e))?;
-    s.ctx.db.enqueue(&job).await?;
-    s.ctx.db.audit(&user.id, "source.upload", Some(id.as_str()), None).await?;
+    let job = ingest_job(&user.tenant, &id).map_err(ApiError::Internal)?;
+    s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "source.upload", Some(id.as_str()), None)
+        .await
+        .map_err(ApiError::Internal)?;
 
     info!(id = %id, mime = %mime, "source enqueued");
     Ok(Json(src))

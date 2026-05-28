@@ -8,14 +8,17 @@
 pub mod audit;
 pub mod connectors;
 pub mod folder_acls;
+pub mod folders;
 pub mod jobs;
+pub mod oidc_pending;
 pub mod sessions;
 pub mod slug;
 pub mod sources;
 pub mod tenants;
-pub mod trait_impls;
 pub mod wiki;
 
+pub use folders::FolderRow;
+pub use oidc_pending::PendingLogin;
 pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
 pub use sessions::SessionRow;
 pub use tenants::TenantRow;

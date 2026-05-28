@@ -2,11 +2,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
-# Runtime data volumes (mounted in containers)
-/data/wiki
-/data/raw
-/data/sqlite
-/data/weaviate
+# Runtime data volumes (bind-mounted in containers, populated on host runs).
+# v2 dropped /data/sqlite and /data/weaviate; everything else lives here.
+/data/
 
 # Smoke-test artifacts
 /test-fixtures

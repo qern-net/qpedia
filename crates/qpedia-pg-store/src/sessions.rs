@@ -1,11 +1,9 @@
-//! Session lookup. Sessions are RLS-scoped by tenant; they identify
-//! *who* the request is for, while RLS enforces *what tenant's data*
-//! they can touch.
-//!
-//! The lookup path is a special case: at the moment we read a session
-//! from the cookie, we don't yet know the tenant, so we use the admin
-//! pool (BYPASSRLS) for this single read. Every read after that goes
-//! through `begin_for(&tenant)` and respects RLS.
+//! Session lookup. RLS-scoped writes (we know the tenant when minting).
+//! Reads happen *before* we know the tenant (the cookie is the only
+//! input) so they use the unscoped pool — that connection runs as the
+//! BYPASSRLS role, sees every tenant's row, and trusts the token_hash
+//! lookup. The row carries `tenant_id`, which the caller then uses for
+//! every subsequent query.
 
 use crate::PgStore;
 use anyhow::{Context, Result};
@@ -25,7 +23,7 @@ pub struct SessionRow {
 }
 
 impl PgStore {
-    pub async fn pg_create_session(
+    pub async fn create_session(
         &self,
         token_hash: &str,
         tenant: &Tenant,
@@ -37,8 +35,6 @@ impl PgStore {
         firebase_id_token_expires_at: Option<DateTime<Utc>>,
         session_expires_at: DateTime<Utc>,
     ) -> Result<()> {
-        // Sessions are RLS-scoped: open a tx for this tenant first so the
-        // INSERT passes the policy's WITH CHECK.
         let mut tx = self.begin_for(tenant).await?;
         sqlx::query(
             "INSERT INTO sessions \
@@ -46,12 +42,12 @@ impl PgStore {
               groups, firebase_id_token_expires_at, expires_at) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
              ON CONFLICT (token_hash) DO UPDATE SET \
-               tenant_id = EXCLUDED.tenant_id, \
-               user_id = EXCLUDED.user_id, \
+               tenant_id  = EXCLUDED.tenant_id, \
+               user_id    = EXCLUDED.user_id, \
                user_email = EXCLUDED.user_email, \
-               user_name = EXCLUDED.user_name, \
-               provider = EXCLUDED.provider, \
-               groups = EXCLUDED.groups, \
+               user_name  = EXCLUDED.user_name, \
+               provider   = EXCLUDED.provider, \
+               groups     = EXCLUDED.groups, \
                firebase_id_token_expires_at = EXCLUDED.firebase_id_token_expires_at, \
                expires_at = EXCLUDED.expires_at",
         )
@@ -66,19 +62,12 @@ impl PgStore {
         .bind(session_expires_at)
         .execute(&mut *tx)
         .await
-        .context("insert session")?;
+        .context("create_session")?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Lookup a session by token hash. Uses the raw pool (no tenant GUC
-    /// set yet — we're discovering the tenant from the cookie). The DSN
-    /// for this lookup MUST be a BYPASSRLS role; for the runtime app
-    /// role this single query would silently return no rows.
-    ///
-    /// In v2 we read sessions via a sibling admin pool. For development
-    /// the same pool works because the test role has BYPASSRLS.
-    pub async fn pg_lookup_session_unscoped(&self, token_hash: &str) -> Result<Option<SessionRow>> {
+    pub async fn lookup_session(&self, token_hash: &str) -> Result<Option<SessionRow>> {
         let row = sqlx::query(
             "SELECT tenant_id, user_id, user_email, user_name, provider, groups, expires_at \
              FROM sessions \
@@ -100,7 +89,7 @@ impl PgStore {
         }))
     }
 
-    pub async fn pg_delete_session(&self, token_hash: &str) -> Result<()> {
+    pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
             .bind(token_hash)
             .execute(self.pool())

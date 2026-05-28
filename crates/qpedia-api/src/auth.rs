@@ -1,11 +1,14 @@
-//! Auth + ACL. See DESIGN.md §12.
+//! Auth + ACL. See SPEC-v2.md §12.
 //!
 //! Two modes:
 //!   - **Dev** (default when no OIDC issuer is configured): every request
 //!     is authenticated as the synthetic `dev:admin` user with the `admin`
 //!     group. Useful for local development and the existing smoke tests.
 //!   - **Oidc**: real OIDC authorization-code-with-PKCE flow. Sessions
-//!     stored in SQLite, opaque-token cookies (sha256-hashed at rest).
+//!     stored in Postgres, opaque-token cookies (sha256-hashed at rest).
+//!
+//! Firebase login is orthogonal to the mode — `firebase_login_route`
+//! mints a session for any user the Firebase JS SDK has authenticated.
 //!
 //! ACL semantics:
 //!   - `admin` group always passes.
@@ -22,13 +25,14 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::Utc;
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use qpedia_core::{acl::Acl, source::Source, tenant::Tenant};
-use qpedia_store::{sqlite::SourceStore, SqliteStore};
+use qpedia_pg_store::PgStore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -113,9 +117,6 @@ impl AuthState {
                 .await
                 .context("oidc discovery")?;
 
-                // RP-Initiated Logout endpoint is an OIDC extension and not
-                // in `CoreProviderMetadata`'s additional fields by default.
-                // Take it from env when the IdP needs it.
                 let end_session_endpoint = std::env::var("QPEDIA_OIDC_END_SESSION_URL").ok();
 
                 let client = CoreClient::from_provider_metadata(
@@ -181,7 +182,7 @@ impl User {
 /// Compute the effective ACL for a wiki page — union of ACLs of every
 /// Source (within the user's tenant) that the page cites in frontmatter
 /// `source_ids`. Cross-tenant source references contribute nothing.
-pub async fn effective_wiki_acl(db: &SqliteStore, tenant: &Tenant, source_ids: &[String]) -> Acl {
+pub async fn effective_wiki_acl(db: &PgStore, tenant: &Tenant, source_ids: &[String]) -> Acl {
     let mut union: BTreeSet<String> = BTreeSet::new();
     for sid in source_ids {
         if let Ok(Some(src)) = db.get_source_in(tenant, &sid.clone().into()).await {
@@ -243,6 +244,26 @@ pub fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(&buf)
 }
 
+/// Convenience wrapper that turns a TTL (seconds) into a `session_expires_at`
+/// timestamp and bridges to `PgStore::create_session`.
+pub async fn mint_session(
+    db: &PgStore,
+    token_hash: &str,
+    tenant: &Tenant,
+    user_id: &str,
+    email: Option<&str>,
+    name: Option<&str>,
+    provider: Option<&str>,
+    groups: &[String],
+    ttl_secs: i64,
+) -> Result<()> {
+    let expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs);
+    db.create_session(
+        token_hash, tenant, user_id, email, name, provider, groups, None, expires_at,
+    )
+    .await
+}
+
 // ---------- User extractor ----------
 
 #[axum::async_trait]
@@ -281,7 +302,7 @@ where
 #[derive(Clone)]
 pub struct AuthExtractorState {
     pub auth: AuthState,
-    pub db: SqliteStore,
+    pub db: PgStore,
 }
 
 #[derive(Debug)]
@@ -310,7 +331,7 @@ pub struct CallbackQuery {
 
 pub async fn oidc_login(
     auth: &AuthState,
-    db: &SqliteStore,
+    db: &PgStore,
     query: LoginQuery,
 ) -> Result<Redirect, Response> {
     let cfg = match &auth.mode {
@@ -348,7 +369,7 @@ pub async fn oidc_login(
 
 pub async fn oidc_callback(
     auth: &AuthState,
-    db: &SqliteStore,
+    db: &PgStore,
     query: CallbackQuery,
 ) -> Result<(HeaderMap, Redirect), Response> {
     let cfg = match &auth.mode {
@@ -388,12 +409,8 @@ pub async fn oidc_callback(
         .name()
         .and_then(|n| n.iter().next().map(|(_, v)| v.as_str().to_string()));
 
-    // Groups extraction: read configured claim from `additional_claims` if
-    // possible, otherwise look in standard claims by JSON-roundtrip.
     let groups = extract_groups(claims, &cfg.groups_claim);
 
-    // Tenant: read from a configurable claim (default 'tenant_id'); fall
-    // back to 'default' if missing.
     let tenant_claim = std::env::var("QPEDIA_OIDC_TENANT_CLAIM")
         .unwrap_or_else(|_| "tenant_id".into());
     let tenant = extract_tenant(claims, &tenant_claim);
@@ -401,12 +418,14 @@ pub async fn oidc_callback(
     // Mint a session.
     let token = random_token(32);
     let token_hash = hash_token(&token);
-    db.create_session(
+    mint_session(
+        db,
         &token_hash,
         &tenant,
         &user_id,
         email.as_deref(),
         name.as_deref(),
+        Some("oidc"),
         &groups,
         SESSION_TTL_SECS,
     )
@@ -437,7 +456,7 @@ fn extract_tenant(
 
 pub async fn oidc_logout(
     auth: &AuthState,
-    db: &SqliteStore,
+    db: &PgStore,
     headers: &HeaderMap,
 ) -> (HeaderMap, Redirect) {
     if let Some(token) = read_session_token(headers) {
@@ -461,8 +480,6 @@ fn extract_groups(
     claims: &openidconnect::IdTokenClaims<openidconnect::EmptyAdditionalClaims, openidconnect::core::CoreGenderClaim>,
     claim: &str,
 ) -> Vec<String> {
-    // Roundtrip claims to JSON and pluck the configured key. Robust against
-    // provider differences in custom claim placement.
     let v = match serde_json::to_value(claims) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -474,14 +491,12 @@ fn extract_groups(
             .collect();
     }
     if let Some(s) = v.get(claim).and_then(|x| x.as_str()) {
-        // Some providers send space- or comma-separated strings.
         return s
             .split(|c: char| c == ' ' || c == ',')
             .filter(|t| !t.is_empty())
             .map(|t| t.to_string())
             .collect();
     }
-    // Fallback: look in `roles` if the configured claim missed.
     if claim != "roles" {
         if let Some(arr) = v.get("roles").and_then(|x| x.as_array()) {
             warn!("groups claim {claim:?} missing; falling back to 'roles'");

@@ -1,5 +1,5 @@
-//! JobRunner: a single-worker tokio task that drains the SQLite job queue
-//! and dispatches to phase handlers. See DESIGN.md §5.1.
+//! JobRunner: a single-worker tokio task that drains the Postgres job queue
+//! and dispatches to phase handlers. See SPEC-v2.md §5.1.
 
 use crate::handlers;
 use anyhow::Result;
@@ -12,12 +12,8 @@ use qpedia_core::{
 use qpedia_embed::Embedder;
 use qpedia_extract::ExtractorRegistry;
 use qpedia_llm::LlmProvider;
-use qpedia_store::{
-    blob::BlobStore,
-    sqlite::JobQueue,
-    weaviate::WeaviateStore,
-    SqliteStore, WikiRepoStore,
-};
+use qpedia_pg_store::PgStore;
+use qpedia_store::{blob::BlobStore, WikiRepoStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +21,7 @@ use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct IngestContext {
-    pub db: SqliteStore,
+    pub db: PgStore,
     pub blob: BlobStore,
     /// Per-tenant wiki repo factory. Handlers resolve `wiki_store.get(&tenant).await?`
     /// for the tenant of the source / job they're processing.
@@ -33,25 +29,30 @@ pub struct IngestContext {
     pub extractors: Arc<ExtractorRegistry>,
     pub llm: Option<Arc<dyn LlmProvider>>,
     pub embedder: Option<Arc<dyn Embedder>>,
-    pub weaviate: Option<Arc<WeaviateStore>>,
 }
 
 impl IngestContext {
     pub fn new(
-        db: SqliteStore,
+        db: PgStore,
         blob: BlobStore,
         wiki_store: WikiRepoStore,
         extractors: Arc<ExtractorRegistry>,
         llm: Option<Arc<dyn LlmProvider>>,
         embedder: Option<Arc<dyn Embedder>>,
-        weaviate: Option<Arc<WeaviateStore>>,
     ) -> Self {
-        Self { db, blob, wiki_store, extractors, llm, embedder, weaviate }
+        Self { db, blob, wiki_store, extractors, llm, embedder }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestPayload {
+    pub tenant: Tenant,
+    pub source_id: SourceId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemovePayload {
+    pub tenant: Tenant,
     pub source_id: SourceId,
 }
 
@@ -60,13 +61,27 @@ pub struct LintPayload {
     pub tenant: Tenant,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReembedPayload {
+    pub tenant: Tenant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPayload {
+    pub tenant: Tenant,
+    pub connector_id: String,
+}
+
 /// Build an Ingest job for a given source.
-pub fn ingest_job(source_id: &SourceId) -> Result<Job> {
+pub fn ingest_job(tenant: &Tenant, source_id: &SourceId) -> Result<Job> {
     let now = Utc::now();
     Ok(Job {
         id: JobId::new(),
         kind: JobKind::Ingest,
-        payload: serde_json::to_value(IngestPayload { source_id: source_id.clone() })?,
+        payload: serde_json::to_value(IngestPayload {
+            tenant: tenant.clone(),
+            source_id: source_id.clone(),
+        })?,
         state: JobState::Queued,
         attempt: 0,
         max_attempts: 5,
@@ -77,18 +92,36 @@ pub fn ingest_job(source_id: &SourceId) -> Result<Job> {
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncPayload {
-    pub connector_id: String,
+/// Build a Remove job for a given source.
+pub fn remove_job(tenant: &Tenant, source_id: &SourceId) -> Result<Job> {
+    let now = Utc::now();
+    Ok(Job {
+        id: JobId::new(),
+        kind: JobKind::Remove,
+        payload: serde_json::to_value(RemovePayload {
+            tenant: tenant.clone(),
+            source_id: source_id.clone(),
+        })?,
+        state: JobState::Queued,
+        attempt: 0,
+        max_attempts: 5,
+        next_run_at: now,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    })
 }
 
 /// Build a Sync job for an external connector.
-pub fn sync_job(connector_id: &str) -> Result<Job> {
+pub fn sync_job(tenant: &Tenant, connector_id: &str) -> Result<Job> {
     let now = Utc::now();
     Ok(Job {
         id: JobId::new(),
         kind: JobKind::Sync,
-        payload: serde_json::to_value(SyncPayload { connector_id: connector_id.to_string() })?,
+        payload: serde_json::to_value(SyncPayload {
+            tenant: tenant.clone(),
+            connector_id: connector_id.to_string(),
+        })?,
         state: JobState::Queued,
         attempt: 0,
         max_attempts: 3,
@@ -99,12 +132,7 @@ pub fn sync_job(connector_id: &str) -> Result<Job> {
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReembedPayload {
-    pub tenant: Tenant,
-}
-
-/// Build a Reembed job: clear Weaviate for the tenant and rebuild from git.
+/// Build a Reembed job: clear pgvector for the tenant and rebuild from git.
 pub fn reembed_job(tenant: &Tenant) -> Result<Job> {
     let now = Utc::now();
     Ok(Job {
@@ -122,7 +150,8 @@ pub fn reembed_job(tenant: &Tenant) -> Result<Job> {
 }
 
 /// Build a Lint job for a tenant's wiki.
-pub fn lint_job(tenant: &Tenant) -> Result<Job> {    let now = Utc::now();
+pub fn lint_job(tenant: &Tenant) -> Result<Job> {
+    let now = Utc::now();
     Ok(Job {
         id: JobId::new(),
         kind: JobKind::Lint,
@@ -157,19 +186,18 @@ impl JobRunner {
             worker = %self.worker_id,
             llm = self.ctx.llm.as_ref().map(|p| p.name()),
             embedder = self.ctx.embedder.as_ref().map(|e| e.name()),
-            weaviate = self.ctx.weaviate.is_some(),
             wiki_root = %self.ctx.wiki_store.root().display(),
             "job runner started"
         );
         loop {
-            match self.ctx.db.claim_next(&self.worker_id, 5 * 60_000).await {
+            match self.ctx.db.claim_next_job(&self.worker_id, 5 * 60_000).await {
                 Ok(Some(job)) => {
                     let id = job.id.clone();
                     if let Err(e) = self.handle(job).await {
                         error!(job = %id, error = %e, "job failed");
-                        let _ = self.ctx.db.fail(&id, &e.to_string(), Some(5_000)).await;
+                        let _ = self.ctx.db.fail_job(&id, &e.to_string(), Some(5_000)).await;
                     } else {
-                        let _ = self.ctx.db.complete(&id).await;
+                        let _ = self.ctx.db.complete_job(&id).await;
                     }
                 }
                 Ok(None) => tokio::time::sleep(self.poll_idle).await,
@@ -185,11 +213,11 @@ impl JobRunner {
         match job.kind {
             JobKind::Ingest => {
                 let p: IngestPayload = serde_json::from_value(job.payload)?;
-                handlers::ingest::run(&self.ctx, &p.source_id).await
+                handlers::ingest::run(&self.ctx, &p.tenant, &p.source_id).await
             }
             JobKind::Remove => {
-                let p: handlers::remove::RemovePayload = serde_json::from_value(job.payload)?;
-                handlers::remove::run(&self.ctx, &p.source_id).await
+                let p: RemovePayload = serde_json::from_value(job.payload)?;
+                handlers::remove::run(&self.ctx, &p.tenant, &p.source_id).await
             }
             JobKind::Lint => {
                 let p: LintPayload = serde_json::from_value(job.payload)?;
@@ -201,7 +229,7 @@ impl JobRunner {
             }
             JobKind::Sync => {
                 let p: SyncPayload = serde_json::from_value(job.payload)?;
-                handlers::sync::run(&self.ctx, &p.connector_id).await
+                handlers::sync::run(&self.ctx, &p.tenant, &p.connector_id).await
             }
         }
     }

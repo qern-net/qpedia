@@ -5,14 +5,18 @@
     enqueueReembed,
     getMe,
     listFolderAcls,
+    listFolders,
+    listSources,
     listStalledSources,
     resumeStalledSources,
     setFolderAcl,
+    type Folder,
     type FolderAcl,
     type Me,
     type Source
   } from '$lib/api';
   import StatusChip from '$lib/components/StatusChip.svelte';
+  import FolderTree from '$lib/components/FolderTree.svelte';
 
   let me = $state<Me | null>(null);
   let loaded = $state(false);
@@ -36,10 +40,20 @@
   let formPath = $state('/');
   let formGroups = $state('');
 
+  // Folder tree (read-only picker for the ACL target).
+  let treeFolders = $state<Folder[]>([]);
+  let treeSources = $state<Source[]>([]);
+
   async function refresh() {
     try {
-      const r = await listFolderAcls();
+      const [r, fld, srcs] = await Promise.all([
+        listFolderAcls(),
+        listFolders(),
+        listSources('/', 1000)
+      ]);
       acls = r.items;
+      treeFolders = fld.items;
+      treeSources = srcs;
       error = null;
     } catch (e: any) {
       error = String(e?.message ?? e);
@@ -245,14 +259,19 @@
         with no match, fall back to the uploader's groups.
       </p>
       <form onsubmit={(e) => { e.preventDefault(); onSubmit(); }} class="col" style="gap: 12px;">
-        <div class="row">
-          <label class="muted" style="width: 140px;">Folder path:</label>
-          <input
-            type="text"
-            bind:value={formPath}
-            placeholder="/finance"
-            style="flex: 1; max-width: 360px;"
-          />
+        <div class="row" style="align-items: flex-start;">
+          <span class="muted" style="width: 140px; padding-top: 6px;">Folder:</span>
+          <div style="flex: 1; max-width: 420px;">
+            <FolderTree
+              folders={treeFolders}
+              sources={treeSources}
+              bind:selected={formPath}
+              onSelect={(p) => (formPath = p)}
+            />
+            <div class="muted" style="font-size: 12px; margin-top: 6px;">
+              Selected: <span class="mono">{formPath}</span>
+            </div>
+          </div>
         </div>
         <div class="row">
           <label class="muted" style="width: 140px;">Groups (comma):</label>

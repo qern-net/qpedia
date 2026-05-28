@@ -1,6 +1,6 @@
 //! Sync job handler: pulls changed docs from an external connector and
 //! ingests them via the normal pipeline (one Source row + Ingest job per
-//! doc). See DESIGN.md §16 (External connectors).
+//! doc). See SPEC-v2.md §16 (External connectors).
 
 use crate::runner::IngestContext;
 use crate::runner::ingest_job;
@@ -13,17 +13,15 @@ use qpedia_core::{
     tenant::Tenant,
     SourceId,
 };
-use qpedia_store::{
-    blob::{BlobKind, BlobStorage},
-    sqlite::{JobQueue, SourceStore},
-};
+use qpedia_pg_store::unique_source_slug;
+use qpedia_store::blob::{BlobKind, BlobStorage};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-pub async fn run(ctx: &IngestContext, connector_id: &str) -> Result<()> {
+pub async fn run(ctx: &IngestContext, tenant: &Tenant, connector_id: &str) -> Result<()> {
     let cfg = ctx
         .db
-        .get_connector(connector_id)
+        .get_connector(tenant, connector_id)
         .await?
         .ok_or_else(|| anyhow!("connector not found: {connector_id}"))?;
     if !cfg.enabled {
@@ -31,7 +29,6 @@ pub async fn run(ctx: &IngestContext, connector_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let tenant = Tenant::new(cfg.tenant.clone());
     let folder_path = format!("/connectors/{}", sanitize_segment(&cfg.name));
 
     let connector = build_connector(&cfg)?;
@@ -42,7 +39,7 @@ pub async fn run(ctx: &IngestContext, connector_id: &str) -> Result<()> {
         Err(e) => {
             let _ = ctx
                 .db
-                .update_connector_cursor(connector_id, cfg.cursor.as_deref(), Some(&e.to_string()))
+                .update_connector_cursor(tenant, connector_id, cfg.cursor.as_deref(), Some(&e.to_string()))
                 .await;
             return Err(anyhow!("list_changed: {e}"));
         }
@@ -59,14 +56,14 @@ pub async fn run(ctx: &IngestContext, connector_id: &str) -> Result<()> {
     // visible across groups.
     let upload_acl = ctx
         .db
-        .resolve_folder_acl(&tenant, &folder_path)
+        .resolve_folder_acl(tenant, &folder_path)
         .await?
         .unwrap_or_else(|| Acl::from_iter(["admin".to_string()]));
 
     let mut ingested = 0usize;
     let mut errors = 0usize;
     for doc in &result.docs {
-        match ingest_one(ctx, &tenant, &folder_path, &upload_acl, &cfg.name, doc).await {
+        match ingest_one(ctx, tenant, &folder_path, &upload_acl, &cfg.name, doc).await {
             Ok(()) => ingested += 1,
             Err(e) => {
                 errors += 1;
@@ -82,20 +79,22 @@ pub async fn run(ctx: &IngestContext, connector_id: &str) -> Result<()> {
     };
     ctx.db
         .update_connector_cursor(
+            tenant,
             connector_id,
             result.new_cursor.as_deref(),
             err_summary.as_deref(),
         )
         .await?;
     ctx.db
-        .audit(
+        .write_audit(
+            tenant,
             &format!("connector:{}", cfg.kind),
             "connector.sync",
             Some(connector_id),
             Some(&serde_json::json!({
                 "ingested": ingested,
                 "errors": errors,
-                "tenant": cfg.tenant,
+                "tenant": tenant.as_str(),
                 "name": cfg.name,
             })),
         )
@@ -126,7 +125,9 @@ async fn ingest_one(
     hasher.update(&dl.bytes);
     let sha256 = hex::encode(hasher.finalize());
 
-    let id = SourceId::new();
+    // Mint a unique slug from the filename — the slug is the public id.
+    let slug = unique_source_slug(&ctx.db, tenant, &dl.filename).await?;
+    let id = SourceId::from(slug);
     let now = Utc::now();
     let src = Source {
         id: id.clone(),
@@ -151,8 +152,8 @@ async fn ingest_one(
         .unwrap_or("bin");
     ctx.blob.put(&id, BlobKind::Original, ext, dl.bytes).await?;
 
-    let job = ingest_job(&id)?;
-    ctx.db.enqueue(&job).await?;
+    let job = ingest_job(tenant, &id)?;
+    ctx.db.enqueue(tenant, &job).await?;
     Ok(())
 }
 

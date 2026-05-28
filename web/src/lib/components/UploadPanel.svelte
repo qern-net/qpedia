@@ -31,8 +31,9 @@
 
 <div class="card">
   <div class="row" style="margin-bottom: 12px;">
-    <label class="muted">Folder:</label>
-    <input type="text" bind:value={folderPath} placeholder="/finance" style="flex: 1; max-width: 320px;" />
+    <span class="muted">Upload to:</span>
+    <span class="mono" style="background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 10px;">{folderPath}</span>
+    <span class="muted" style="font-size: 12px;">— pick a folder in the tree below to change</span>
   </div>
   <div class="row">
     <input

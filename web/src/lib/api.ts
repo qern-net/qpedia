@@ -78,6 +78,61 @@ export function sourceOriginalUrl(id: string): string {
   return `/api/v1/sources/${id}/original`;
 }
 
+/** Move a source to a different folder (drag-and-drop). */
+export async function moveSource(id: string, folder_path: string): Promise<{ id: string; folder_path: string }> {
+  return json(
+    await fetch(`/api/v1/sources/${id}/move`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ folder_path })
+    })
+  );
+}
+
+// ---------- folders (File Explorer tree) ----------
+
+export type Folder = {
+  path: string;
+  /** Pinned folders are locked against the AI auto-organizer. */
+  pinned: boolean;
+};
+
+export async function listFolders(): Promise<{ items: Folder[] }> {
+  return json(await fetch('/api/v1/folders'));
+}
+
+/** Create a folder. Manually-created folders are pinned by default. */
+export async function createFolder(path: string, pinned = true): Promise<Folder> {
+  return json(
+    await fetch('/api/v1/folders', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path, pinned })
+    })
+  );
+}
+
+/** Lock/unlock a folder against the AI auto-organizer. */
+export async function setFolderPinned(path: string, pinned: boolean): Promise<Folder> {
+  return json(
+    await fetch('/api/v1/folders', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path, pinned })
+    })
+  );
+}
+
+/** Delete an empty folder. Throws if it still holds files. */
+export async function deleteFolder(path: string): Promise<void> {
+  const r = await fetch(`/api/v1/folders?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.text()).slice(0, 300); } catch {}
+    throw new Error(detail || `delete folder: ${r.status}`);
+  }
+}
+
 // ---------- auth ----------
 
 export type Me = {

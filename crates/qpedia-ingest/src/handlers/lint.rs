@@ -8,7 +8,6 @@ use crate::runner::IngestContext;
 use anyhow::Result;
 use qpedia_core::{tenant::Tenant, wiki::{DiffBundle, DiffOp}};
 use qpedia_lint::Linter;
-use qpedia_store::sqlite::SourceStore;
 use tracing::info;
 
 pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
@@ -24,7 +23,16 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
             .and_then(|v| v.as_str())
         {
             let folder = format!("/{}", doc_type.trim());
-            if let Err(e) = ctx.db.update_folder_path(&src.id, &folder).await {
+            // Don't reorganize into a user-pinned folder.
+            match ctx.db.is_folder_pinned(tenant, &folder).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(id = %src.id, error = %e, "lint: pin check failed; skipping");
+                    continue;
+                }
+            }
+            if let Err(e) = ctx.db.update_folder_path(tenant, &src.id, &folder).await {
                 tracing::warn!(id = %src.id, error = %e, "lint: failed to reorganize source");
             } else {
                 reorganized += 1;
@@ -33,7 +41,8 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
     }
     if reorganized > 0 {
         info!(tenant = %tenant, reorganized, "lint: reorganized sources into doc_type folders");
-        let _ = ctx.db.audit(
+        let _ = ctx.db.write_audit(
+            tenant,
             "qpedia-bot",
             "lint.reorganize",
             Some(tenant.as_str()),
@@ -47,7 +56,6 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
     let linter = Linter::new(
         wiki.clone(),
         ctx.db.clone(),
-        ctx.weaviate.clone(),
         ctx.llm.clone(),
         tenant.clone(),
     );
@@ -85,7 +93,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
     }
     let _ = ctx
         .db
-        .audit("qpedia-bot", "lint.run", Some(tenant.as_str()), Some(&report_value))
+        .write_audit(tenant, "qpedia-bot", "lint.run", Some(tenant.as_str()), Some(&report_value))
         .await;
     Ok(())
 }

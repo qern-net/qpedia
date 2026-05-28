@@ -1,19 +1,17 @@
-//! Reembed job handler: clear Weaviate for a tenant and rebuild from the
-//! git wiki repo. Git is the source of truth; Weaviate is a derived index.
+//! Reembed job handler: clear `wiki_pages` for a tenant and rebuild from the
+//! git wiki repo. Git is the source of truth; pgvector is a derived index.
 //!
 //! Use this when:
-//!   - Weaviate data is lost or corrupted
+//!   - wiki_pages data is lost or corrupted
 //!   - The embedding model is changed (QPEDIA_EMBED_MODEL)
-//!   - Weaviate schema is reset
 //!   - Search results look wrong and a full rebuild is needed
 //!
 //! The job is idempotent: running it twice produces the same result.
 
 use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use qpedia_core::tenant::Tenant;
-use qpedia_store::weaviate::WikiPageRecord;
+use qpedia_pg_store::WikiPageUpsert;
 use tracing::{info, warn};
 
 const MAX_EMBED_CHARS: usize = 8000;
@@ -21,8 +19,8 @@ const MAX_EMBED_CHARS: usize = 8000;
 const BATCH_SIZE: usize = 32;
 
 pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
-    let (Some(embedder), Some(weaviate)) = (ctx.embedder.as_ref(), ctx.weaviate.as_ref()) else {
-        return Err(anyhow!("reembed requires both an embedder and Weaviate to be configured"));
+    let Some(embedder) = ctx.embedder.as_ref() else {
+        return Err(anyhow!("reembed requires an embedder to be configured"));
     };
 
     let wiki = ctx.wiki_store.get(tenant).await?;
@@ -34,17 +32,21 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
         "reembed: starting full rebuild from git"
     );
 
-    // Step 1: clear all existing Weaviate objects for this tenant.
-    let deleted = weaviate.delete_tenant_pages(tenant).await?;
-    info!(tenant = %tenant, deleted, "reembed: cleared Weaviate");
+    // Step 1: clear all existing wiki_pages rows for this tenant.
+    let mut deleted = 0usize;
+    for path in &all_pages {
+        if ctx.db.delete_wiki_page(tenant, path).await.is_ok() {
+            deleted += 1;
+        }
+    }
+    info!(tenant = %tenant, deleted, "reembed: cleared wiki_pages");
 
     // Step 2: read, embed, and upsert every page from the git repo in batches.
-    let now = Utc::now().to_rfc3339();
     let mut total_embedded = 0usize;
     let mut total_skipped = 0usize;
 
     for chunk in all_pages.chunks(BATCH_SIZE) {
-        let mut records: Vec<(String, WikiPageRecord)> = Vec::new();
+        let mut records: Vec<(String, WikiPageUpsert)> = Vec::new();
         let mut embed_inputs: Vec<String> = Vec::new();
 
         for path in chunk {
@@ -60,18 +62,16 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
                 .take(MAX_EMBED_CHARS)
                 .collect();
 
-            let record = WikiPageRecord {
+            let upsert = WikiPageUpsert {
                 page_id: fm.id.unwrap_or_else(|| path.clone()),
-                tenant: tenant.clone(),
                 path: path.clone(),
                 kind: fm.kind.unwrap_or_default(),
                 title,
                 content,
                 tags: fm.tags,
                 source_ids: fm.source_ids,
-                updated_at: now.clone(),
             };
-            records.push((path.clone(), record));
+            records.push((path.clone(), upsert));
             embed_inputs.push(embed_text);
         }
 
@@ -93,8 +93,8 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
             ));
         }
 
-        for ((path, record), vector) in records.into_iter().zip(vectors) {
-            if let Err(e) = weaviate.upsert_page(&record, vector).await {
+        for ((path, upsert), vector) in records.into_iter().zip(vectors) {
+            if let Err(e) = ctx.db.upsert_wiki_page(tenant, &upsert, vector).await {
                 warn!(path = %path, error = %e, "reembed: upsert failed, skipping page");
                 total_skipped += 1;
             } else {
@@ -110,7 +110,8 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
         "reembed: complete"
     );
 
-    let _ = ctx.db.audit(
+    let _ = ctx.db.write_audit(
+        tenant,
         "qpedia-bot",
         "wiki.reembedded",
         Some(tenant.as_str()),
