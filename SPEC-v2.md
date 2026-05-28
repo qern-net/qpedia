@@ -1,16 +1,19 @@
 # Qpedia v2 — Postgres + Firebase Auth (greenfield)
 
-Consolidation rework. Two storage subsystems collapse into one. Bespoke
-OIDC plumbing collapses into Firebase Auth federation. Tenant isolation
-moves from application-level WHERE clauses to Postgres RLS. Identifiers
-go Wikipedia-style: BIGSERIAL internal PKs + tenant-unique slugs as the
-public-facing handles.
+> **Status: shipped.** All four stages (A–D) landed in `main`; see
+> `CHANGELOG.md` for the v1.0.0 release notes and `DESIGN.md` for the
+> current architecture reference. This document is kept as the
+> planning record for the v1 → v2 consolidation.
 
-**Greenfield.** No SQLite + Weaviate data exists in production; no
-migration tooling, no compatibility shim. The codebase converges on the
-new stack directly.
+Consolidation rework. Two storage subsystems collapsed into one.
+Bespoke OIDC plumbing collapsed into Firebase Auth federation. Tenant
+isolation moved from application-level WHERE clauses to Postgres RLS.
+Identifiers went Wikipedia-style: BIGSERIAL internal PKs + tenant-unique
+slugs as the public-facing handles.
 
-Status: design approved 2026-05-17, building in stages on `main`.
+**Greenfield.** No SQLite + Weaviate data existed in production at the
+time of the rework; no migration tooling, no compatibility shim. The
+codebase converged on the new stack directly.
 
 ---
 
@@ -389,30 +392,17 @@ Two containers. Same `up` command. No legacy stores anywhere.
 
 ---
 
-## 9. Stages (commit boundaries)
+## 9. Stages (commit boundaries) — all shipped
 
-Stage A — Foundation [done]
-1. `qpedia-pg-store`: schema, migrations, role + RLS, sources/sessions/
-   tenants/wiki CRUD, slug helpers.
-2. `docker-compose.yml` swaps to pgvector/pgvector:pg17.
+| Stage | Scope | Status |
+|---|---|---|
+| A — Foundation | `qpedia-pg-store`: schema + migrations + role + RLS + sources/sessions/tenants/wiki CRUD + slug helpers. `docker-compose.yml` switches to `pgvector/pgvector:pg17`. | ✅ `22cf1ae` |
+| B — Wiki search | `wiki_pages` + `hybrid_search` (BM25 + vector in one SQL) + `near_duplicates`. | ✅ (with A) |
+| C — Auth | `FirebaseVerifier` + `/api/v1/auth/firebase/login` + frontend Firebase SDK on `/login` with Google / Apple / Microsoft / GitHub / X / Facebook + opt-in enterprise SSO. | ✅ `0f918c0` |
+| D — Cutover | Every ingest handler, retriever, lint, and api rewired from `SqliteStore` + `WeaviateStore` to `PgStore`. Per-request `SET LOCAL ROLE qpedia_app` + `set_config('qpedia.tenant', …)` via `begin_for(&tenant)`. Upload mints slugs via `unique_source_slug`. The old `qpedia-store::sqlite` + `::weaviate` modules deleted. | ✅ `a3d62e5` |
 
-Stage B — Wiki search [done with A]
-3. `wiki_pages` + `pg_hybrid_search` (BM25 + vector, single SQL) +
-   `pg_near_duplicates`.
+No Stage E — greenfield, no migration tooling needed. Subsequent work
+moved to `ROADMAP.md`.
 
-Stage C — Auth [done]
-4. `FirebaseVerifier` + `/api/v1/auth/firebase/login` + frontend
-   Firebase SDK on `/login` with Google / Apple / Microsoft / GitHub /
-   X / Facebook + opt-in enterprise SSO.
-
-Stage D — Cutover [pending]
-5. `qpedia-api/src/main.rs` rewires every handler from `SqliteStore` /
-   `WeaviateStore` to `PgStore`. `IngestContext.db` becomes `PgStore`.
-   Per-request `SET LOCAL qpedia.tenant` (via `begin_for(&tenant)`).
-6. Upload handler calls `slug::unique_source_slug(&store, &tenant, filename)`
-   before insert; subsequent updates / reads use the slug as the public id.
-7. Delete `qpedia-store` (the old crate) and the SQLite + Weaviate code.
-
-No Stage E — greenfield, no migration tooling needed.
-
-This document is the contract for what gets built.
+This document is kept as the architectural planning record. Current
+architecture lives in `DESIGN.md`; current TODO in `ROADMAP.md`.

@@ -24,7 +24,7 @@ the corner of forking `main.rs`.
 | 0.2 | Add **`EventSink` integration** — surface defined in 0.1; wire registered sinks at every `db.write_audit(...)` call site so registered sinks fire alongside the existing tracing + audit-table writes. Default sink stays no-op. | qpedia | ✅ |
 | 0.3 | Add **`TenantHook` integration** — surface defined in 0.1; fire `on_upsert` from `/api/v1/admin/bootstrap` and any future tenant CRUD endpoints. | qpedia | ✅ |
 | 0.4 | Publish **`@qern/qpedia-web`** as an npm package (or local workspace) so `web-pvt` can override theme tokens and named slots without forking pages. | qpedia | ✅ |
-| 0.5 | **Tag `qpedia v1.0.0`** + write the first public CHANGELOG. | qpedia | ⚪ |
+| 0.5 | **Tag `qpedia v1.0.0`** + write the first public CHANGELOG. | qpedia | ✅ |
 | 0.6 | **Spin up `qpedia-pvt` repo:** empty Cargo workspace, depends on `qpedia` via git tag, minimal `qpedia-pvt-api` binary that just delegates to OSS. CI green. **Location:** sibling at `../qpedia-pvt` (peer of `qpedia`). Both joined under a single VS Code multi-root workspace `qpedia.code-workspace` so the two checkouts open together. | qpedia-pvt | ⚪ |
 | 0.7 | One-paragraph note in `qpedia/README` about the split; full version in `qpedia-pvt/README`. | both | ⚪ |
 

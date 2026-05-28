@@ -1,29 +1,27 @@
 # Qpedia — Detailed Design
 
 _Rust-based LLMWiki knowledge base, inspired by Karpathy's LLM Wiki proposal._
-_Status: design approved, ready to build._
+_Status: **implemented** — see `CHANGELOG.md` for the release history,
+`ROADMAP.md` for what's next, `OPEN-CORE.md` for the OSS/SaaS split._
 
-> **v2 update — Postgres + pgvector.** This document was written for v1
-> (SQLite + Weaviate, two containers). The shipping architecture is v2:
-> Postgres+pgvector replaces both SQLite *and* Weaviate, multi-tenant via
-> Postgres Row Level Security, Firebase Auth federation for login. The
-> sections below have been updated to reflect v2 — where you see legacy
-> phrasing, the canonical spec is **`SPEC-v2.md`**.
+> This document is the architectural deep-dive. The shipping stack is
+> Postgres + pgvector (`SPEC-v2.md` is the planning record for that
+> consolidation; this doc has been updated in place to match v2).
+> The narrower `AGENTS.md` covers each LLM agent in detail.
 
 ---
 
 ## 0. Goals & Non-Goals
 
 **Goals**
-- Enterprise document store (up to 1M docs, 100 concurrent users, single-tenant).
+- Enterprise document store (up to 1M docs, 100 concurrent users; multi-tenant via RLS).
 - Cloud-hosted default; same image ships on-prem.
 - LLM-authored wiki as the semantic layer (Karpathy three-layer model: raw sources + wiki + schema).
-- SharePoint-style folder/upload UX and chat-over-wiki UX, equally weighted.
-- Fits in **two containers**: `app` + `postgres` (pgvector).
+- File-explorer folder/upload UX and chat-over-wiki UX, equally weighted.
+- Fits in **two containers**: `app` + `postgres` (pgvector). Marker is an optional third.
 - All heavy lifting hidden from users.
 
-**Non-Goals (v1)**
-- Multi-tenant SaaS (design keeps the door open; not optimized for it).
+**Non-Goals (still)**
 - Real-time collaborative editing of wiki pages.
 - Federated search across external corpora.
 - Mobile app.
@@ -498,31 +496,29 @@ SSE /chat/...   as above
 
 ---
 
-## 11. Frontend UX Map (SvelteKit)
+## 11. Frontend UX (SvelteKit)
 
-Two main surfaces:
+What shipped — see `web/src/routes/` for the current surface:
 
-### 11.1 Folder / upload surface (SharePoint-like)
+- **Sources tab** (`/`) — file-explorer tree on the left with `+`
+  folder / lock-against-AI / delete-empty controls and HTML5
+  drag-and-drop file moves; per-folder file pane on the right with
+  upload, status chip, download, delete.
+- **Wiki tab** (`/wiki`) — sidebar grouped by directory (`system`,
+  `concepts/`, `summaries/`, …) → page reader at `/wiki/<path>` with
+  rendered markdown and clickable `[[wikilinks]]`.
+- **Search tab** (`/search`) — hybrid (pgvector + tsvector) results
+  with per-hit snippet.
+- **Chat tab** (`/chat`) — streaming SSE answers with citations that
+  link back into the wiki.
+- **Admin tab** (`/admin`, admin-only) — stalled-sources resume,
+  rebuild-search-index, folder-ACL editor that reuses the same tree,
+  Wiki Lint report viewer, and the connector admin.
+- **Login** (`/login`) — Firebase provider buttons + optional
+  enterprise SSO.
 
-- Tree view left, grid/list right.
-- Drag-drop upload → progress bar per file → live status chip (`Extracting → Distilling → Done`).
-- Right click → "Show wiki pages derived from this".
-- Folder ACL editor for admins.
-
-### 11.2 Wiki / chat surface
-
-- **Left pane**: wiki tree (concepts/, entities/, ...) with search.
-- **Center pane**: rendered page, wikilinks clickable.
-- **Right pane**: chat. Answers cite pages (click → center pane jumps). Citations also link raw sources (click → opens original doc viewer).
-- **Graph view** (tab): force-directed visualization of wiki page links, filtered by tag. Nice-to-have, build last.
-
-### 11.3 Admin surface
-
-- Job queue.
-- Review queue (quarantined bundles → rendered as a git-style diff).
-- Linter output.
-- QPEDIA.md editor (with change history and "test on a recent ingest" dry-run).
-- LLM spend dashboard.
+Deferred from the original sketch: a graph view of wiki page links and
+an LLM spend dashboard — neither has proven necessary at current scale.
 
 ---
 
@@ -618,44 +614,38 @@ Swap `QPEDIA_LLM` to point at internal vLLM; drop `ANTHROPIC_API_KEY`. That's it
 
 ---
 
-## 15. Build Plan (12 weeks, 2–3 engineers)
+## 15. External connectors
 
-| Week | Focus | Exit criteria |
-|---|---|---|
-| 1 | Scaffolding, workspace, CI, Dockerfile | `cargo check` green, empty app container runs |
-| 2 | Extract pipeline (PDF/docx/html/OCR), raw storage, folder API | Upload a file → extracted.txt appears |
-| 3 | Postgres schema + RLS, fastembed integration | `POST /sources` ends in Embedded state for a plain-text file |
-| 4 | LLM adapter, classifier step, simple RAG (no agent, no graph walk) | Chat returns grounded answer citing wiki pages |
-| 5 | gix-based wiki repo, QPEDIA.md loader, commit pipeline | Manual wiki edits commit cleanly |
-| 6 | Ingest agent: tool harness, validator, diff bundle, commit | End-to-end ingest of a PDF produces real wiki pages |
-| 7 | Remove/update pipeline, wiki_pages cleanup | Deleting a source cleans up or re-synthesizes pages |
-| 8 | Retriever agent: graph walk, citations, ACL filtering | Chat follows links across ≥2 pages to answer |
-| 9 | Frontend: folder view, upload, chat — usable end-to-end | Non-engineer can demo it |
-| 10 | Linting job, admin review queue, audit UI | Lint produces a meaningful commit on a seeded corpus |
-| 11 | Auth (OIDC), ACL wiring, rate limits, backup scripts | Multi-user demo with groups |
-| 12 | Hardening: load test (1M docs / 100 users sim), on-prem image, docs | Ship MVP |
+`qpedia-connectors` defines the `Connector` trait; v1 ships **Confluence
+Cloud** as a working concrete impl plus extension points for Google
+Drive, SharePoint Online, Slack, etc. (premium connectors land in
+`qpedia-pvt`; see `OPEN-CORE.md`). The sync scheduler enqueues a Sync
+job every `QPEDIA_SYNC_INTERVAL_SECS` for each enabled connector whose
+`last_run_at` is older than `QPEDIA_SYNC_STALE_SECS`.
 
-Parallelization notes: weeks 9–10 (frontend) can start at week 5 once the API shape is frozen. Linting (w10) is independent and can be done by a second engineer during w6–w8.
+## 16. High-fidelity extraction sidecar (Marker)
 
----
+Shipped behind the `docker compose --profile marker` flag (off by
+default). Lives in `sidecar/marker/` as a thin FastAPI wrapper around
+marker-pdf. The Rust extractor in `crates/qpedia-extract/src/pdf.rs`
+delegates to Marker when the pdfium text layer is sparse (< 20
+chars/page average) — and, when `QPEDIA_MARKER_PREFER=1`, sends every
+PDF there first with pdfium as the fallback on any sidecar failure.
 
-## 16. Open Items / Future Work
+Cost: ~5 GB image, 30–90s cold start on first request (model download),
+seconds-to-minutes per PDF on CPU. GPU recommended for serious
+throughput.
 
-- ~~Multi-tenant mode~~ **Done in v2** — RLS-isolated rows in shared Postgres + one git repo per tenant under `/data/wiki/<tenant>/`.
-- Collaborative human editing of wiki pages with agent-assisted merge.
-- External connectors (Google Drive, SharePoint, Confluence) → auto-ingest.
-- Cross-language support in wiki (currently one working language).
-- Fine-grained per-page ACLs beyond source-union.
-- Eval harness: held-out Q&A set to track retrieval quality regressions.
-- **High-fidelity extraction sidecar (Marker).** Shipped behind a docker
-  compose `marker` profile (off by default). Lives in `sidecar/marker/`
-  as a thin FastAPI wrapper around marker-pdf. The Rust extractor
-  (`MarkerExtractor`) registers ahead of `PdfExtractor` when
-  `QPEDIA_MARKER_URL` is set and falls back to pdfium on any sidecar
-  failure. Activate when wiki quality on table-heavy, multi-column, or
-  formula-heavy PDFs becomes the bottleneck. Cost: ~5 GB image,
-  30-90 s cold start on first request (model download), seconds to
-  minutes per PDF on CPU. GPU recommended for serious throughput.
+## 17. Where to look next
+
+Roadmap (current TODO + the OSS / SaaS split):
+- [`ROADMAP.md`](ROADMAP.md) — prioritized work plan, Bands 0–3.
+- [`OPEN-CORE.md`](OPEN-CORE.md) — split strategy for `qpedia` (Apache-2.0
+  OSS) and `qpedia-pvt` (private SaaS overlay).
+- [`CHANGELOG.md`](CHANGELOG.md) — release history.
+- [`SPEC-v2.md`](SPEC-v2.md) — planning record for the v1 → v2
+  consolidation (kept for historical context; this `DESIGN.md` is the
+  current architecture).
 
 ---
 

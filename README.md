@@ -1,8 +1,10 @@
 # Qpedia
 
-An LLM-powered knowledge base that turns uploaded documents into a searchable, linked wiki. Inspired by Karpathy's LLMWiki proposal.
+An LLM-powered knowledge base that turns uploaded documents into a searchable, linked wiki. Inspired by Karpathy's LLMWiki proposal. Apache-2.0.
 
 Upload a PDF, Word doc, or HTML page. Qpedia extracts the text, classifies it, runs an agentic loop to write or update wiki pages, and makes the knowledge available through hybrid search and a chat interface.
+
+**Docs:** [CHANGELOG](CHANGELOG.md) · [Roadmap](ROADMAP.md) · [Architecture](DESIGN.md) · [Open-Core split](OPEN-CORE.md) · [Agents](AGENTS.md) · [One-pager](ONE-PAGER.md)
 
 ---
 
