@@ -296,7 +296,9 @@ For table-heavy, multi-column, or formula-heavy PDFs, enable the optional Marker
 docker compose --profile marker up -d marker
 ```
 
-Then set `QPEDIA_MARKER_URL=http://marker:8000` in `.env` (already set by default). The Rust extractor delegates to Marker when the PDF text layer is sparse (< 20 chars/page average) and falls back to pdfium on any sidecar failure.
+Then set `QPEDIA_MARKER_URL=http://marker:8000` in `.env` (already set by default). By default the Rust extractor delegates to Marker only when the PDF text layer is sparse (< 20 chars/page average) — i.e. scanned / image-only PDFs. For a normal digital PDF, pdfium handles it directly.
+
+To send **every** PDF through Marker first (high-fidelity markdown for table-heavy, multi-column, or formula-heavy PDFs), also set `QPEDIA_MARKER_PREFER=1`. The pdfium two-pass remains as the fallback on any sidecar error, so a Marker outage doesn't block ingestion.
 
 Cost: ~5 GB image, 30–90 s cold start, seconds to minutes per PDF on CPU. GPU recommended for throughput.
 

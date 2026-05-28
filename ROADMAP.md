@@ -40,7 +40,7 @@ Small enough to slot in between Band 0 items.
 
 | # | Item | Repo | Status |
 |---|---|---|---|
-| 1.1 | **`QPEDIA_MARKER_PREFER=1` flag** — when set, route every PDF to Marker first, fall back to pdfium on sidecar error. ~15 lines in `crates/qpedia-extract/src/pdf.rs`. | qpedia | ⚪ |
+| 1.1 | **`QPEDIA_MARKER_PREFER=1` flag** — when set, route every PDF to Marker first, fall back to pdfium on sidecar error. ~15 lines in `crates/qpedia-extract/src/pdf.rs`. | qpedia | ✅ |
 | 1.2 | **Verbose claim_next_job cause chain** — `{:#}` instead of `%e` in the runner warn / fail logs. | qpedia | ✅ |
 | 1.3 | **Admin: surface latest lint report** — render `_meta/lint.json` in the Admin tab (orphans, broken links, duplicates) with one-click "open page" links. | qpedia | ⚪ |
 | 1.4 | **First-run wizard endpoint** — create tenant + set Firebase project + seed initial admin folder ACL in one POST. | qpedia | ⚪ |

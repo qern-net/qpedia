@@ -1,12 +1,19 @@
 //! PDF text extraction via `pdfium-render` (Rust bindings to Chrome's PDFium).
 //!
-//! Two-pass strategy:
+//! Default two-pass strategy:
 //!   1. Extract the text layer directly (fast, lossless).
 //!   2. If the text layer is empty or very sparse (< MIN_CHARS_PER_PAGE average),
 //!      delegate to the Marker sidecar if configured (`QPEDIA_MARKER_URL`).
 //!      Marker handles scanned/image-only PDFs via its own OCR pipeline.
 //!      If Marker is not configured, the empty extraction is returned with a
 //!      warning note so the operator knows OCR is needed.
+//!
+//! Opt-in Marker-first mode (`QPEDIA_MARKER_PREFER=1`):
+//!   - When set *and* `QPEDIA_MARKER_URL` is configured, every PDF is sent to
+//!     Marker first for high-fidelity markdown extraction. On any sidecar
+//!     failure (timeout, 5xx, decode error) we fall back to the pdfium
+//!     two-pass path below. Use this when you have a GPU sidecar and care
+//!     about table-heavy / multi-column / formula-heavy PDFs.
 //!
 //! Requires the pdfium dynamic library at runtime. Search order:
 //!   1. `$QPEDIA_PDFIUM_DIR`
@@ -32,6 +39,10 @@ pub struct PdfExtractor {
     /// Optional Marker sidecar for OCR fallback on image-only PDFs.
     /// Boxed to break the recursive type cycle (MarkerExtractor contains PdfExtractor).
     marker: Option<Box<dyn Extractor>>,
+    /// When true *and* `marker` is wired, route every PDF to Marker first
+    /// and only fall back to pdfium on sidecar error. Set by
+    /// `QPEDIA_MARKER_PREFER` (`1` / `true` / `yes` / `on`).
+    prefer_marker: bool,
 }
 
 impl PdfExtractor {
@@ -51,7 +62,23 @@ impl PdfExtractor {
                     None
                 }
             });
-        Ok(Self { pdfium: Arc::new(Pdfium::new(bindings)), marker })
+        let prefer_marker = std::env::var("QPEDIA_MARKER_PREFER")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if prefer_marker {
+            if marker.is_some() {
+                info!("PdfExtractor: Marker-preferred mode — every PDF goes through Marker first (pdfium fallback on error)");
+            } else {
+                warn!("PdfExtractor: QPEDIA_MARKER_PREFER set but QPEDIA_MARKER_URL is missing — using pdfium-only");
+            }
+        }
+        Ok(Self { pdfium: Arc::new(Pdfium::new(bindings)), marker, prefer_marker })
     }
 }
 
@@ -88,6 +115,30 @@ impl Extractor for PdfExtractor {
     }
 
     async fn extract(&self, mime: &str, bytes: Bytes) -> Result<Extraction> {
+        // Marker-preferred mode (opt-in): every PDF goes to Marker first.
+        // On any sidecar failure fall through to the pdfium two-pass path
+        // below so a Marker outage doesn't block ingestion. `Bytes::clone`
+        // is cheap (Arc-backed) so this doesn't copy the PDF.
+        if self.prefer_marker {
+            if let Some(marker) = &self.marker {
+                match marker.extract(mime, bytes.clone()).await {
+                    Ok(ex) => {
+                        info!(
+                            chars = ex.text.len(),
+                            "pdf extracted via Marker (preferred mode)"
+                        );
+                        return Ok(ex);
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "marker (preferred) failed; falling back to pdfium two-pass"
+                        );
+                    }
+                }
+            }
+        }
+
         let pdfium = self.pdfium.clone();
         let bytes_vec = bytes.to_vec();
 
