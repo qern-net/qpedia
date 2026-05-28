@@ -192,6 +192,71 @@ export async function enqueueReembed(): Promise<{ job_id: string; kind: string }
   return json(await fetch('/api/v1/admin/reembed', { method: 'POST' }));
 }
 
+// ---------- admin: lint ----------
+
+export type LintBrokenLink = { page: string; target: string };
+export type LintIndexDrift = {
+  missing_from_index: string[];
+  stale_in_index: string[];
+};
+export type LintDuplicate = { a: string; b: string; certainty: number };
+export type LintContradiction = { tag: string; pages: string[]; summary: string };
+
+export type LintReport = {
+  generated_at: string;
+  page_count: number;
+  orphans: string[];
+  broken_links: LintBrokenLink[];
+  index_drift: LintIndexDrift;
+  stale_source_ids: string[];
+  duplicates: LintDuplicate[];
+  contradictions: LintContradiction[];
+  /** Added by the lint handler when it audits — present on stored reports. */
+  tenant?: string;
+};
+
+export async function enqueueLint(): Promise<{ job_id: string; kind: string }> {
+  return json(await fetch('/api/v1/admin/lint', { method: 'POST' }));
+}
+
+/** Returns the latest committed `_meta/lint.json`, or null if none yet. */
+export async function getLintReport(): Promise<LintReport | null> {
+  const r = await fetch('/api/v1/admin/lint');
+  if (r.status === 404) return null;
+  return json<LintReport>(r);
+}
+
+// ---------- admin: first-run bootstrap ----------
+
+export type BootstrapRequest = {
+  tenant_id: string;
+  display_name: string;
+  email_domain?: string;
+  initial_folder_acls?: { folder_path: string; acl: string[] }[];
+  initial_folders?: { path: string; pinned?: boolean }[];
+};
+
+export type BootstrapResult = {
+  tenant: string;
+  display_name: string;
+  email_domain: string | null;
+  folder_acls: number;
+  folders: number;
+  firebase_project_id: string | null;
+};
+
+/** One-shot tenant bootstrap (admin only). Idempotent: re-calling
+ *  with the same tenant_id upserts. */
+export async function bootstrapTenant(body: BootstrapRequest): Promise<BootstrapResult> {
+  return json(
+    await fetch('/api/v1/admin/bootstrap', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+  );
+}
+
 export async function listWikiPages(prefix: string = ''): Promise<{ prefix: string; pages: string[] }> {
   return json(await fetch(`/api/v1/wiki/list?prefix=${encodeURIComponent(prefix)}`));
 }

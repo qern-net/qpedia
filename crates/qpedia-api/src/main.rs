@@ -186,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/admin/connectors", get(list_connectors).post(create_connector))
         .route("/api/v1/admin/connectors/:id", axum::routing::delete(delete_connector_route))
         .route("/api/v1/admin/connectors/:id/sync", post(trigger_connector_sync))
+        .route("/api/v1/admin/bootstrap", post(bootstrap_tenant))
         .with_state(state);
 
     let web_dir: PathBuf = std::env::var("QPEDIA_WEB_DIR")
@@ -956,6 +957,124 @@ async fn trigger_connector_sync(
     let job_id = job.id.to_string();
     s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
     Ok(Json(json!({"job_id": job_id, "connector_id": id, "state": "queued"})))
+}
+
+// ---------- first-run bootstrap ----------
+
+#[derive(Deserialize)]
+struct BootstrapFolderAcl {
+    folder_path: String,
+    acl: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct BootstrapFolder {
+    path: String,
+    #[serde(default = "default_true")]
+    pinned: bool,
+}
+
+#[derive(Deserialize)]
+struct BootstrapBody {
+    /// Target tenant slug (e.g. "acme"). Created if missing.
+    tenant_id: String,
+    /// Human display name for the tenant.
+    display_name: String,
+    /// Optional email-domain → tenant routing hint for Firebase login.
+    #[serde(default)]
+    email_domain: Option<String>,
+    /// Folder ACL rules to seed on the new tenant.
+    #[serde(default)]
+    initial_folder_acls: Vec<BootstrapFolderAcl>,
+    /// Pinned folders to pre-create in the explorer tree.
+    #[serde(default)]
+    initial_folders: Vec<BootstrapFolder>,
+}
+
+/// One-shot tenant bootstrap. Upserts the tenant row, seeds folder ACLs,
+/// pre-creates pinned folders. Admin only. The caller's tenant context
+/// is only used for the audit row; all writes target the new tenant.
+async fn bootstrap_tenant(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<BootstrapBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let target = qpedia_core::tenant::Tenant::new(body.tenant_id);
+    if target.as_str().is_empty() {
+        return Err(ApiError::Bad("tenant_id required".into()));
+    }
+    if body.display_name.trim().is_empty() {
+        return Err(ApiError::Bad("display_name required".into()));
+    }
+
+    // 1. Tenant row (cross-tenant write; runs on the admin pool with BYPASSRLS).
+    s.ctx
+        .db
+        .upsert_tenant(&target, &body.display_name, body.email_domain.as_deref())
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // 2. Folder ACLs — RLS-scoped to the target tenant.
+    let mut acls_applied = 0usize;
+    for entry in &body.initial_folder_acls {
+        if entry.folder_path.trim().is_empty() {
+            continue;
+        }
+        let acl = Acl::from_iter(entry.acl.iter().cloned());
+        s.ctx
+            .db
+            .set_folder_acl(&target, &entry.folder_path, &acl, &user.id)
+            .await
+            .map_err(ApiError::Internal)?;
+        acls_applied += 1;
+    }
+
+    // 3. Pre-create folders — pinned by default so AI auto-organize stays
+    // out of them.
+    let mut folders_applied = 0usize;
+    for f in &body.initial_folders {
+        if f.path.trim().is_empty() || f.path.trim() == "/" {
+            continue;
+        }
+        s.ctx
+            .db
+            .create_folder(&target, &f.path, f.pinned, &user.id)
+            .await
+            .map_err(ApiError::Internal)?;
+        folders_applied += 1;
+    }
+
+    // 4. Audit on the CALLER's tenant — this is an admin action *by* them,
+    // even though the writes targeted another tenant.
+    s.ctx
+        .db
+        .write_audit(
+            &user.tenant,
+            &user.id,
+            "tenant.bootstrap",
+            Some(target.as_str()),
+            Some(&json!({
+                "target_tenant": target.as_str(),
+                "display_name": body.display_name,
+                "email_domain": body.email_domain,
+                "folder_acls": acls_applied,
+                "folders": folders_applied,
+            })),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(json!({
+        "tenant": target.as_str(),
+        "display_name": body.display_name,
+        "email_domain": body.email_domain,
+        "folder_acls": acls_applied,
+        "folders": folders_applied,
+        "firebase_project_id": std::env::var("QPEDIA_FIREBASE_PROJECT_ID").ok(),
+    })))
 }
 
 async fn last_lint_report(State(s): State<AppState>, user: User) -> Result<Json<Value>, ApiError> {

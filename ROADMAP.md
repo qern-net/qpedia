@@ -42,10 +42,10 @@ Small enough to slot in between Band 0 items.
 |---|---|---|---|
 | 1.1 | **`QPEDIA_MARKER_PREFER=1` flag** — when set, route every PDF to Marker first, fall back to pdfium on sidecar error. ~15 lines in `crates/qpedia-extract/src/pdf.rs`. | qpedia | ✅ |
 | 1.2 | **Verbose claim_next_job cause chain** — `{:#}` instead of `%e` in the runner warn / fail logs. | qpedia | ✅ |
-| 1.3 | **Admin: surface latest lint report** — render `_meta/lint.json` in the Admin tab (orphans, broken links, duplicates) with one-click "open page" links. | qpedia | ⚪ |
-| 1.4 | **First-run wizard endpoint** — create tenant + set Firebase project + seed initial admin folder ACL in one POST. | qpedia | ⚪ |
-| 1.5 | **Address the a11y `<label>` warnings** in `admin/+page.svelte` (the "Groups (comma):" label has no associated control). Pre-existing. | qpedia | ⚪ |
-| 1.6 | **Fix verify-embeddings.sh hybrid assertion** — the Python heredoc treats `mode != "hybrid"` as fatal, but on an empty `wiki_pages` table the API legitimately falls back to fs. Either pre-warm with `reembed` or relax the assertion. | qpedia | ⚪ |
+| 1.3 | **Admin: surface latest lint report** — render `_meta/lint.json` in the Admin tab (orphans, broken links, duplicates) with one-click "open page" links. | qpedia | ✅ |
+| 1.4 | **First-run wizard endpoint** — create tenant + set Firebase project + seed initial admin folder ACL in one POST. | qpedia | ✅ |
+| 1.5 | **Address the a11y `<label>` warnings** in `admin/+page.svelte` (the "Groups (comma):" label has no associated control). Pre-existing. | qpedia | ✅ |
+| 1.6 | **Fix verify-embeddings.sh hybrid assertion** — the Python heredoc treats `mode != "hybrid"` as fatal, but on an empty `wiki_pages` table the API legitimately falls back to fs. Either pre-warm with `reembed` or relax the assertion. | qpedia | ✅ |
 
 ---
 

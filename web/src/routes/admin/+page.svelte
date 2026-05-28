@@ -2,7 +2,9 @@
   import { onMount } from 'svelte';
   import {
     deleteFolderAcl,
+    enqueueLint,
     enqueueReembed,
+    getLintReport,
     getMe,
     listFolderAcls,
     listFolders,
@@ -12,6 +14,7 @@
     setFolderAcl,
     type Folder,
     type FolderAcl,
+    type LintReport,
     type Me,
     type Source
   } from '$lib/api';
@@ -35,6 +38,13 @@
   let reembedding = $state(false);
   let reembedMsg = $state<string | null>(null);
   let reembedError = $state<string | null>(null);
+
+  // Lint report state
+  let lintReport = $state<LintReport | null>(null);
+  let lintLoading = $state(false);
+  let lintError = $state<string | null>(null);
+  let lintRunning = $state(false);
+  let lintRunMsg = $state<string | null>(null);
 
   // New / edit form state.
   let formPath = $state('/');
@@ -72,11 +82,46 @@
     }
   }
 
+  async function refreshLint() {
+    lintLoading = true; lintError = null;
+    try {
+      lintReport = await getLintReport();
+    } catch (e: any) {
+      lintError = String(e?.message ?? e);
+    } finally {
+      lintLoading = false;
+    }
+  }
+
+  async function onRunLint() {
+    lintRunning = true; lintRunMsg = null; lintError = null;
+    try {
+      const r = await enqueueLint();
+      lintRunMsg = `Lint job queued (${r.job_id.slice(0, 10)}…). Re-fetch the report in a moment.`;
+    } catch (e: any) {
+      lintError = String(e?.message ?? e);
+    } finally {
+      lintRunning = false;
+    }
+  }
+
+  function lintIssueCount(r: LintReport): number {
+    return (
+      r.orphans.length +
+      r.broken_links.length +
+      r.index_drift.missing_from_index.length +
+      r.index_drift.stale_in_index.length +
+      r.stale_source_ids.length +
+      r.duplicates.length +
+      r.contradictions.length
+    );
+  }
+
   onMount(async () => {
     try { me = await getMe(); } catch {}
     loaded = true;
     if (me?.is_admin) {
-      await Promise.all([refresh(), refreshStalled()]);
+      await Promise.all([refresh(), refreshStalled(), refreshLint()]);
     }
   });
 
@@ -250,6 +295,177 @@
       {/if}
     </div>
 
+    <!-- ── Wiki Lint Report ── -->
+    <div>
+      <div class="row" style="margin-bottom: 8px;">
+        <div>
+          <h2 style="margin: 0 0 4px;">Wiki Lint</h2>
+          <p class="muted" style="margin: 0; font-size: 12px;">
+            Periodic health check — orphans, broken links, duplicates, index
+            drift, stale source refs, contradictions. The latest report is
+            committed at <span class="mono">_meta/lint.json</span>.
+            {#if lintReport?.generated_at}
+              Last run: <span class="mono">{lintReport.generated_at.slice(0, 19).replace('T', ' ')}</span>
+              over {lintReport.page_count} page{lintReport.page_count === 1 ? '' : 's'}.
+            {/if}
+          </p>
+        </div>
+        <span class="spacer"></span>
+        <button onclick={refreshLint} disabled={lintLoading} style="white-space: nowrap;">
+          {lintLoading ? '…' : 'Refresh'}
+        </button>
+        <button onclick={onRunLint} disabled={lintRunning} class="primary" style="white-space: nowrap;">
+          {lintRunning ? 'Queuing…' : 'Run lint now'}
+        </button>
+      </div>
+
+      {#if lintError}
+        <div class="card" style="border-color: var(--err); color: var(--err); margin-bottom: 12px;">{lintError}</div>
+      {/if}
+      {#if lintRunMsg}
+        <div class="card" style="border-color: var(--ok); color: var(--ok); margin-bottom: 12px;">{lintRunMsg}</div>
+      {/if}
+
+      {#if !lintReport}
+        <div class="card muted">
+          No lint report yet — click <strong>Run lint now</strong>. The job
+          completes within a few seconds for small wikis; refresh to see
+          the report.
+        </div>
+      {:else}
+        {@const r = lintReport}
+        {@const total = lintIssueCount(r)}
+        <div class="card" style="padding: 0; overflow: hidden;">
+          <div class="row" style="padding: 12px 14px; border-bottom: 1px solid var(--border);">
+            <strong>{total} issue{total === 1 ? '' : 's'}</strong>
+            <span class="spacer"></span>
+            <span class="muted" style="font-size: 12px;">
+              {r.orphans.length} orphans · {r.broken_links.length} broken ·
+              {r.index_drift.missing_from_index.length + r.index_drift.stale_in_index.length} index drift ·
+              {r.stale_source_ids.length} stale src ·
+              {r.duplicates.length} duplicates ·
+              {r.contradictions.length} contradictions
+            </span>
+          </div>
+
+          {#if r.orphans.length > 0}
+            <details class="lint-cat" open>
+              <summary>Orphans <span class="badge">{r.orphans.length}</span></summary>
+              <p class="muted" style="font-size: 12px; margin: 6px 0 8px;">
+                Pages no one links to (excluding system files).
+              </p>
+              <ul>
+                {#each r.orphans as path}
+                  <li><a href={`/wiki/${path}`} class="mono">{path}</a></li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+
+          {#if r.broken_links.length > 0}
+            <details class="lint-cat" open>
+              <summary>Broken links <span class="badge">{r.broken_links.length}</span></summary>
+              <ul>
+                {#each r.broken_links as bl}
+                  <li>
+                    <a href={`/wiki/${bl.page}`} class="mono">{bl.page}</a>
+                    <span class="muted">→</span>
+                    <span class="mono" style="color: var(--err);">{bl.target}</span>
+                  </li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+
+          {#if r.index_drift.missing_from_index.length > 0 || r.index_drift.stale_in_index.length > 0}
+            <details class="lint-cat">
+              <summary>
+                Index drift
+                <span class="badge">{r.index_drift.missing_from_index.length + r.index_drift.stale_in_index.length}</span>
+              </summary>
+              {#if r.index_drift.missing_from_index.length > 0}
+                <p class="muted" style="font-size: 12px; margin: 6px 0 4px;">Missing from index.md:</p>
+                <ul>
+                  {#each r.index_drift.missing_from_index as path}
+                    <li><a href={`/wiki/${path}`} class="mono">{path}</a></li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if r.index_drift.stale_in_index.length > 0}
+                <p class="muted" style="font-size: 12px; margin: 6px 0 4px;">In index.md but not on disk:</p>
+                <ul>
+                  {#each r.index_drift.stale_in_index as path}
+                    <li><span class="mono" style="color: var(--err);">{path}</span></li>
+                  {/each}
+                </ul>
+              {/if}
+            </details>
+          {/if}
+
+          {#if r.stale_source_ids.length > 0}
+            <details class="lint-cat">
+              <summary>Stale source IDs <span class="badge">{r.stale_source_ids.length}</span></summary>
+              <p class="muted" style="font-size: 12px; margin: 6px 0 8px;">
+                Pages reference these source IDs in frontmatter, but the source row no longer exists.
+              </p>
+              <ul>
+                {#each r.stale_source_ids as sid}
+                  <li class="mono" style="color: var(--err);">{sid}</li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+
+          {#if r.duplicates.length > 0}
+            <details class="lint-cat" open>
+              <summary>Near-duplicate pages <span class="badge">{r.duplicates.length}</span></summary>
+              <p class="muted" style="font-size: 12px; margin: 6px 0 8px;">
+                Pairs with cosine similarity ≥ 0.93.
+              </p>
+              <ul>
+                {#each r.duplicates as d}
+                  <li>
+                    <a href={`/wiki/${d.a}`} class="mono">{d.a}</a>
+                    <span class="muted">↔</span>
+                    <a href={`/wiki/${d.b}`} class="mono">{d.b}</a>
+                    <span class="badge">{(d.certainty * 100).toFixed(0)}%</span>
+                  </li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+
+          {#if r.contradictions.length > 0}
+            <details class="lint-cat" open>
+              <summary>Contradictions <span class="badge">{r.contradictions.length}</span></summary>
+              <p class="muted" style="font-size: 12px; margin: 6px 0 8px;">
+                Pages sharing a tag with claims that contradict each other, per the LLM.
+              </p>
+              <ul>
+                {#each r.contradictions as c}
+                  <li style="margin-bottom: 8px;">
+                    <div style="margin-bottom: 4px;">
+                      <span class="chip" style="background: var(--bg-3); color: var(--fg);">#{c.tag}</span>
+                      <span class="muted">— {c.summary}</span>
+                    </div>
+                    <div>
+                      {#each c.pages as p}
+                        <a href={`/wiki/${p}`} class="mono" style="margin-right: 8px;">{p}</a>
+                      {/each}
+                    </div>
+                  </li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+
+          {#if total === 0}
+            <div style="padding: 14px; color: var(--ok);">Clean — no issues found.</div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
     <!-- ── Folder ACLs ── -->
     <div class="card">
       <h2 style="margin-top: 0;">Set Folder ACL</h2>
@@ -274,8 +490,9 @@
           </div>
         </div>
         <div class="row">
-          <label class="muted" style="width: 140px;">Groups (comma):</label>
+          <label class="muted" for="acl-groups-input" style="width: 140px;">Groups (comma):</label>
           <input
+            id="acl-groups-input"
             type="text"
             bind:value={formGroups}
             placeholder="finance-team, admin"
@@ -338,3 +555,32 @@
 
   </div>
 {/if}
+
+<style>
+  .lint-cat {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .lint-cat:last-child { border-bottom: none; }
+  .lint-cat > summary {
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+  }
+  .lint-cat ul {
+    margin: 4px 0 0 0;
+    padding-left: 18px;
+    font-size: 13px;
+  }
+  .lint-cat li { margin: 2px 0; }
+  .badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--bg-2);
+    color: var(--muted, #888);
+    border-radius: 999px;
+  }
+</style>
