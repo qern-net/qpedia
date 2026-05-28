@@ -84,48 +84,16 @@ impl axum::extract::FromRef<AppState> for AuthExtractorState {
     }
 }
 
-// ---------- extension traits (surface defined here; integration in 0.2/0.3) ----
+// ---------- EventSink: re-exported from pg-store; integrated in Band 0.2 ------
+//
+// The trait + NoopEventSink live in `qpedia_pg_store::events` so every
+// caller of `db.write_audit(...)` fires registered sinks — including
+// background-job handlers in qpedia-ingest, not just HTTP routes.
+// `AppBuilder::with_event_sink` below registers via `PgStore::register_event_sink`.
 
-/// Sink for audit / observability events emitted by the application.
-///
-/// The default tracing log + Postgres `audit` row writes happen
-/// unconditionally at every `db.write_audit(...)` call site. Overlays
-/// can register additional sinks (SIEM, S3, etc.) via
-/// [`AppBuilder::with_event_sink`].
-///
-/// **Note (Band 0.1):** the trait is defined so the public surface
-/// stabilizes early. Registered sinks are stored but **not yet fired**
-/// at the audit call sites — that integration lands in Band 0.2.
-#[async_trait::async_trait]
-pub trait EventSink: Send + Sync + 'static {
-    /// Called after every successful audit write. Best-effort; sinks
-    /// must not propagate errors back to the request.
-    async fn record(
-        &self,
-        tenant: &Tenant,
-        actor: &str,
-        action: &str,
-        target: Option<&str>,
-        metadata: Option<&serde_json::Value>,
-    );
-}
+pub use qpedia_pg_store::{EventSink, NoopEventSink};
 
-/// Default no-op sink. The overlay registers its own with
-/// [`AppBuilder::with_event_sink`].
-pub struct NoopEventSink;
-
-#[async_trait::async_trait]
-impl EventSink for NoopEventSink {
-    async fn record(
-        &self,
-        _tenant: &Tenant,
-        _actor: &str,
-        _action: &str,
-        _target: Option<&str>,
-        _metadata: Option<&serde_json::Value>,
-    ) {
-    }
-}
+// ---------- TenantHook (surface defined here; integration in 0.3) ------------
 
 /// Hook fired on tenant lifecycle events. Default is a no-op.
 ///
@@ -170,7 +138,6 @@ pub struct AppBuilder {
     upload_limit_bytes: usize,
     extension_map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     extra_routers: Vec<Router<AppState>>,
-    event_sinks: Vec<Arc<dyn EventSink>>,
     tenant_hooks: Vec<Arc<dyn TenantHook>>,
     spawn_workers: bool,
 }
@@ -251,7 +218,6 @@ impl AppBuilder {
             upload_limit_bytes: DEFAULT_UPLOAD_LIMIT_BYTES,
             extension_map: HashMap::new(),
             extra_routers: Vec::new(),
-            event_sinks: Vec::new(),
             tenant_hooks: Vec::new(),
             spawn_workers: true,
         })
@@ -273,9 +239,12 @@ impl AppBuilder {
         self
     }
 
-    /// Register an [`EventSink`]. See trait docs.
-    pub fn with_event_sink<S: EventSink>(mut self, sink: S) -> Self {
-        self.event_sinks.push(Arc::new(sink));
+    /// Register an [`EventSink`]. Delegates to
+    /// [`PgStore::register_event_sink`], so every `db.write_audit(...)`
+    /// caller (including background-job handlers) fires the sink after
+    /// committing the audit row. See trait docs.
+    pub fn with_event_sink<S: EventSink>(self, sink: S) -> Self {
+        self.ctx.db.register_event_sink(Arc::new(sink));
         self
     }
 

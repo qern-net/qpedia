@@ -1,4 +1,9 @@
 //! Audit log. RLS-scoped writes.
+//!
+//! After the row is durably committed, every registered [`EventSink`]
+//! (see [`PgStore::register_event_sink`]) fires on a detached task.
+//! That keeps the originating handler off the sink path entirely — a
+//! slow SIEM forwarder can never delay or fail a write_audit caller.
 
 use crate::PgStore;
 use anyhow::{Context, Result};
@@ -27,6 +32,31 @@ impl PgStore {
         .await
         .context("write_audit")?;
         tx.commit().await?;
+
+        // Fire registered sinks best-effort, after the row is durably
+        // committed. Detached so the originating handler returns
+        // immediately; sinks can't slow it down or fail it.
+        let sinks = self.event_sinks_snapshot();
+        if !sinks.is_empty() {
+            let tenant = tenant.clone();
+            let actor = actor.to_string();
+            let action = action.to_string();
+            let target = target.map(|s| s.to_string());
+            let metadata = metadata.cloned();
+            tokio::spawn(async move {
+                for sink in sinks {
+                    sink.record(
+                        &tenant,
+                        &actor,
+                        &action,
+                        target.as_deref(),
+                        metadata.as_ref(),
+                    )
+                    .await;
+                }
+            });
+        }
+
         Ok(())
     }
 }

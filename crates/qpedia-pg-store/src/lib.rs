@@ -9,6 +9,7 @@
 
 pub mod audit;
 pub mod connectors;
+pub mod events;
 pub mod folder_acls;
 pub mod folders;
 pub mod jobs;
@@ -19,6 +20,7 @@ pub mod sources;
 pub mod tenants;
 pub mod wiki;
 
+pub use events::{EventSink, NoopEventSink};
 pub use folders::FolderRow;
 pub use oidc_pending::PendingLogin;
 pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
@@ -31,14 +33,16 @@ use qpedia_core::tenant::Tenant;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::info;
 
 /// Top-level Postgres store. Hold one instance per process; clone is cheap
-/// (sqlx pools are Arc-internally).
+/// (sqlx pools and the sink registry are both `Arc`-internal).
 #[derive(Clone)]
 pub struct PgStore {
     pool: PgPool,
+    event_sinks: Arc<RwLock<Vec<Arc<dyn EventSink>>>>,
 }
 
 impl PgStore {
@@ -65,11 +69,34 @@ impl PgStore {
             .context("apply Postgres migrations")?;
 
         info!("Postgres pool ready");
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            event_sinks: Arc::new(RwLock::new(Vec::new())),
+        })
     }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Register an audit sink. Every subsequent successful
+    /// [`PgStore::write_audit`] call will fire it on a detached task
+    /// after the row is durably committed. Cheap to call; all `PgStore`
+    /// clones share the same registry.
+    pub fn register_event_sink(&self, sink: Arc<dyn EventSink>) {
+        if let Ok(mut g) = self.event_sinks.write() {
+            g.push(sink);
+        }
+    }
+
+    /// Snapshot the currently registered sinks. Used by `write_audit`
+    /// to fire them after committing.
+    pub(crate) fn event_sinks_snapshot(&self) -> Vec<Arc<dyn EventSink>> {
+        self.event_sinks
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Open a transaction scoped to `tenant`. Two things happen inside
