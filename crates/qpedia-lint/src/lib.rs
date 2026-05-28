@@ -7,7 +7,7 @@
 //!   - stale_source_ids: frontmatter source_ids that no longer exist in DB
 //!
 //! Future v2 additions (DESIGN.md §9): contradictions (LLM clusters),
-//! near-duplicates (cosine > 0.93 via Weaviate nearObject).
+//! near-duplicates (cosine > 0.93 via the pgvector self-join in `PgStore::near_duplicates`).
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;

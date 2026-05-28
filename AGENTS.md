@@ -142,7 +142,7 @@ If the gather agent loads zero pages (e.g. the agent calls `done` immediately, o
 | Gather LLM call fails | `ChatEvent::Error` streamed to client |
 | Synthesis stream fails mid-response | `ChatEvent::Error` appended to stream |
 | No LLM configured | API returns 400 with a clear message |
-| Weaviate unavailable | Falls back to filesystem text search |
+| Postgres hybrid search fails | Falls back to filesystem text search |
 
 ---
 

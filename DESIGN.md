@@ -3,6 +3,13 @@
 _Rust-based LLMWiki knowledge base, inspired by Karpathy's LLM Wiki proposal._
 _Status: design approved, ready to build._
 
+> **v2 update — Postgres + pgvector.** This document was written for v1
+> (SQLite + Weaviate, two containers). The shipping architecture is v2:
+> Postgres+pgvector replaces both SQLite *and* Weaviate, multi-tenant via
+> Postgres Row Level Security, Firebase Auth federation for login. The
+> sections below have been updated to reflect v2 — where you see legacy
+> phrasing, the canonical spec is **`SPEC-v2.md`**.
+
 ---
 
 ## 0. Goals & Non-Goals
@@ -12,7 +19,7 @@ _Status: design approved, ready to build._
 - Cloud-hosted default; same image ships on-prem.
 - LLM-authored wiki as the semantic layer (Karpathy three-layer model: raw sources + wiki + schema).
 - SharePoint-style folder/upload UX and chat-over-wiki UX, equally weighted.
-- Fits in **two containers**: `app` + `weaviate`.
+- Fits in **two containers**: `app` + `postgres` (pgvector).
 - All heavy lifting hidden from users.
 
 **Non-Goals (v1)**
@@ -28,20 +35,21 @@ _Status: design approved, ready to build._
 ```
 ┌───────────────────────────── app (Rust) ─────────────────────────────┐
 │  axum HTTP/WS API · ingest workers · retriever · linter              │
-│  SQLite (jobs, sessions, audit)                                      │
-│  gix-managed git repo: /data/wiki                                    │
+│  gix-managed git repos: /data/wiki/<tenant>/   (one per tenant)      │
 │  filesystem volume:    /data/raw  (uploaded docs + OCR text)         │
-│  fastembed-rs (bge-m3)  — embeddings in-process                      │
+│  fastembed-rs (bge-small-en-v1.5) — embeddings in-process            │
 │  tesseract + pdfium + pandoc  — extraction tooling                   │
 │  SvelteKit static assets served by axum                              │
 └────────────────────────────────┬─────────────────────────────────────┘
-                                 │ gRPC / REST
-┌────────────────────────────────▼────── weaviate container ──────────┐
-│  WikiPage · Chunk · Source · Folder classes                         │
-│  Hybrid search (BM25 + vector), cross-ref graph traversal           │
+                                 │ SQL (sqlx, RLS-scoped pool)
+┌────────────────────────────────▼─── postgres + pgvector ────────────┐
+│  tenants · sources · jobs · sessions · audit · folder_acls · folders │
+│  connectors · oidc_pending                                          │
+│  wiki_pages — vector(384) + tsvector hybrid search in one query     │
 └──────────────────────────────────────────────────────────────────────┘
 
-Volumes: wiki-data, raw-data, sqlite-data, weaviate-data
+Bind mounts: ./data/wiki, ./data/raw, ./data/models.  Named volume: postgres-data.
+Optional third container: Marker high-fidelity PDF sidecar (--profile marker).
 ```
 
 ---
@@ -57,21 +65,24 @@ Volumes: wiki-data, raw-data, sqlite-data, weaviate-data
 │   │   ├── original.<ext>           # as uploaded
 │   │   ├── extracted.txt            # OCR / text extraction output
 │   │   └── manifest.json            # hashes, pages, metadata
-├── wiki/                             # git working tree
-│   ├── .git/
-│   ├── QPEDIA.md                    # schema / style guide (governs agent)
-│   ├── index.md                     # LLM-maintained catalog
-│   ├── log.md                       # append-only events
-│   ├── concepts/
-│   ├── entities/
-│   ├── comparisons/
-│   ├── summaries/
-│   └── _meta/
-│       ├── embeddings.lock          # hash → vector version mapping
-│       └── orphans.json             # linter output
-└── sqlite/
-    └── qpedia.db
+├── wiki/                             # one git working tree per tenant
+│   └── <tenant>/
+│       ├── .git/
+│       ├── QPEDIA.md                # schema / style guide (governs agent)
+│       ├── index.md                 # LLM-maintained catalog
+│       ├── log.md                   # append-only events
+│       ├── concepts/
+│       ├── entities/
+│       ├── comparisons/
+│       ├── summaries/
+│       └── _meta/
+│           └── lint.json            # latest lint report
+└── models/                           # fastembed model cache
 ```
+
+All structured state — sources, jobs, sessions, audit, folder_acls, folders,
+connectors, oidc_pending, and the `wiki_pages` search index — lives in
+Postgres (out of band, in the `postgres` container's named volume).
 
 ### 2.2 Git repo conventions
 
@@ -134,117 +145,31 @@ Lives at `wiki/QPEDIA.md`. This is the single most important prompt-engineering 
 - Never modify QPEDIA.md itself.
 ```
 
-### 2.4 Weaviate schema
+### 2.4 Postgres schema
 
-```
-Source {
-  source_id:    text (uuid, indexFilterable)
-  path:         text         # folder path for UI
-  filename:     text
-  mime:         text
-  sha256:       text
-  acl:          text[]       # group IDs allowed to read
-  size_bytes:   int
-  created_at:   date
-  ingested_at:  date
-  status:       text         # pending | extracted | ingested | failed
-}
+All structured state lives in Postgres+pgvector. RLS isolates tenants
+(per-request `SET LOCAL ROLE qpedia_app` + `set_config('qpedia.tenant',
+…, true)`), and a single table — `wiki_pages` — carries both the dense
+embedding (`vector(384)`) and a generated `tsvector` so hybrid search
+runs as one SQL statement (see §2.6).
 
-WikiPage {
-  page_id:      text (ulid)
-  path:         text         # wiki/concepts/foo.md
-  kind:         text
-  title:        text
-  content:      text         # full markdown
-  tags:         text[]
-  source_ids:   text[]
-  acl:          text[]       # derived: union of source ACLs
-  links_out:    WikiPage[]   # cross-reference → graph traversal
-  confidence:   number
-  updated_at:   date
-  vector:       [768]        # bge-m3
-}
+| Table          | Purpose |
+|---|---|
+| `tenants`      | Top-level (not RLS-scoped); slug PK, optional `email_domain` for IdP routing |
+| `sources`      | Uploaded docs; BIGSERIAL `id`, public slug per `(tenant_id, slug)`, ACL, classification |
+| `wiki_pages`   | Denormalized search index for the per-tenant git wiki; vector(384) + tsvector + `source_slugs` |
+| `jobs`         | Queue for ingest/remove/lint/reembed/sync; claimed via `FOR UPDATE SKIP LOCKED` |
+| `sessions`     | Cookie sessions (OIDC + Firebase) — `token_hash` PK, BYPASSRLS read path for the pre-auth lookup |
+| `audit`        | Append-only log; one row per `(actor, action, target)` event |
+| `folder_acls`  | Per-folder ACL rules; ancestor-walk resolution |
+| `folders`      | Explicit folder nodes for the File Explorer tree, with `pinned` flag that bars AI auto-organize |
+| `connectors`   | External-source configs (Confluence Cloud etc.) + cursors |
+| `oidc_pending` | Short-lived PKCE handshake state (10-min TTL) |
 
-Chunk {
-  chunk_id:     text
-  page:        WikiPage      # back-ref
-  text:         text
-  position:     int
-  vector:       [768]
-}
-# Chunks only created when a page > 2KB; most pages searched whole.
-
-Folder {
-  folder_id:    text
-  path:         text
-  parent:       Folder
-  acl:          text[]
-}
-```
-
-Hybrid search config: BM25 weight 0.3, vector 0.7. Tunable.
-
-### 2.5 SQLite schema (app-local)
-
-```sql
--- Jobs: durable queue, single writer (the app).
-CREATE TABLE jobs (
-  id            TEXT PRIMARY KEY,           -- ulid
-  kind          TEXT NOT NULL,              -- ingest | remove | lint | reembed
-  payload       TEXT NOT NULL,              -- json
-  state         TEXT NOT NULL,              -- queued|running|done|failed|dead
-  attempt       INTEGER NOT NULL DEFAULT 0,
-  max_attempts  INTEGER NOT NULL DEFAULT 5,
-  next_run_at   INTEGER NOT NULL,           -- unix ms
-  locked_by     TEXT,                       -- worker id
-  locked_until  INTEGER,
-  last_error    TEXT,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
-CREATE INDEX jobs_dispatch ON jobs(state, next_run_at);
-
--- Ingest state machine: per-source progress.
-CREATE TABLE ingest_state (
-  source_id     TEXT PRIMARY KEY,
-  phase         TEXT NOT NULL,              -- see §5
-  diff_bundle   TEXT,                       -- json: staged patches
-  commit_sha    TEXT,
-  started_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
-
--- Audit log (separate from wiki/log.md; that one is LLM-facing).
-CREATE TABLE audit (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  actor       TEXT NOT NULL,          -- user id | 'qpedia-bot'
-  action      TEXT NOT NULL,
-  target      TEXT,
-  metadata    TEXT,
-  at          INTEGER NOT NULL
-);
-
--- Sessions (if we don't use stateless JWT).
-CREATE TABLE sessions (
-  token_hash  TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL,
-  expires_at  INTEGER NOT NULL
-);
-
--- LLM call log (cost tracking + debugging).
-CREATE TABLE llm_calls (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  job_id        TEXT,
-  provider      TEXT,
-  model         TEXT,
-  input_tokens  INTEGER,
-  output_tokens INTEGER,
-  latency_ms    INTEGER,
-  at            INTEGER NOT NULL
-);
-```
-
-Users, groups, ACL membership → external IdP via OIDC; we cache claims per session. No user table needed in v1.
+Hybrid search blends cosine similarity (pgvector `<=>`) with
+`ts_rank_cd(tsv, websearch_to_tsquery(…))`. Default alpha 0.7 (vector
+weight); tunable per call. Full DDL: `SPEC-v2.md §2` and
+`crates/qpedia-pg-store/migrations/`.
 
 ---
 
@@ -258,10 +183,11 @@ qpedia/
 ├── DESIGN.md                     # this document
 ├── crates/
 │   ├── qpedia-core/              # domain types: Source, WikiPage, Edge, Job
-│   ├── qpedia-store/             # traits + impls: SQLite, Weaviate, git, fs
-│   │   ├── src/sqlite.rs
-│   │   ├── src/weaviate.rs       # generated client + wrapper
-│   │   ├── src/wikirepo.rs       # gix-based
+│   ├── qpedia-pg-store/          # all SQL: tenants/sources/jobs/sessions/audit/
+│   │                             #         folder_acls/folders/connectors/
+│   │                             #         oidc_pending/wiki_pages + slug helpers
+│   ├── qpedia-store/             # filesystem-only: BlobStore + WikiRepoStore
+│   │   ├── src/wikirepo.rs       # one git repo per tenant
 │   │   └── src/blob.rs           # /data/raw
 │   ├── qpedia-extract/           # OCR, PDF, docx, xlsx, pptx, html
 │   ├── qpedia-llm/               # LlmProvider trait; Anthropic/OpenRouter/OpenAI-compat
@@ -275,7 +201,7 @@ qpedia/
 ```
 
 Key external crates:
-`axum`, `tower`, `sqlx` (sqlite), `gix`, `weaviate-community` (or hand-rolled gRPC), `fastembed`, `tesseract`, `pdfium-render`, `pulldown-cmark`, `serde_yaml`, `ulid`, `reqwest`, `async-openai` (for OpenAI-compat), `anthropic-sdk` or hand-rolled, `tokio`, `tracing`.
+`axum`, `tower`, `sqlx` (postgres + chrono + json + tls-rustls), `pgvector`, `gix`, `fastembed`, `tesseract`, `pdfium-render`, `pulldown-cmark`, `serde_yaml`, `ulid`, `reqwest`, `openidconnect`, `jsonwebtoken` (Firebase JWKS verify), `tokio`, `tracing`.
 
 ---
 
@@ -326,7 +252,7 @@ Uploaded
   → AgentDistilled    (diff bundle produced)
   → Validating        (deterministic checks)
   → Validated
-  → Committing        (git commit + Weaviate upsert in a tx-ish sequence)
+  → Committing        (git commit + wiki_pages upsert in a tx-ish sequence)
   → Committed
   → Embedding         (fastembed on touched pages)
   → Embedded
@@ -437,11 +363,11 @@ On rejection: one retry with validator errors fed back to the agent. If still ba
 
 1. Write files to `/data/wiki` working tree.
 2. `git add -A && git commit -m "ingest(source=<id>): <summary>" --author=qpedia-bot`.
-3. Upsert touched `WikiPage` objects in Weaviate (including `links_out` refs).
+3. Upsert touched rows into the `wiki_pages` table (path / title / content / tags / source_slugs / embedding / generated tsvector).
 4. Queue embedding job for touched pages.
 5. Write `audit` row.
 
-Order matters: git first (durable), Weaviate second (derivable from git). If Weaviate upsert fails, we retry from "Committed" — git commit is the source of truth.
+Order matters: git first (durable), `wiki_pages` upsert second (derivable from git). If the upsert fails, we retry from "Committed" — git commit is the source of truth and the index is rebuildable via the `reembed` admin job.
 
 ---
 
@@ -468,7 +394,7 @@ Same rails as ingest: diff bundle, validator, single commit.
 ```
 QueryReceived
   → Embed (bge-m3)
-  → HybridSearch(Weaviate, top 8 WikiPages + BM25)
+  → HybridSearch(Postgres wiki_pages: cosine + ts_rank_cd, top 8)
   → LoadContext: fetch full content of top pages
   → AgentDecide:
        ├─ "answer now" → Answer
@@ -620,42 +546,55 @@ services:
   app:
     image: qpedia/app:${VERSION}
     env_file: .env
+    environment:
+      # Compose owns the DB URL so it always points at the postgres service
+      # and shares one password source with it. environment: overrides env_file:.
+      QPEDIA_DB_URL: postgres://qpedia_admin:${QPEDIA_DB_PASSWORD:-qpedia-dev}@postgres:5432/qpedia?sslmode=disable
     volumes:
-      - wiki-data:/data/wiki
-      - raw-data:/data/raw
-      - sqlite-data:/data/sqlite
+      - ./data/wiki:/data/wiki
+      - ./data/raw:/data/raw
+      - ./data/models:/data/models
     ports: ["8080:8080"]
-    depends_on: [weaviate]
+    depends_on:
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
-  weaviate:
-    image: semitechnologies/weaviate:1.27
-    volumes:
-      - weaviate-data:/var/lib/weaviate
+  postgres:
+    image: pgvector/pgvector:pg17
     environment:
-      PERSISTENCE_DATA_PATH: /var/lib/weaviate
-      DEFAULT_VECTORIZER_MODULE: none
-      ENABLE_MODULES: ""
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      POSTGRES_USER: qpedia_admin
+      POSTGRES_PASSWORD: ${QPEDIA_DB_PASSWORD:-qpedia-dev}
+      POSTGRES_DB: qpedia
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qpedia_admin -d qpedia"]
     restart: unless-stopped
+
+  # Optional: high-fidelity PDF sidecar. Enable with `--profile marker`.
+  marker:
+    build: ./sidecar/marker
+    profiles: [marker]
+    ports: ["18081:8000"]
 
 volumes:
-  wiki-data:
-  raw-data:
-  sqlite-data:
-  weaviate-data:
+  postgres-data:
 ```
 
 ### 13.2 Environment
 
 ```
-QPEDIA_LLM=anthropic://claude-opus-4-7
-ANTHROPIC_API_KEY=...
-QPEDIA_OIDC_ISSUER=https://...
-QPEDIA_OIDC_CLIENT_ID=...
-QPEDIA_WEAVIATE_URL=http://weaviate:8080
-QPEDIA_DATA_DIR=/data
-QPEDIA_WIKI_AUTHOR=qpedia-bot <bot@qpedia.local>
+ANTHROPIC_API_KEY=...                          # or OPENAI_API_KEY / OPENROUTER_API_KEY
+QPEDIA_DB_PASSWORD=qpedia-dev                  # single source of truth for Postgres
+QPEDIA_DB_URL=postgres://qpedia_admin:qpedia-dev@127.0.0.1:5432/qpedia?sslmode=disable   # local cargo run
+QPEDIA_DATA_DIR=/data                          # blobs, wiki repos, model cache
+QPEDIA_FIREBASE_PROJECT_ID=qpedia-acme         # enable Firebase login (optional)
+# OR legacy OIDC (kept for in-place deployments):
+# QPEDIA_OIDC_ISSUER=https://...
+# QPEDIA_OIDC_CLIENT_ID=...
+QPEDIA_WIKI_AUTHOR_NAME=qpedia-bot
+QPEDIA_WIKI_AUTHOR_EMAIL=bot@qpedia.local
 ```
 
 ### 13.3 On-prem variant
@@ -664,11 +603,10 @@ Swap `QPEDIA_LLM` to point at internal vLLM; drop `ANTHROPIC_API_KEY`. That's it
 
 ### 13.4 Backup
 
-- `/data/wiki/.git` → `git bundle` daily.
+- Postgres → `pg_dump -Fc` hourly. Holds jobs, sources, sessions, audit, folder_acls, folders, connectors, oidc_pending, plus the `wiki_pages` search index.
+- `/data/wiki/<tenant>/.git` → `git bundle` per tenant, daily.
 - `/data/raw` → rsync.
-- `/data/sqlite/qpedia.db` → `sqlite3 .backup` hourly.
-- Weaviate: built-in backup module → same target bucket/volume.
-- Restore order: raw → sqlite → weaviate → wiki (last, because wiki derives nothing).
+- Restore order: raw → Postgres → wiki. The `wiki_pages` index is derived; if it's lost (or model changes), run the `reembed` admin job to rebuild from git.
 
 ---
 
@@ -676,7 +614,7 @@ Swap `QPEDIA_LLM` to point at internal vLLM; drop `ANTHROPIC_API_KEY`. That's it
 
 - `tracing` with OTLP exporter. Every ingest has a root span; every LLM call a child span with model/tokens.
 - `/admin/metrics` Prometheus endpoint.
-- Structured audit log (SQLite) + human-readable `wiki/log.md` (LLM-facing).
+- Structured audit log (Postgres `audit` table) + human-readable `wiki/log.md` (LLM-facing).
 
 ---
 
@@ -686,11 +624,11 @@ Swap `QPEDIA_LLM` to point at internal vLLM; drop `ANTHROPIC_API_KEY`. That's it
 |---|---|---|
 | 1 | Scaffolding, workspace, CI, Dockerfile | `cargo check` green, empty app container runs |
 | 2 | Extract pipeline (PDF/docx/html/OCR), raw storage, folder API | Upload a file → extracted.txt appears |
-| 3 | Weaviate schema, SQLite schema, fastembed integration | `POST /sources` ends in Embedded state for a plain-text file |
+| 3 | Postgres schema + RLS, fastembed integration | `POST /sources` ends in Embedded state for a plain-text file |
 | 4 | LLM adapter, classifier step, simple RAG (no agent, no graph walk) | Chat returns grounded answer citing wiki pages |
 | 5 | gix-based wiki repo, QPEDIA.md loader, commit pipeline | Manual wiki edits commit cleanly |
 | 6 | Ingest agent: tool harness, validator, diff bundle, commit | End-to-end ingest of a PDF produces real wiki pages |
-| 7 | Remove/update pipeline, Weaviate graph refs | Deleting a source cleans up or re-synthesizes pages |
+| 7 | Remove/update pipeline, wiki_pages cleanup | Deleting a source cleans up or re-synthesizes pages |
 | 8 | Retriever agent: graph walk, citations, ACL filtering | Chat follows links across ≥2 pages to answer |
 | 9 | Frontend: folder view, upload, chat — usable end-to-end | Non-engineer can demo it |
 | 10 | Linting job, admin review queue, audit UI | Lint produces a meaningful commit on a seeded corpus |
@@ -703,7 +641,7 @@ Parallelization notes: weeks 9–10 (frontend) can start at week 5 once the API 
 
 ## 16. Open Items / Future Work
 
-- Multi-tenant mode (per-tenant DB + wiki repo, namespaced Weaviate classes).
+- ~~Multi-tenant mode~~ **Done in v2** — RLS-isolated rows in shared Postgres + one git repo per tenant under `/data/wiki/<tenant>/`.
 - Collaborative human editing of wiki pages with agent-assisted merge.
 - External connectors (Google Drive, SharePoint, Confluence) → auto-ingest.
 - Cross-language support in wiki (currently one working language).

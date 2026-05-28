@@ -1,9 +1,11 @@
 //! Postgres + pgvector storage. See SPEC-v2.md.
 //!
-//! Replaces `qpedia_store::sqlite` and `qpedia_store::weaviate` with a
-//! single backend. Tenant isolation is enforced by Postgres Row Level
-//! Security; the application must call [`PgStore::set_tenant`] on every
-//! borrowed connection before issuing tenant-scoped queries.
+//! Single backend for every piece of structured state: tenants, sources,
+//! sessions, jobs, audit, folder_acls, folders, connectors, oidc_pending,
+//! and the `wiki_pages` search index (pgvector + tsvector hybrid).
+//! Tenant isolation is enforced by Postgres Row Level Security; callers
+//! open a tenant-scoped transaction via [`PgStore::begin_for`], which
+//! sets the role + GUC the policies read.
 
 pub mod audit;
 pub mod connectors;

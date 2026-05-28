@@ -169,7 +169,9 @@ impl WikiRepo {
     /// Filesystem-based text search over wiki pages. Returns matches with
     /// `(path, title, snippet)`. Title is the first H1, falling back to the
     /// frontmatter `title` or the file path. Snippet is ~160 chars around
-    /// the first hit. Stand-in until Weaviate hybrid search is wired.
+    /// the first hit. Used as the fallback when the Postgres hybrid search
+    /// returns no rows (e.g. before the embedder model is loaded, or when
+    /// the `wiki_pages` table is empty pending a `reembed`).
     pub async fn search_text(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {

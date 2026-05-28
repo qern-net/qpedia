@@ -194,15 +194,22 @@ impl JobRunner {
                 Ok(Some(job)) => {
                     let id = job.id.clone();
                     if let Err(e) = self.handle(job).await {
-                        error!(job = %id, error = %e, "job failed");
-                        let _ = self.ctx.db.fail_job(&id, &e.to_string(), Some(5_000)).await;
+                        error!(job = %id, error = %format!("{e:#}"), "job failed");
+                        let _ = self
+                            .ctx
+                            .db
+                            .fail_job(&id, &format!("{e:#}"), Some(5_000))
+                            .await;
                     } else {
                         let _ = self.ctx.db.complete_job(&id).await;
                     }
                 }
                 Ok(None) => tokio::time::sleep(self.poll_idle).await,
                 Err(e) => {
-                    warn!(error = %e, "claim_next error; backing off");
+                    // {:#} renders the anyhow error with its full cause chain
+                    // (sqlx error included); plain Display would mask the SQL
+                    // detail behind the .context() label.
+                    warn!(error = %format!("{e:#}"), "claim_next error; backing off");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }

@@ -136,8 +136,8 @@
 
   async function onReembed() {
     if (!confirm(
-      'Rebuild Weaviate search index from the git wiki repo?\n\n' +
-      'This clears all existing vectors for this tenant and re-embeds every page. ' +
+      'Rebuild the wiki_pages search index from the git wiki repo?\n\n' +
+      'This clears the embeddings for this tenant and re-embeds every page. ' +
       'Search will be unavailable until the job completes. Continue?'
     )) return;
     reembedding = true; reembedMsg = null; reembedError = null;
@@ -232,8 +232,8 @@
         <div>
           <h2 style="margin: 0 0 4px;">Rebuild Search Index</h2>
           <p class="muted" style="margin: 0; font-size: 12px;">
-            Clears Weaviate and re-embeds every page from the git wiki repo.
-            Use when search is broken, the embedding model changed, or Weaviate data was lost.
+            Clears the wiki_pages search index and re-embeds every page from the git wiki repo.
+            Use when search is broken or the embedding model changed.
             Git is the source of truth.
           </p>
         </div>

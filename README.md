@@ -13,20 +13,21 @@ Two containers. That's it.
 ```
 ┌─────────────────────── app (Rust) ───────────────────────────┐
 │  axum HTTP API · ingest workers · retriever · linter         │
-│  SQLite  — jobs, sessions, audit, sources                    │
-│  git     — wiki markdown at /data/wiki                       │
+│  git     — wiki markdown at /data/wiki (one repo per tenant) │
 │  /data/raw — uploaded docs + extracted text                  │
 │  fastembed-rs (bge-small-en-v1.5) — local embeddings         │
 │  tesseract + pdfium + pandoc — extraction                    │
 │  SvelteKit static assets served by axum                      │
 └──────────────────────────────┬───────────────────────────────┘
-                               │ REST
-┌──────────────────────────────▼──── weaviate ────────────────┐
-│  WikiPage class · hybrid search (BM25 + vector)             │
+                               │ SQL (sqlx, pool, RLS)
+┌──────────────────────────────▼─── postgres + pgvector ──────┐
+│  tenants · sources · jobs · sessions · audit · folder_acls  │
+│  folders · connectors · oidc_pending                        │
+│  wiki_pages — vector(384) + tsvector hybrid search          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Volumes: `wiki-data`, `raw-data`, `sqlite-data`, `weaviate-data`, `models-cache`.
+Volumes: bind-mounts `./data/wiki`, `./data/raw`, `./data/models`; named volume `postgres-data` for the database. Optional third container: the Marker high-fidelity PDF sidecar (off by default; opt in with `--profile marker`).
 
 ---
 
@@ -72,8 +73,10 @@ Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to ov
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `QPEDIA_DATA_DIR` | `/data` | Root for all persistent data |
-| `QPEDIA_WEAVIATE_URL` | `http://weaviate:8080` | Weaviate endpoint |
+| `QPEDIA_DATA_DIR` | `/data` | Root for blobs (`raw/`), wiki repos (`wiki/`), and the embedder model cache (`models/`) |
+| `QPEDIA_DB_URL` | — | Postgres DSN. In Docker `docker-compose.yml` builds this from `QPEDIA_DB_PASSWORD` pointed at the `postgres` service. For local `cargo run`, point at `127.0.0.1:5432`. |
+| `QPEDIA_DB_PASSWORD` | `qpedia-dev` | Postgres password — single source of truth (also drives the `postgres` service in compose) |
+| `QPEDIA_DB_MAX_CONN` | `16` | sqlx pool max connections |
 | `QPEDIA_WIKI_AUTHOR_NAME` | `qpedia-bot` | Git commit author name |
 | `QPEDIA_WIKI_AUTHOR_EMAIL` | `bot@qpedia.local` | Git commit author email |
 
@@ -150,7 +153,7 @@ Deterministic checks before any commit:
 
 ### Commit
 
-Git commit first (durable), then Weaviate upsert (derivable). If Weaviate fails, the job retries from `Committed` — git is the source of truth.
+Git commit first (durable), then `wiki_pages` upsert in Postgres (derivable: row carries title/content/tags/source_slugs + the 384-dim embedding and a generated tsvector). If the upsert fails, the job retries from `Committed` — git is the source of truth and the index is rebuildable.
 
 ---
 
@@ -164,17 +167,17 @@ When a source is deleted, the remove job performs a complete cleanup in order:
 4. **index.md** — all wikilinks pointing to deleted pages are removed from `index.md`
 5. **log.md** — a timestamped entry is appended recording what was deleted/patched
 6. **Git commit** — all ops land as a single atomic commit
-7. **Weaviate** — deleted pages are removed from the vector index; patched pages are re-embedded
+7. **`wiki_pages`** — deleted pages are removed from the Postgres search index; patched pages are re-embedded and upserted
 8. **Blobs** — `/data/raw/<source_id>/` is deleted
 9. **DB row** — the source row is deleted last
 
-The pipeline is idempotent: if the source row is already gone on retry, the job skips straight to blob cleanup. If the git commit already happened (pages no longer exist in the wiki), the plan produces an empty bundle and the job skips to Weaviate/blob/DB cleanup.
+The pipeline is idempotent: if the source row is already gone on retry, the job skips straight to blob cleanup. If the git commit already happened (pages no longer exist in the wiki), the plan produces an empty bundle and the job skips to `wiki_pages`/blob/DB cleanup.
 
 ---
 
 ## Job System
 
-All background work runs through a SQLite-backed job queue. Jobs are visible and schedulable from the Admin panel.
+All background work runs through a Postgres-backed job queue (`jobs` table). Workers claim via `UPDATE … FOR UPDATE SKIP LOCKED`. Jobs are visible and schedulable from the Admin panel.
 
 | Kind | Trigger | Purpose |
 |---|---|---|
@@ -251,7 +254,7 @@ GET    /api/v1/admin/sources/stalled    Sources stuck mid-pipeline
 POST   /api/v1/admin/sources/resume     Re-enqueue all stalled sources
 POST   /api/v1/admin/lint               Trigger lint job
 GET    /api/v1/admin/lint               Last lint report
-POST   /api/v1/admin/reembed            Trigger reembed job (rebuild Weaviate from git)
+POST   /api/v1/admin/reembed            Trigger reembed job (rebuild wiki_pages search index from git)
 GET    /api/v1/admin/folder-acls        List folder ACL rules
 PUT    /api/v1/admin/folder-acls        Set a folder ACL
 DELETE /api/v1/admin/folder-acls        Remove a folder ACL
@@ -305,7 +308,7 @@ Cost: ~5 GB image, 30–90 s cold start, seconds to minutes per PDF on CPU. GPU 
 
 1. **Every ingestion is idempotent.** Each pipeline stage is keyed by `(source_id, status)`. Re-running a job from any point produces the same result. Duplicate uploads are detected by SHA-256.
 
-2. **Every internal job is visible and schedulable.** All background work goes through the SQLite job queue. Jobs can be inspected, retried, and triggered from the Admin panel. Nothing runs silently.
+2. **Every internal job is visible and schedulable.** All background work goes through the Postgres job queue. Jobs can be inspected, retried, and triggered from the Admin panel. Nothing runs silently.
 
 3. **All anomalies are visible.** Sources that stop mid-pipeline are marked `Tainted` (not silently dropped). Failed jobs record their error. The lint job surfaces orphans, broken links, stale source references, near-duplicates, and contradictions. The Admin panel shows all stalled sources with a one-click resume.
 
@@ -316,7 +319,8 @@ Cost: ~5 GB image, 30–90 s cold start, seconds to minutes per PDF on CPU. GPU 
 | Crate | Purpose |
 |---|---|
 | `qpedia-core` | Domain types: `Source`, `WikiPage`, `Job`, `Acl`, `Tenant`, IDs |
-| `qpedia-store` | Storage: SQLite (jobs/sources/audit), Weaviate, git wiki repo, blob FS |
+| `qpedia-pg-store` | All SQL: tenants, sources, sessions, jobs, audit, folder_acls, folders, connectors, wiki_pages, hybrid_search, near-duplicates, slug helpers. Tenant isolation via per-request `SET LOCAL qpedia.tenant` + RLS. |
+| `qpedia-store` | Filesystem-only: `BlobStore` (raw uploads + extracted text) and `WikiRepoStore` (per-tenant git repos). |
 | `qpedia-extract` | Text extraction: PDF, DOCX, HTML, plain text, OCR |
 | `qpedia-llm` | LLM provider abstraction: Anthropic, OpenAI, OpenRouter, OpenAI-compatible |
 | `qpedia-embed` | Local embeddings via fastembed-rs (bge-small / bge-base) |
@@ -335,9 +339,9 @@ Cost: ~5 GB image, 30–90 s cold start, seconds to minutes per PDF on CPU. GPU 
 # Check all crates
 cargo check
 
-# Run the API locally (needs a running Weaviate)
-docker compose up -d weaviate
-cargo run --bin qpedia-api
+# Run the API locally (needs a running Postgres)
+docker compose up -d postgres
+cargo run -p qpedia-api
 
 # Frontend dev server (proxies to :8080)
 cd web && npm install && npm run dev
@@ -351,9 +355,8 @@ The frontend dev server runs on `:5173` and proxies API calls to `:8080`.
 
 | Data | Method | Frequency |
 |---|---|---|
-| `/data/wiki/.git` | `git bundle` | Daily |
+| Postgres (jobs/sources/sessions/audit/folder_acls/folders/connectors/`wiki_pages`) | `pg_dump -Fc` | Hourly |
+| `/data/wiki/<tenant>/.git` | `git bundle` per tenant | Daily |
 | `/data/raw` | rsync | Continuous |
-| `/data/sqlite/qpedia.db` | `sqlite3 .backup` | Hourly |
-| Weaviate | Built-in backup module | Daily |
 
-Restore order: raw → sqlite → weaviate → wiki (wiki derives from the others).
+Restore order: raw → Postgres → wiki. The wiki repo is the source of truth for page content; `wiki_pages` is a derived search index — if it's lost, trigger the `reembed` admin job to rebuild it from git.

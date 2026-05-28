@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
 # verify-embeddings.sh
 #
-# End-to-end check that Weaviate write-back + hybrid search work:
+# End-to-end check that pgvector + tsvector hybrid search works:
 #   1. Upload a source.
 #   2. Wait for the pipeline to reach Done (full state machine including
 #      AgentDistilling -> Committed -> Embedding -> Done).
-#   3. /api/v1/wiki/search responds with mode="hybrid".
+#   3. /api/v1/wiki/search responds with mode="hybrid" (i.e. the embedder
+#      ran and pgvector returned rows, not the fs-grep fallback).
 #   4. The new summary page is among the hits.
-#   5. Weaviate's REST schema endpoint reports the WikiPage class.
+#   5. /api/v1/wiki/pages/<path> returns the committed markdown.
 #
 # Requirements:
-#   - Weaviate running (docker compose up weaviate or full compose).
-#   - qpedia-api running with QPEDIA_WEAVIATE_URL pointing at it AND an
-#     LLM key (ANTHROPIC_API_KEY or OPENAI_API_KEY) in its env.
+#   - Postgres running (docker compose up -d postgres).
+#   - qpedia-api running with an LLM key (ANTHROPIC_API_KEY or
+#     OPENAI_API_KEY) in its env.
 #   - python3, curl, git on PATH.
 #
 # Usage:
 #   bash scripts/verify-embeddings.sh
-#   QPEDIA_URL=http://localhost:8080 \
-#     QPEDIA_WEAVIATE=http://localhost:8081 \
-#     bash scripts/verify-embeddings.sh
+#   QPEDIA_URL=http://localhost:8080 bash scripts/verify-embeddings.sh
 
 set -u
 export MSYS_NO_PATHCONV=1
 
-URL="${QPEDIA_URL:-http://127.0.0.1:18080}"
-WEAVIATE="${QPEDIA_WEAVIATE:-http://127.0.0.1:8080}"
+URL="${QPEDIA_URL:-http://127.0.0.1:8080}"
 TIMEOUT="${QPEDIA_TIMEOUT:-240}"
 FIXTURE="${QPEDIA_FIXTURE:-test-fixtures/sample.txt}"
 
@@ -36,17 +34,7 @@ fail()  { red "FAIL: $*"; exit 1; }
 
 # 0. Pre-flight.
 curl -fsS "$URL/healthz" >/dev/null || fail "qpedia-api not reachable at $URL"
-curl -fsS "$WEAVIATE/v1/.well-known/ready" >/dev/null || fail "weaviate not ready at $WEAVIATE"
-
-# Confirm WikiPage schema exists (api should have created it on startup).
-SCHEMA="$(curl -fsS "$WEAVIATE/v1/schema/WikiPage")" || fail "WikiPage class missing — did qpedia-api connect to weaviate?"
-echo "$SCHEMA" | python -c '
-import sys, json
-s = json.load(sys.stdin)
-print("WikiPage class:", s.get("class"))
-print("vectorizer    :", s.get("vectorizer"))
-print("properties    :", [p["name"] for p in s.get("properties", [])])
-'
+curl -fsS "$URL/api/v1/version" >/dev/null || fail "api /version not reachable at $URL"
 
 if [[ ! -f "$FIXTURE" ]]; then
   mkdir -p "$(dirname "$FIXTURE")"
@@ -94,12 +82,12 @@ echo
 echo "==> /api/v1/wiki/search (q='Atlas revenue')"
 echo "$SEARCH" | python -m json.tool
 
-echo "$SEARCH" | python -c '
+ID="$ID" echo "$SEARCH" | ID="$ID" python -c '
 import sys, json, os
 r = json.load(sys.stdin)
 errs = []
 if r.get("mode") != "hybrid":
-    errs.append(f"mode={r.get(\"mode\")!r}, want hybrid (Weaviate not engaged)")
+    errs.append(f"mode={r.get(\"mode\")!r}, want hybrid (pgvector hybrid_search not engaged)")
 hits = r.get("hits", [])
 if not hits:
     errs.append("no hits returned")
@@ -112,13 +100,12 @@ if errs:
     for e in errs: print("  -", e)
     sys.exit(1)
 print("search OK")
-' || ID="$ID" fail "search assertions failed"
+' || fail "search assertions failed"
 
-# 4. Cross-check via Weaviate directly: count WikiPage objects.
-COUNT="$(curl -fsS "$WEAVIATE/v1/graphql" -H 'content-type: application/json' \
-  -d '{"query":"{ Aggregate { WikiPage { meta { count } } } }"}' \
-  | python -c 'import sys,json; r=json.load(sys.stdin); print(r["data"]["Aggregate"]["WikiPage"][0]["meta"]["count"])')"
-echo "==> WikiPage objects in Weaviate: $COUNT"
-[[ "$COUNT" -ge 1 ]] || fail "expected at least 1 WikiPage object in Weaviate, got $COUNT"
+# 4. Fetch the committed summary page to confirm git wiki + API return it.
+PAGE="$(curl -fsS "$URL/api/v1/wiki/pages/summaries/$ID.md")" \
+  || fail "could not GET summary page summaries/$ID.md"
+[[ -n "$PAGE" ]] || fail "summary page body empty"
+echo "==> summary page bytes: ${#PAGE}"
 
-green "PASS: embeddings + Weaviate hybrid search engaged end-to-end"
+green "PASS: pgvector + tsvector hybrid search engaged end-to-end"

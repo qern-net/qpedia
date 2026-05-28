@@ -1,13 +1,16 @@
 //! Tenant scoping. Every user-visible resource (Source, wiki page,
-//! Weaviate object, folder ACL) lives inside exactly one tenant.
+//! folder, ACL, audit row) lives inside exactly one tenant. Postgres
+//! RLS enforces isolation server-side; per-request the app calls
+//! `SET LOCAL ROLE qpedia_app` + `set_config('qpedia.tenant', ...)`
+//! and every RLS policy compares row.tenant_id to the GUC.
 //!
 //! - Dev mode: tenant defaults to "default" or the env override
 //!   `QPEDIA_DEV_TENANT`.
-//! - OIDC mode: tenant comes from a claim — `QPEDIA_OIDC_TENANT_CLAIM`,
+//! - Firebase: tenant comes from a custom claim, then falls back to
+//!   the user's email domain (`tenants.email_domain` lookup), then
+//!   `QPEDIA_DEV_TENANT`, then "default".
+//! - Legacy OIDC: tenant comes from a claim — `QPEDIA_OIDC_TENANT_CLAIM`,
 //!   default `tenant_id` — and falls back to "default" if missing.
-//!
-//! No tenant admin yet; tenants are configured by the IdP and created
-//! implicitly the first time a user from a new tenant signs in.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -26,8 +29,8 @@ impl Tenant {
             Self(DEFAULT_TENANT.into())
         } else {
             // Restrict to safe characters so the value can be used as
-            // a directory name (per-tenant wiki repo) and a Weaviate
-            // property value without escaping.
+            // a directory name (per-tenant wiki repo) and an unescaped
+            // Postgres GUC value.
             let sanitized: String = trimmed
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })

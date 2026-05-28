@@ -2,8 +2,8 @@ use crate::{acl::Acl, PageId, SourceId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// LLM-authored wiki page. Persisted as markdown in the git repo
-/// and mirrored into Weaviate for search.
+/// LLM-authored wiki page. Persisted as markdown in the per-tenant git repo
+/// and mirrored into the `wiki_pages` table (pgvector + tsvector) for search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiPage {
     pub id: PageId,
