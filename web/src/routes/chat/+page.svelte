@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import { marked } from 'marked';
   import { streamChat, type ChatTurn } from '$lib/api';
-  import { chatHistory, type ChatMsg } from '$lib/stores';
+  import { chatHistory, type ChatMsg } from '$lib/stores.svelte';
 
   let input = $state('');
   let busy = $state(false);
