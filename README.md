@@ -364,3 +364,11 @@ The frontend dev server runs on `:5173` and proxies API calls to `:8080`.
 | `/data/raw` | rsync | Continuous |
 
 Restore order: raw → Postgres → wiki. The wiki repo is the source of truth for page content; `wiki_pages` is a derived search index — if it's lost, trigger the `reembed` admin job to rebuild it from git.
+
+---
+
+## Open-core: `qpedia` (OSS) and `qpedia-pvt` (SaaS)
+
+This repo is the **OSS engine** under Apache-2.0 — single-tenant and multi-tenant self-hosting both work out of the box. The hosted service at qern.net runs an additional private overlay, [`qpedia-pvt`](https://github.com/qern-net/qpedia-pvt), that adds SaaS-specific pieces (billing, premium connectors, SAML / SCIM, branded UI, compliance hooks) on top of the same engine. The overlay consumes `qpedia` purely as a versioned dependency — it never modifies OSS source.
+
+The composition surface for that overlay — `qpedia_api::AppBuilder`, the `EventSink` and `TenantHook` traits, and the `@qern/qpedia-web` Svelte package — is part of the public OSS API; anyone can build their own overlay against it. See [`OPEN-CORE.md`](OPEN-CORE.md) for the split philosophy, the decision rule for where each new feature belongs, and the day-to-day discipline that keeps both repos sane.

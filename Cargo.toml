@@ -19,7 +19,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
-license = "proprietary"
+license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
@@ -56,7 +56,7 @@ async-stream = "0.3"
 openidconnect = { version = "4", features = ["reqwest", "rustls-tls"], default-features = false }
 base64 = "0.22"
 rand = "0.8"
-pgvector = { version = "0.4", features = ["sqlx"] }
+pgvector = { version = "=0.4.1", features = ["sqlx"] }   # pinned: 0.4.2 moved to sqlx 0.9, splits our sqlx 0.8 graph
 jsonwebtoken = "9"
 dotenvy = "0.15"
 

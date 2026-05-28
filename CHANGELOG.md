@@ -10,6 +10,24 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 Work in flight, none yet released. See [`ROADMAP.md`](ROADMAP.md).
 
+## [1.0.1] — 2026-05-28
+
+Patch release. Downstream-only — no API or behaviour change for users
+already on `v1.0.0`.
+
+### Fixed
+
+- Pin `pgvector = "=0.4.1"` in the workspace. `pgvector 0.4.2` (released
+  upstream after v1.0.0) bumped its `sqlx` integration to v0.9, which
+  splits our v0.8 dependency graph into two `sqlx-core` versions and
+  breaks the `qpedia-pg-store` build for any downstream that resolves
+  the patch range fresh (notably `qpedia-pvt` consuming via git tag).
+  Pinning to `=0.4.1` keeps the graph unified. We'll un-pin in a future
+  release once `qpedia-pg-store` migrates to `sqlx 0.9`.
+- Workspace `license` field is now `Apache-2.0` (was leftover
+  `proprietary` from pre-public scaffolding). Matches the project's
+  declared OSS license; no functional change.
+
 ## [1.0.0] — 2026-05-28
 
 First public release. The codebase is library-shaped (`qpedia_api`) and
@@ -179,5 +197,6 @@ open / private boundary.
 - No first-class HA / read replica configuration shipped — the schema
   permits, deployer's job.
 
+[1.0.1]: https://github.com/qern-net/qpedia/releases/tag/v1.0.1
 [1.0.0]: https://github.com/qern-net/qpedia/releases/tag/v1.0.0
-[Unreleased]: https://github.com/qern-net/qpedia/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/qern-net/qpedia/compare/v1.0.1...HEAD
