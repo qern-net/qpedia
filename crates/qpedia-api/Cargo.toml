@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "qpedia_api"
+path = "src/lib.rs"
+
 [[bin]]
 name = "qpedia-api"
 path = "src/main.rs"
@@ -45,3 +49,4 @@ chrono.workspace = true
 bytes.workspace = true
 mime_guess.workspace = true
 dotenvy.workspace = true
+async-trait.workspace = true
