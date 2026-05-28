@@ -80,12 +80,77 @@ The gaps the overlay needs filled:
   events to its compliance store / SIEM.
 - ⚙️ **`TenantHook` trait** — fires on tenant create / update / delete
   so pvt can provision billing rows and send onboarding emails.
-- ⚙️ **SvelteKit web theme tokens + named slots** — `web-pvt` overrides
-  brand without forking pages. Either publish `qpedia-web` as an npm
-  package or have `web-pvt` symlink it during dev and copy on build.
+- ✅ **SvelteKit web library** — `web/` is now both the OSS SPA and a
+  Svelte package (`@qern/qpedia-web`). `web-pvt` imports components and
+  the API client from it; brand overrides happen via CSS-variable
+  redefinition. See [§3.1](#31-consuming-qernqpedia-web-from-web-pvt) below.
 
 Add each extension point **only when the overlay actually needs it.**
 Speculative hooks rot.
+
+### 3.1 Consuming `@qern/qpedia-web` from `web-pvt`
+
+`web/` ships as both the OSS SPA and a Svelte component package
+(`@qern/qpedia-web`). `npm run package` produces a `dist/` of compiled
+`.svelte` / `.js` / `.d.ts` artifacts; the `package.json` `exports` map
+exposes:
+
+```
+@qern/qpedia-web                            → barrel (api + stores + firebase)
+@qern/qpedia-web/components/FolderTree.svelte
+@qern/qpedia-web/components/StatusChip.svelte
+@qern/qpedia-web/components/UploadPanel.svelte
+@qern/qpedia-web/api                        → HTTP client + types
+@qern/qpedia-web/stores                     → chat history store
+@qern/qpedia-web/firebase                   → Firebase auth client
+@qern/qpedia-web/app.css                    → OSS theme tokens (CSS variables)
+```
+
+**Two consumption patterns** in `qpedia-pvt`:
+
+**Workspace / path dependency (recommended for dev):**
+```jsonc
+// qpedia-pvt/web-pvt/package.json
+{
+  "dependencies": {
+    "@qern/qpedia-web": "file:../../qpedia/web"
+  }
+}
+```
+The sibling layout (`../qpedia` and `../qpedia-pvt`) plus the
+`qpedia.code-workspace` keeps both checkouts hot under one editor.
+
+**Published package (for CI / staging):**
+```bash
+# in qpedia/web
+npm publish --access restricted   # or to a private registry
+```
+```jsonc
+// qpedia-pvt/web-pvt/package.json
+{
+  "dependencies": { "@qern/qpedia-web": "^0.1.0" }
+}
+```
+
+**Theming.** Import the OSS stylesheet, then override its CSS variables
+in a sheet loaded after it:
+
+```ts
+// web-pvt/src/app.css
+@import '@qern/qpedia-web/app.css';
+
+:root {
+  --bg:         #14171c;          /* brand-darker neutral */
+  --accent:     #ff6b1a;          /* brand orange         */
+  --accent-hover: #ff8a4d;
+  /* … */
+}
+```
+
+Page-level routes are owned by `web-pvt` (it's its own SvelteKit
+project), so overlays can replace `/login`, add `/billing`, etc.,
+without forking OSS pages. Components reused from `@qern/qpedia-web`
+inherit the overridden CSS variables automatically.
 
 ## 4. Repo layout for `qpedia-pvt`
 
