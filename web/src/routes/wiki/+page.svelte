@@ -53,9 +53,9 @@
       {/if}
 
       <!-- Content pages grouped by directory -->
-      {#each Object.keys(grouped()).sort() as bucket}
+      {#each Object.keys(grouped).sort() as bucket}
         <div class="dir">{bucket}/</div>
-        {#each grouped()[bucket] as path}
+        {#each grouped[bucket] as path}
           <a href={`/wiki/${path}`} style="padding-left: 16px;">{path}</a>
         {/each}
       {/each}
