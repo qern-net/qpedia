@@ -10,6 +10,16 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Backup + restore scripts** (Band 3.3). `scripts/backup.sh` captures
+  the three durable stores in dependency order — Postgres (`pg_dump
+  -Fc`), one `git bundle` per tenant wiki repo, and a tar of
+  `/data/raw` — into a timestamped `./backups/<ts>/` with a manifest.
+  `scripts/restore.sh` reverses it (raw → Postgres `pg_restore --clean`
+  → `git clone` each tenant bundle), gated behind a confirmation. Both
+  default to the compose `postgres` service + `./data` bind-mount and
+  accept a direct DSN via `QPEDIA_PG_MODE=dsn`. README's Backup section
+  now points at them.
+
 - **Chat rate limiting** (Band 3.4). `POST /api/v1/chat` is guarded by
   a per-tenant token bucket: default 30 requests/minute with a burst of
   10, configurable via `QPEDIA_CHAT_RPM` / `QPEDIA_CHAT_BURST`. Once a

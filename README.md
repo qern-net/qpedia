@@ -365,6 +365,19 @@ The frontend dev server runs on `:5173` and proxies API calls to `:8080`.
 
 Restore order: raw → Postgres → wiki. The wiki repo is the source of truth for page content; `wiki_pages` is a derived search index — if it's lost, trigger the `reembed` admin job to rebuild it from git.
 
+Scripted, in dependency order:
+
+```bash
+# Back up Postgres (pg_dump -Fc), one git bundle per tenant wiki, and a
+# tar of /data/raw — into ./backups/<timestamp>/
+bash scripts/backup.sh
+
+# Restore from a backup directory (DROPS + recreates the target DB).
+bash scripts/restore.sh ./backups/20260529T120000Z
+```
+
+Both default to the compose `postgres` service and the `./data` bind-mount; override with `QPEDIA_DATA_DIR`, `QPEDIA_BACKUP_DIR`, or `QPEDIA_PG_MODE=dsn QPEDIA_DB_URL=…` for a direct connection. See the header comments in each script for the full env surface.
+
 ---
 
 ## Open-core: `qpedia` (OSS) and `qpedia-pvt` (SaaS)
