@@ -10,6 +10,19 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Bulk ingest UX** (Band 2.2). Drag an OS folder onto the upload
+  panel, or pick one with the new **Upload folder (mirror)** button:
+  the OS subfolder structure is replicated under the selected qpedia
+  folder as pinned folders (using slugified names returned by the
+  server so `Q4 Reports` lands at `q4-reports`), and every file is
+  uploaded into its mirrored location. The companion **Upload folder
+  (AI organize)** button drops every file at `/` instead, letting the
+  existing `classify.rs` auto-organizer group them into
+  `/<doc_type>`. Either path reports live progress (`Uploaded
+  N / M…`) and a one-line summary on completion. Drag-and-drop on the
+  upload panel handles flat-file batches and recursive folder trees
+  via the standard `webkitGetAsEntry` API.
+
 - **Source replace-in-place** (Band 2.1). New
   `POST /api/v1/sources/:id/replace` multipart endpoint and matching
   Replace button on each source row. Same slug, same folder, same ACL
