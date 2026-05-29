@@ -13,6 +13,7 @@ pub mod events;
 pub mod folder_acls;
 pub mod folders;
 pub mod jobs;
+pub mod oauth_grants;
 pub mod oidc_pending;
 pub mod sessions;
 pub mod slug;
@@ -22,6 +23,7 @@ pub mod wiki;
 
 pub use events::{EventSink, NoopEventSink, NoopTenantHook, TenantHook};
 pub use folders::FolderRow;
+pub use oauth_grants::OAuthGrant;
 pub use oidc_pending::PendingLogin;
 pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
 pub use sessions::SessionRow;

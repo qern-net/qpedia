@@ -14,8 +14,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod confluence;
+pub mod gdrive;
+pub mod oauth;
 
 pub use confluence::ConfluenceConnector;
+pub use gdrive::GoogleDriveConnector;
 
 /// Persistent connector configuration, mirrored from the `connectors`
 /// SQLite table. `config_json` is connector-specific (see each impl).
@@ -69,12 +72,10 @@ pub trait Connector: Send + Sync {
 pub fn build(config: &ConnectorConfig) -> Result<Box<dyn Connector>> {
     match config.kind.as_str() {
         "confluence" => Ok(Box::new(ConfluenceConnector::from_config(&config.config_json)?)),
-        // GDrive / SharePoint stubs: add an impl module + match arm here.
-        // The Connector trait is intentionally small (list_changed + download);
-        // both providers support enumerating modified docs (Drive: changes API
-        // with pageToken; SharePoint: deltaLink on driveItems) and direct
-        // byte download. Auth is the main wiring work — OAuth2 token refresh
-        // for both; this crate already has reqwest + base64 + url available.
+        "gdrive" => Ok(Box::new(GoogleDriveConnector::from_config(&config.config_json)?)),
+        // SharePoint/OneDrive (deltaLink on driveItems) + Slack live in
+        // qpedia-pvt; GitHub joins this crate next. All four share the
+        // OAuth refresh-token credential shape in `oauth.rs`.
         other => Err(anyhow::anyhow!("unknown connector kind: {other}")),
     }
 }

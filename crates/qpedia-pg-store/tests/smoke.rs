@@ -204,6 +204,64 @@ async fn smoke_full_lifecycle() {
     .await
     .expect("write audit");
 
+    // ── OAuth grants (SSO-aligned connector credentials) ─────────────
+    let grant_id = db
+        .upsert_oauth_grant(
+            &tenant,
+            "google",
+            "drive.readonly",
+            "", // org-level
+            Some("access-xyz"),
+            "refresh-abc",
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            "ci",
+        )
+        .await
+        .expect("upsert oauth grant");
+    let grant = db
+        .get_oauth_grant(&tenant, grant_id)
+        .await
+        .expect("get grant")
+        .expect("grant should exist");
+    assert_eq!(grant.provider, "google");
+    assert_eq!(grant.refresh_token, "refresh-abc");
+    // Upsert again (re-auth) — same logical key, refreshed tokens, same row.
+    let grant_id2 = db
+        .upsert_oauth_grant(
+            &tenant,
+            "google",
+            "drive.readonly",
+            "",
+            Some("access-new"),
+            "refresh-new",
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            "ci",
+        )
+        .await
+        .expect("re-upsert oauth grant");
+    assert_eq!(grant_id, grant_id2, "re-auth should update the same row");
+    let found = db
+        .find_oauth_grant(&tenant, "google", "drive.readonly", "")
+        .await
+        .expect("find grant")
+        .expect("grant should be found by key");
+    assert_eq!(found.refresh_token, "refresh-new");
+    db.update_oauth_access_token(
+        &tenant,
+        grant_id,
+        "access-rotated",
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await
+    .expect("rotate access token");
+    db.delete_oauth_grant(&tenant, grant_id)
+        .await
+        .expect("delete grant");
+    assert!(
+        db.get_oauth_grant(&tenant, grant_id).await.unwrap().is_none(),
+        "grant should be gone after delete"
+    );
+
     // ── Wiki: pgvector + tsvector round trip ─────────────────────────
     let page = WikiPageUpsert {
         page_id: "ci-page".into(),
