@@ -10,6 +10,17 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Chat rate limiting** (Band 3.4). `POST /api/v1/chat` is guarded by
+  a per-tenant token bucket: default 30 requests/minute with a burst of
+  10, configurable via `QPEDIA_CHAT_RPM` / `QPEDIA_CHAT_BURST`. Once a
+  tenant's bucket is empty the endpoint returns `429 Too Many Requests`
+  with a `Retry-After` header and a JSON body carrying
+  `retry_after_seconds`. The limiter is in-process (fleet-wide effective
+  limit is `N × QPEDIA_CHAT_RPM` across N replicas); `qpedia-pvt` swaps
+  in a Redis-backed implementation via the new
+  `AppBuilder::with_chat_rate_limiter`. Caps runaway LLM spend per
+  tenant.
+
 - **Multi-worker job runner** (Band 3.2). New `QPEDIA_WORKERS=N` env
   var (default `1`, clamped to `[1, 32]`) sets the size of the
   in-process ingest worker pool. Each worker has a distinct id

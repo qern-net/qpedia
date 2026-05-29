@@ -31,6 +31,7 @@
 pub mod app;
 pub mod auth;
 pub mod firebase;
+pub mod rate_limit;
 pub mod routes;
 
 pub use app::{
@@ -39,4 +40,5 @@ pub use app::{
 pub use auth::{
     mint_session, AuthExtractorState, AuthMode, AuthState, User,
 };
+pub use rate_limit::ChatRateLimiter;
 pub use routes::ApiError;

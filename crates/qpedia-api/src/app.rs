@@ -23,6 +23,7 @@
 //!   admin endpoints lands in Band 0.3.
 
 use crate::auth::{AuthExtractorState, AuthState};
+use crate::rate_limit::ChatRateLimiter;
 use crate::routes;
 use anyhow::{Context, Result};
 use axum::{
@@ -57,6 +58,9 @@ pub struct AppState {
     pub ctx: IngestContext,
     pub auth: AuthState,
     pub extensions: Extensions,
+    /// Per-tenant token-bucket limiter for `POST /api/v1/chat`.
+    /// Overlay-overridable via [`AppBuilder::with_chat_rate_limiter`].
+    pub chat_rate_limiter: Arc<ChatRateLimiter>,
 }
 
 /// Typed extension map. Cheap-Clone (Arc-backed).
@@ -116,6 +120,7 @@ pub struct AppBuilder {
     upload_limit_bytes: usize,
     extension_map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     extra_routers: Vec<Router<AppState>>,
+    chat_rate_limiter: Arc<ChatRateLimiter>,
     spawn_workers: bool,
 }
 
@@ -195,8 +200,17 @@ impl AppBuilder {
             upload_limit_bytes: DEFAULT_UPLOAD_LIMIT_BYTES,
             extension_map: HashMap::new(),
             extra_routers: Vec::new(),
+            chat_rate_limiter: Arc::new(ChatRateLimiter::from_env()),
             spawn_workers: true,
         })
+    }
+
+    /// Replace the default in-process [`ChatRateLimiter`]. Overlays
+    /// register e.g. a Redis-backed limiter that survives multiple
+    /// `qpedia-api` replicas.
+    pub fn with_chat_rate_limiter(mut self, limiter: Arc<ChatRateLimiter>) -> Self {
+        self.chat_rate_limiter = limiter;
+        self
     }
 
     /// Merge an additional `Router<AppState>` into the final application.
@@ -275,6 +289,7 @@ impl AppBuilder {
             extensions: Extensions {
                 inner: Arc::new(self.extension_map),
             },
+            chat_rate_limiter: self.chat_rate_limiter,
         };
 
         let mut router = core_router(upload_limit);

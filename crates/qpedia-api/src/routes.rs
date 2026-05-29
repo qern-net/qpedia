@@ -726,6 +726,12 @@ pub(crate) async fn chat(
     user: User,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    // Token-bucket guard. One token per chat invocation; defaults are
+    // generous (30 RPM, burst 10) but cap LLM spend per tenant.
+    if let Err(retry_after) = s.chat_rate_limiter.check(&user.tenant) {
+        return Err(ApiError::TooManyRequests(retry_after));
+    }
+
     let llm = s.ctx.llm.clone().ok_or_else(|| {
         ApiError::Bad(
             "chat requires an LLM provider — set ANTHROPIC_API_KEY or OPENAI_API_KEY".into(),
@@ -1356,6 +1362,8 @@ pub enum ApiError {
     NotFound,
     Bad(String),
     Forbidden,
+    /// 429 with `Retry-After` header. The carried `u64` is seconds.
+    TooManyRequests(u64),
     Internal(anyhow::Error),
 }
 
@@ -1377,6 +1385,22 @@ impl From<std::io::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        // 429 needs a `Retry-After` header in addition to the JSON body,
+        // so it's threaded separately from the simple (status, msg) path.
+        if let ApiError::TooManyRequests(secs) = self {
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": format!("rate limit exceeded; retry after {secs}s"),
+                    "retry_after_seconds": secs,
+                })),
+            )
+                .into_response();
+            if let Ok(v) = secs.to_string().parse() {
+                resp.headers_mut().insert("retry-after", v);
+            }
+            return resp;
+        }
         let (status, msg) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::Bad(s) => (StatusCode::BAD_REQUEST, s),
@@ -1385,6 +1409,7 @@ impl IntoResponse for ApiError {
                 error!(error = %e, "internal");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
             }
+            ApiError::TooManyRequests(_) => unreachable!("handled above"),
         };
         (status, Json(json!({ "error": msg }))).into_response()
     }
