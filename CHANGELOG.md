@@ -10,6 +10,22 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **CI for migrations** (Band 3.5). New `.github/workflows/ci.yml`
+  with two jobs: `check` (`cargo check --workspace --all-targets`,
+  ~30s after cache) and `migrate` (spins up
+  `pgvector/pgvector:pg17` as a service container, runs
+  `cargo test --workspace --all-targets` against it). The migrate
+  step exercises a new `crates/qpedia-pg-store/tests/smoke.rs`
+  integration test that applies every migration to a fresh DB and
+  runs a tenants → folders → folder-ACLs → sources (insert / status
+  / language / classification / replace-in-place / delete) → audit →
+  wiki upsert + hybrid-search lifecycle, including a 384-dim
+  `vector(384)` round-trip. Schema drift, RLS over-tightening, and
+  pgvector / tsvector regressions now turn the build red on the
+  same PR that introduces them. The smoke test gates on
+  `QPEDIA_DB_URL` so local `cargo test` with no DB still passes
+  (prints `skip:`).
+
 - **Bulk ingest UX** (Band 2.2). Drag an OS folder onto the upload
   panel, or pick one with the new **Upload folder (mirror)** button:
   the OS subfolder structure is replicated under the selected qpedia

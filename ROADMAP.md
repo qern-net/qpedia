@@ -76,7 +76,7 @@ Do these before / alongside the qpedia-pvt SaaS launch.
 | 3.2 | **Multi-worker job runner** — one worker per process today; add `QPEDIA_WORKERS=N` to spawn N concurrent claimers (SKIP LOCKED already supports it). | qpedia | ⚪ |
 | 3.3 | **Backup runbook** — `pg_dump` cadence + per-tenant `git bundle`. README has the table; we need a `scripts/backup.sh` and a tested restore drill. | qpedia | ⚪ |
 | 3.4 | **Rate limit on `/api/v1/chat`** — per-tenant (and per-session in pvt) token bucket. Otherwise one runaway client can drain the LLM budget. | qpedia | ⚪ |
-| 3.5 | **CI for migrations** — spin up a fresh pgvector container, apply all migrations, run `cargo test`. Catches accidental schema regressions. | qpedia | ⚪ |
+| 3.5 | **CI for migrations** — spin up a fresh pgvector container, apply all migrations, run `cargo test`. Catches accidental schema regressions. | qpedia | ✅ |
 | 3.6 | **Premium-LLM ops** — vendor failover, per-tenant quotas, cost dashboards. | qpedia-pvt | ⚪ |
 | 3.7 | **Compliance** — SOC2 / ISO27001 audit hooks, GDPR data export / erasure flows. | qpedia-pvt | ⚪ |
 
