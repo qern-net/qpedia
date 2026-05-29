@@ -10,6 +10,16 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Multi-worker job runner** (Band 3.2). New `QPEDIA_WORKERS=N` env
+  var (default `1`, clamped to `[1, 32]`) sets the size of the
+  in-process ingest worker pool. Each worker has a distinct id
+  (`worker-1`, `worker-2`, …) so `jobs.locked_by` tells you exactly
+  which one holds a given lease. Concurrent claims are race-free
+  because `claim_next_job` already used `SELECT … FOR UPDATE SKIP
+  LOCKED LIMIT 1`; this commit simply spawns more polling tasks.
+  Operators with bursty uploads or slow agent loops can scale ingest
+  throughput linearly with no config drama.
+
 - **CI for migrations** (Band 3.5). New `.github/workflows/ci.yml`
   with two jobs: `check` (`cargo check --workspace --all-targets`,
   ~30s after cache) and `migrate` (spins up

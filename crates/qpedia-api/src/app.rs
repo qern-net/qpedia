@@ -400,9 +400,24 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
 
 // ---------- background spawns --------------------------------------------------
 
+/// Spawn the JobRunner pool. Size comes from `QPEDIA_WORKERS` (default 1,
+/// clamped to `[1, 32]`); each worker has a distinct id `worker-N` so
+/// the `jobs.locked_by` column tells you which one holds a lease.
+///
+/// Concurrent claims are safe because `claim_next_job` uses
+/// `SELECT … FOR UPDATE SKIP LOCKED LIMIT 1` — two workers polling at
+/// the same instant pick different rows.
 fn spawn_job_runner(ctx: IngestContext) {
-    let runner = JobRunner::new(ctx, "worker-1");
-    tokio::spawn(runner.run());
+    let workers: usize = std::env::var("QPEDIA_WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(|n: usize| n.clamp(1, 32))
+        .unwrap_or(1);
+    for i in 1..=workers {
+        let runner = JobRunner::new(ctx.clone(), format!("worker-{i}"));
+        tokio::spawn(runner.run());
+    }
+    info!(workers, "job runner pool started");
 }
 
 fn spawn_connector_scheduler(ctx: IngestContext) {

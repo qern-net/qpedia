@@ -58,9 +58,10 @@ piece; don't start until the prior shipped.
 |---|---|---|---|
 | 2.1 | **Source replace-in-place** — re-upload a file with the same slug, cascade through wiki updates. Common operator need; today you delete + re-upload and lose the slug. | qpedia | ✅ |
 | 2.2 | **Bulk ingest UX** — drag a folder from the OS into the tree; auto-creates pinned subfolders mirroring the structure, uploads everything. Big leap in onboarding feel. | qpedia | ✅ |
-| 2.3 | **GDrive connector** — the framework + extension points exist in `qpedia-connectors`. Validate Confluence's pattern on a second concrete connector. *Lives in OSS.* | qpedia | ⚪ |
-| 2.4 | **SharePoint Online connector** | qpedia-pvt | ⚪ (premium) |
+| 2.3 | **GDrive connector** — the framework + extension points exist in `qpedia-connectors`. Validate Confluence's pattern on a second concrete connector. *Lives in OSS.* **See "Vision threads" below — implement aligned with the SSO-driven connector pattern.** | qpedia | ⚪ |
+| 2.4 | **SharePoint Online + OneDrive connector** (OneDrive ≈ SharePoint for individuals; one connector covers both). SSO-aligned per the vision below. | qpedia-pvt | ⚪ (premium) |
 | 2.5 | **Slack connector** | qpedia-pvt | ⚪ (premium) |
+| 2.8 | **GitHub connector** — login + tenant-wide repo indexing at high level + detailed ingestion of `*.md` / docs in tracked repos. SSO-aligned. | qpedia | ⚪ |
 | 2.6 | **Multi-language wiki** — tsvector is hardcoded to `'english'`, embedder is `bge-small-en-v1.5`. To support es / fr / de / etc. you need per-page language → per-page tsvector config + a multilingual embedder (e.g., bge-m3). Non-trivial; defer until a real customer demands it. | qpedia | ⚪ |
 | 2.7 | **Collaborative human editing** of wiki pages with agent-assisted merge. Listed in `DESIGN §16`. Biggest leap — premature until a few real teams are using v2. | qpedia | ⚪ |
 
@@ -73,12 +74,80 @@ Do these before / alongside the qpedia-pvt SaaS launch.
 | # | Item | Repo | Notes |
 |---|---|---|---|
 | 3.1 | **Wire OpenTelemetry export** — env stub exists (`OTEL_EXPORTER_OTLP_ENDPOINT`); collector wiring missing. | qpedia | ⚪ |
-| 3.2 | **Multi-worker job runner** — one worker per process today; add `QPEDIA_WORKERS=N` to spawn N concurrent claimers (SKIP LOCKED already supports it). | qpedia | ⚪ |
+| 3.2 | **Multi-worker job runner** — one worker per process today; add `QPEDIA_WORKERS=N` to spawn N concurrent claimers (SKIP LOCKED already supports it). | qpedia | ✅ |
 | 3.3 | **Backup runbook** — `pg_dump` cadence + per-tenant `git bundle`. README has the table; we need a `scripts/backup.sh` and a tested restore drill. | qpedia | ⚪ |
 | 3.4 | **Rate limit on `/api/v1/chat`** — per-tenant (and per-session in pvt) token bucket. Otherwise one runaway client can drain the LLM budget. | qpedia | ⚪ |
 | 3.5 | **CI for migrations** — spin up a fresh pgvector container, apply all migrations, run `cargo test`. Catches accidental schema regressions. | qpedia | ✅ |
 | 3.6 | **Premium-LLM ops** — vendor failover, per-tenant quotas, cost dashboards. | qpedia-pvt | ⚪ |
 | 3.7 | **Compliance** — SOC2 / ISO27001 audit hooks, GDPR data export / erasure flows. | qpedia-pvt | ⚪ |
+
+---
+
+---
+
+## Vision threads (longer-running design ideas)
+
+### SSO-aligned connectors
+
+The connectors in Band 2 (GDrive / SharePoint+OneDrive / GitHub / Slack)
+should not each carry their own ad-hoc OAuth setup. They should ride on
+top of the user's SSO identity. Two layered modes per provider:
+
+1. **Org / admin scope.** When an admin sets up Google SSO (already
+   wired via Firebase), the same flow optionally grants OAuth scopes
+   for the corp Drive — `drive.readonly` or similar. The admin sees
+   a single "connect Google Drive (corporate)" toggle; behind it the
+   tenant gains a Google connector wired with the org's refresh token.
+   Mirror this for Microsoft → SharePoint (and OneDrive, which is
+   really just SharePoint-for-individuals), and for GitHub → org-scoped
+   repo indexing.
+
+2. **User scope.** A signed-in user can, in their profile, opt in to
+   "share my personal Drive with qpedia." Their SSO session extends to
+   carry the additional scope; their personal files become a folder in
+   the tree (`/me/drive/...`) visible only to them, ingested under
+   their own ACL.
+
+Why this matters:
+- One auth UX. Operators set up SSO once; connectors are toggles, not
+  separate OAuth dances.
+- Onboarding speeds up enormously — "I signed in with Google, my docs
+  are already searchable."
+- The trust story stays clean: tokens live next to the session that
+  granted them, with the same TTL and revocation surface.
+
+What it implies for the implementation:
+
+- `FirebaseVerifier` already returns the provider (`google.com`,
+  `microsoft.com`, `github.com`). We add an **OAuth scope-augmentation
+  step** at login time: the frontend asks Firebase for the additional
+  scope (`scope: 'https://www.googleapis.com/auth/drive.readonly'`),
+  the resulting credential carries an access token + refresh token,
+  and we persist them keyed on `(tenant, user_id, provider, scope)` in
+  a new `oauth_grants` table (RLS-scoped).
+- Each connector config (`qpedia-connectors::ConnectorConfig`) gains
+  an optional `oauth_grant_id` instead of a baked-in API key. The
+  connector resolves the live access token (refresh if expired) at
+  call time.
+- The admin connector-create flow becomes: "use the org's
+  `<provider>` SSO grant" or "supply an API key" (escape hatch for
+  non-SSO deploys).
+- ACL: docs ingested under a user-scoped grant carry that user's
+  groups (or just that user) by default; org-scoped grants honor the
+  same folder ACL rules everything else does.
+
+### Connector matrix once that pattern lands
+
+| Provider     | Mode | Scope            | Repo |
+|--------------|------|------------------|------|
+| Google       | both | Drive            | OSS (`qpedia-connectors::google`) |
+| Microsoft    | both | SharePoint + OneDrive | qpedia-pvt (`qpedia-pvt-connectors::microsoft`) |
+| GitHub       | both | repo list + `*.md` + tracked docs | OSS (`qpedia-connectors::github`) |
+| Slack        | org  | channel scrape   | qpedia-pvt |
+| Atlassian    | org  | Confluence (already shipped); add Jira | OSS (Confluence) / pvt (Jira) |
+
+Confluence stays as the existing pattern (API token in connector
+config) for self-hosters who don't run SSO.
 
 ---
 
