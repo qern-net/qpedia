@@ -194,6 +194,44 @@ export async function deleteFolderAcl(folder_path: string): Promise<void> {
   if (!r.ok) throw new Error(`delete folder acl: ${r.status}`);
 }
 
+// ---------- admin: connectors ----------
+
+export type Connector = {
+  id: string;
+  tenant: string;
+  kind: string;
+  name: string;
+  cursor: string | null;
+  enabled: boolean;
+  last_run_at: string | null;
+  last_error: string | null;
+};
+
+export async function listConnectors(): Promise<{ items: Connector[] }> {
+  return json(await fetch('/api/v1/admin/connectors'));
+}
+
+export async function deleteConnector(id: string): Promise<void> {
+  const r = await fetch(`/api/v1/admin/connectors/${id}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`delete connector: ${r.status}`);
+}
+
+export async function triggerConnectorSync(id: string): Promise<{ job_id: string }> {
+  return json(await fetch(`/api/v1/admin/connectors/${id}/sync`, { method: 'POST' }));
+}
+
+/** Get the Google consent URL to start the Connect-Google-Drive flow.
+ *  The caller then sets window.location to it; Google redirects back to
+ *  the server callback, which creates the connector and bounces to
+ *  /admin?google_connected=1 (or ?google_error=…). */
+export async function googleDriveAuthorizeUrl(folderId?: string): Promise<string> {
+  const q = folderId ? `?folder_id=${encodeURIComponent(folderId)}` : '';
+  const r = await json<{ authorize_url: string }>(
+    await fetch(`/api/v1/connectors/google/authorize${q}`)
+  );
+  return r.authorize_url;
+}
+
 export async function listStalledSources(): Promise<{ sources: Source[]; count: number }> {
   return json(await fetch('/api/v1/admin/sources/stalled'));
 }

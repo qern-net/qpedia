@@ -1,23 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
+    deleteConnector,
     deleteFolderAcl,
     enqueueLint,
     enqueueReembed,
     getLintReport,
     getMe,
+    googleDriveAuthorizeUrl,
+    listConnectors,
     listFolderAcls,
     listFolders,
     listSources,
     listStalledSources,
     resumeStalledSources,
     setFolderAcl,
+    triggerConnectorSync,
+    type Connector,
     type Folder,
     type FolderAcl,
     type LintReport,
     type Me,
     type Source
   } from '$lib/api';
+  import { page } from '$app/stores';
   import StatusChip from '$lib/components/StatusChip.svelte';
   import FolderTree from '$lib/components/FolderTree.svelte';
 
@@ -45,6 +51,13 @@
   let lintError = $state<string | null>(null);
   let lintRunning = $state(false);
   let lintRunMsg = $state<string | null>(null);
+
+  // Connectors state
+  let connectors = $state<Connector[]>([]);
+  let connectorsError = $state<string | null>(null);
+  let connectMsg = $state<string | null>(null);
+  let gdriveFolder = $state('');
+  let connecting = $state(false);
 
   // New / edit form state.
   let formPath = $state('/');
@@ -117,11 +130,59 @@
     );
   }
 
+  async function refreshConnectors() {
+    connectorsError = null;
+    try {
+      connectors = (await listConnectors()).items;
+    } catch (e: any) {
+      connectorsError = String(e?.message ?? e);
+    }
+  }
+
+  async function onConnectGoogleDrive() {
+    connecting = true; connectMsg = null; connectorsError = null;
+    try {
+      const url = await googleDriveAuthorizeUrl(gdriveFolder.trim() || undefined);
+      // Top-level navigation to Google's consent screen; Google redirects
+      // back to /admin?google_connected=1 (or ?google_error=…).
+      window.location.href = url;
+    } catch (e: any) {
+      connectorsError = String(e?.message ?? e);
+      connecting = false;
+    }
+  }
+
+  async function onSyncConnector(c: Connector) {
+    try {
+      await triggerConnectorSync(c.id);
+      connectMsg = `Sync queued for ${c.name}.`;
+    } catch (e: any) {
+      connectorsError = String(e?.message ?? e);
+    }
+  }
+
+  async function onDeleteConnector(c: Connector) {
+    if (!confirm(`Delete connector "${c.name}"? Already-ingested docs stay; no new syncs run.`)) return;
+    try {
+      await deleteConnector(c.id);
+      await refreshConnectors();
+    } catch (e: any) {
+      connectorsError = String(e?.message ?? e);
+    }
+  }
+
   onMount(async () => {
     try { me = await getMe(); } catch {}
     loaded = true;
     if (me?.is_admin) {
-      await Promise.all([refresh(), refreshStalled(), refreshLint()]);
+      await Promise.all([refresh(), refreshStalled(), refreshLint(), refreshConnectors()]);
+      // Surface the result of a returning Google OAuth round-trip.
+      const params = $page.url.searchParams;
+      if (params.get('google_connected')) {
+        connectMsg = 'Google Drive connected — first sync will run shortly.';
+      } else if (params.get('google_error')) {
+        connectorsError = `Google connect failed: ${params.get('google_error')}`;
+      }
     }
   });
 
@@ -292,6 +353,74 @@
       {/if}
       {#if reembedMsg}
         <div style="color: var(--ok); font-size: 12px;">{reembedMsg}</div>
+      {/if}
+    </div>
+
+    <!-- ── Connectors ── -->
+    <div class="card">
+      <div class="row" style="margin-bottom: 8px;">
+        <div>
+          <h2 style="margin: 0 0 4px;">Connectors</h2>
+          <p class="muted" style="margin: 0; font-size: 12px;">
+            External sources that auto-sync into the wiki. Google Drive connects
+            via your Google account (read-only); set up Google SSO and grant
+            Drive access in one click.
+          </p>
+        </div>
+        <span class="spacer"></span>
+        <button onclick={refreshConnectors} style="white-space: nowrap;">Refresh</button>
+      </div>
+
+      {#if connectorsError}
+        <div class="card" style="border-color: var(--err); color: var(--err); margin-bottom: 12px;">{connectorsError}</div>
+      {/if}
+      {#if connectMsg}
+        <div class="card" style="border-color: var(--ok); color: var(--ok); margin-bottom: 12px;">{connectMsg}</div>
+      {/if}
+
+      <!-- Connect Google Drive -->
+      <div class="row" style="gap: 10px; flex-wrap: wrap; margin-bottom: 14px;">
+        <input
+          type="text"
+          bind:value={gdriveFolder}
+          placeholder="Drive folder id (optional — whole Drive if blank)"
+          style="flex: 1; min-width: 280px;"
+        />
+        <button class="primary" onclick={onConnectGoogleDrive} disabled={connecting} style="white-space: nowrap;">
+          {connecting ? 'Redirecting…' : '🔗 Connect Google Drive'}
+        </button>
+      </div>
+
+      {#if connectors.length === 0}
+        <div class="muted" style="font-size: 13px;">No connectors yet.</div>
+      {:else}
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Kind</th>
+              <th>Enabled</th>
+              <th>Last run</th>
+              <th>Last error</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each connectors as c (c.id)}
+              <tr>
+                <td>{c.name}</td>
+                <td class="mono">{c.kind}</td>
+                <td>{c.enabled ? 'yes' : 'no'}</td>
+                <td class="muted" style="font-size: 12px;">{c.last_run_at?.slice(0, 19).replace('T', ' ') ?? '—'}</td>
+                <td class="muted" style="font-size: 12px; max-width: 240px; color: {c.last_error ? 'var(--err)' : 'var(--fg-dim)'};">{c.last_error ?? '—'}</td>
+                <td style="white-space: nowrap;">
+                  <button onclick={() => onSyncConnector(c)} style="font-size: 12px; padding: 4px 10px; margin-right: 4px;">sync</button>
+                  <button onclick={() => onDeleteConnector(c)} style="font-size: 12px; padding: 4px 10px;">delete</button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       {/if}
     </div>
 

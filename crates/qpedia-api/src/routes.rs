@@ -1176,6 +1176,221 @@ pub(crate) async fn trigger_connector_sync(
     Ok(Json(json!({ "job_id": job_id, "connector_id": id, "state": "queued" })))
 }
 
+// ============================================================================
+// Google Drive connect (SSO-aligned OAuth authorization-code flow)
+// ============================================================================
+//
+// Two steps. The admin's browser drives both:
+//   1. GET .../google/authorize  -> JSON { authorize_url }. Frontend sets
+//      window.location to it. We stash a random CSRF `state` in
+//      oidc_pending (reused as a generic short-lived state store).
+//   2. Google redirects the browser (top-level GET, session cookie rides
+//      along under SameSite=Lax) to .../google/callback?code&state. We
+//      verify state, exchange the code for a refresh token, record an
+//      oauth_grant, and create a `gdrive` connector wired with the
+//      refresh token. Redirect to /admin.
+//
+// Requires GOOGLE_OAUTH_CLIENT_ID / _SECRET in the environment, plus a
+// redirect URI registered on the Google OAuth client that matches
+// GOOGLE_OAUTH_REDIRECT_URL.
+
+fn google_oauth_env() -> Result<(String, String, String), ApiError> {
+    let client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID")
+        .map_err(|_| ApiError::Bad("GOOGLE_OAUTH_CLIENT_ID not set".into()))?;
+    let client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET")
+        .map_err(|_| ApiError::Bad("GOOGLE_OAUTH_CLIENT_SECRET not set".into()))?;
+    let redirect = std::env::var("GOOGLE_OAUTH_REDIRECT_URL").unwrap_or_else(|_| {
+        "http://127.0.0.1:8080/api/v1/connectors/google/callback".into()
+    });
+    Ok((client_id, client_secret, redirect))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GoogleAuthorizeQuery {
+    /// Optional Drive folder id to restrict ingestion to.
+    folder_id: Option<String>,
+}
+
+/// Step 1: hand the frontend a Google consent URL. Admin only.
+pub(crate) async fn google_authorize(
+    State(s): State<AppState>,
+    user: User,
+    Query(q): Query<GoogleAuthorizeQuery>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let (client_id, _secret, redirect) = google_oauth_env()?;
+
+    // Random CSRF state, stashed in oidc_pending (a generic short-lived
+    // state store). redirect_after carries the optional folder id so the
+    // callback can wire it into the connector config.
+    let state = auth::random_token(24);
+    let folder = q.folder_id.unwrap_or_default();
+    s.ctx
+        .db
+        .save_pending(&state, "n/a", "n/a", Some(&folder))
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let url = qpedia_connectors::oauth::consent_url(
+        &client_id,
+        &redirect,
+        qpedia_connectors::oauth::DRIVE_READONLY_SCOPE,
+        &state,
+    );
+    Ok(Json(json!({ "authorize_url": url })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GoogleCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+/// Step 2: Google redirects here. Exchange the code, record the grant,
+/// create the connector, redirect to /admin. Admin only (the session
+/// cookie rides along on the top-level redirect).
+pub(crate) async fn google_callback(
+    State(s): State<AppState>,
+    user: User,
+    Query(q): Query<GoogleCallbackQuery>,
+) -> Result<Redirect, Response> {
+    let forbidden =
+        || (StatusCode::FORBIDDEN, "admin required").into_response();
+    if !user.is_admin() {
+        return Err(forbidden());
+    }
+    let fail = |msg: String| {
+        // Bounce back to the admin page with an error query the UI shows.
+        Redirect::to(&format!("/admin?google_error={}", urlencode_q(&msg)))
+    };
+
+    if let Some(err) = q.error {
+        return Ok(fail(format!("google denied: {err}")));
+    }
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return Ok(fail("missing code/state".into()));
+    };
+
+    // Consume + validate the CSRF state.
+    let pending = match s.ctx.db.take_pending(&state).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return Ok(fail("unknown or expired state".into())),
+        Err(e) => return Ok(fail(format!("state lookup: {e}"))),
+    };
+    let folder_id = pending.redirect_after.unwrap_or_default();
+
+    let (client_id, client_secret, redirect) = match google_oauth_env() {
+        Ok(v) => v,
+        Err(_) => return Ok(fail("google oauth env not configured".into())),
+    };
+
+    // Exchange the authorization code for a durable refresh token.
+    let http = reqwest::Client::new();
+    let tokens = match qpedia_connectors::oauth::exchange_code(
+        &http,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => return Ok(fail(format!("token exchange: {e}"))),
+    };
+    let Some(refresh_token) = tokens.refresh_token else {
+        return Ok(fail(
+            "google returned no refresh token (revoke prior grant and retry)".into(),
+        ));
+    };
+
+    // Record the grant (single source of truth for the refresh token,
+    // for audit + future revocation). Org-level: subject = "".
+    if let Err(e) = s
+        .ctx
+        .db
+        .upsert_oauth_grant(
+            &user.tenant,
+            "google",
+            "drive.readonly",
+            "",
+            Some(&tokens.access_token),
+            &refresh_token,
+            Some(tokens.expires_at),
+            &user.id,
+        )
+        .await
+    {
+        return Ok(fail(format!("store grant: {e}")));
+    }
+
+    // Create a gdrive connector wired with the refresh token. The
+    // connector config duplicates the refresh token for now; the grant
+    // row remains the audit/revocation record.
+    let name = match qpedia_pg_store::unique_connector_name(&s.ctx.db, &user.tenant, "google-drive")
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => return Ok(fail(format!("name connector: {e}"))),
+    };
+    let mut config = json!({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+    });
+    if !folder_id.is_empty() {
+        config["folder_id"] = json!(folder_id);
+    }
+    let cfg = qpedia_connectors::ConnectorConfig {
+        id: String::new(),
+        tenant: user.tenant.as_str().to_string(),
+        kind: "gdrive".into(),
+        name: name.clone(),
+        config_json: config,
+        cursor: None,
+        enabled: true,
+        last_run_at: None,
+        last_error: None,
+    };
+    let cid = match s.ctx.db.insert_connector(&user.tenant, &cfg).await {
+        Ok(id) => id.to_string(),
+        Err(e) => return Ok(fail(format!("create connector: {e}"))),
+    };
+
+    let _ = s
+        .ctx
+        .db
+        .write_audit(
+            &user.tenant,
+            &user.id,
+            "connector.google.connected",
+            Some(&cid),
+            Some(&json!({ "name": name, "folder_id": folder_id })),
+        )
+        .await;
+
+    info!(tenant = %user.tenant, connector = %name, "google drive connected");
+    Ok(Redirect::to("/admin?google_connected=1"))
+}
+
+/// Tiny query-value encoder for the redirect error message.
+fn urlencode_q(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push_str("%20"),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 // ---------- first-run bootstrap ----------
 
 #[derive(Deserialize)]

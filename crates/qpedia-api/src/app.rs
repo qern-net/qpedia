@@ -410,6 +410,14 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
             "/api/v1/admin/connectors/:id/sync",
             post(routes::trigger_connector_sync),
         )
+        .route(
+            "/api/v1/connectors/google/authorize",
+            get(routes::google_authorize),
+        )
+        .route(
+            "/api/v1/connectors/google/callback",
+            get(routes::google_callback),
+        )
         .route("/api/v1/admin/bootstrap", post(routes::bootstrap_tenant))
 }
 

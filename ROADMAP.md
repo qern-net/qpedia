@@ -58,7 +58,7 @@ piece; don't start until the prior shipped.
 |---|---|---|---|
 | 2.1 | **Source replace-in-place** — re-upload a file with the same slug, cascade through wiki updates. Common operator need; today you delete + re-upload and lose the slug. | qpedia | ✅ |
 | 2.2 | **Bulk ingest UX** — drag a folder from the OS into the tree; auto-creates pinned subfolders mirroring the structure, uploads everything. Big leap in onboarding feel. | qpedia | ✅ |
-| 2.3 | **GDrive connector** — the framework + extension points exist in `qpedia-connectors`. Validate Confluence's pattern on a second concrete connector. *Lives in OSS.* **See "Vision threads" below — implement aligned with the SSO-driven connector pattern.** | qpedia | ⚪ |
+| 2.3 | **GDrive connector** — the framework + extension points exist in `qpedia-connectors`. Validate Confluence's pattern on a second concrete connector. *Lives in OSS.* **See "Vision threads" below — implement aligned with the SSO-driven connector pattern.** | qpedia | ✅ |
 | 2.4 | **SharePoint Online + OneDrive connector** (OneDrive ≈ SharePoint for individuals; one connector covers both). SSO-aligned per the vision below. | qpedia-pvt | ⚪ (premium) |
 | 2.5 | **Slack connector** | qpedia-pvt | ⚪ (premium) |
 | 2.8 | **GitHub connector** — login + tenant-wide repo indexing at high level + detailed ingestion of `*.md` / docs in tracked repos. SSO-aligned. | qpedia | ⚪ |

@@ -10,6 +10,33 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Google Drive connector + SSO-aligned OAuth foundation** (Band 2.3).
+  The second concrete connector after Confluence, plus the credential
+  plumbing the rest of the connector line will share.
+  - New `oauth_grants` table (migration 0005, RLS tenant-isolated):
+    durable `(tenant, provider, scope, subject)` → refresh-token
+    mapping, with PgStore CRUD. `subject=''` is an org-level grant.
+  - `qpedia-connectors::oauth` — Google OAuth 2.0 helper:
+    `consent_url` (offline access), `exchange_code`, `refresh`.
+  - `qpedia-connectors::gdrive` — `GoogleDriveConnector`: `list_changed`
+    via Drive `files.list` (incremental on `modifiedTime`), `download`
+    via `files.get?alt=media` with `files.export` for Google-native docs
+    (Docs→HTML, Sheets→CSV, Slides→text). Registered as `"gdrive"`.
+  - **Connect Google Drive** in the Admin → Connectors card. Click →
+    Google consent (read-only Drive) → callback exchanges the code for a
+    refresh token, records the grant, and creates a `gdrive` connector
+    that the existing auto-sync scheduler picks up. Optional folder-id
+    restriction. New `GET /api/v1/connectors/google/{authorize,callback}`
+    endpoints; `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REDIRECT_URL`
+    env. Self-hosters not running SSO can supply a refresh token in the
+    connector config directly (mirrors Confluence's API-token path).
+  - The Admin tab also gains a general Connectors list (sync / delete).
+
+  Note: Firebase Auth establishes identity but does not expose OAuth
+  refresh tokens, so durable Drive access uses this separate
+  authorization-code flow on the same Google account — see ROADMAP
+  "Vision threads: SSO-aligned connectors".
+
 - **Backup + restore scripts** (Band 3.3). `scripts/backup.sh` captures
   the three durable stores in dependency order — Postgres (`pg_dump
   -Fc`), one `git bundle` per tenant wiki repo, and a tar of
