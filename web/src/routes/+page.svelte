@@ -7,6 +7,7 @@
     listFolders,
     listSources,
     moveSource,
+    replaceSource,
     setFolderPinned,
     sourceOriginalUrl,
     TERMINAL,
@@ -55,7 +56,44 @@
   }
 
   let pendingDelete = $state<Set<string>>(new Set());
+  let pendingReplace = $state<Set<string>>(new Set());
   let actionError = $state<string | null>(null);
+  /** Per-row hidden file inputs, populated by the Replace button. */
+  let replaceInputs = new Map<string, HTMLInputElement>();
+
+  async function onReplaceClick(s: Source) {
+    const input = replaceInputs.get(s.id);
+    if (input) input.click();
+  }
+
+  async function onReplaceFile(s: Source, files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    if (!confirm(`Replace "${s.filename}" with "${file.name}"? The wiki agent will refresh the existing pages that cite this source.`)) {
+      const input = replaceInputs.get(s.id);
+      if (input) input.value = '';
+      return;
+    }
+    const next = new Set(pendingReplace);
+    next.add(s.id);
+    pendingReplace = next;
+    actionError = null;
+    try {
+      await replaceSource(s.id, file);
+      // Poll for status churn as the re-ingest runs.
+      setTimeout(refresh, 500);
+      setTimeout(refresh, 2000);
+      setTimeout(refresh, 5000);
+    } catch (e: any) {
+      actionError = `replace failed: ${e?.message ?? e}`;
+    } finally {
+      const cleared = new Set(pendingReplace);
+      cleared.delete(s.id);
+      pendingReplace = cleared;
+      const input = replaceInputs.get(s.id);
+      if (input) input.value = '';
+    }
+  }
 
   async function onDelete(s: Source) {
     if (!confirm(`Delete "${s.filename}" and any wiki pages derived from it?`)) return;
@@ -198,6 +236,20 @@
                       title="Download original file"
                       style="font-size: 12px; padding: 4px 10px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); text-decoration: none; margin-right: 4px;"
                     >↓</a>
+                    <input
+                      type="file"
+                      bind:this={() => replaceInputs.get(src.id) as HTMLInputElement, (el) => replaceInputs.set(src.id, el!)}
+                      onchange={(e) => onReplaceFile(src, (e.target as HTMLInputElement).files)}
+                      style="display: none;"
+                    />
+                    <button
+                      onclick={() => onReplaceClick(src)}
+                      disabled={pendingReplace.has(src.id)}
+                      title="Replace this file in place (keeps the slug; wiki agent refreshes existing pages)"
+                      style="font-size: 12px; padding: 4px 10px; margin-right: 4px;"
+                    >
+                      {pendingReplace.has(src.id) ? 'uploading…' : 'replace'}
+                    </button>
                     <button
                       onclick={() => onDelete(src)}
                       disabled={pendingDelete.has(src.id)}

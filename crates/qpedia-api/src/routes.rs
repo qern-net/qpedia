@@ -313,6 +313,130 @@ pub(crate) async fn delete_source(
     ))
 }
 
+/// Replace a source's file in place. Same slug, same folder, same ACL —
+/// only the underlying bytes (and the metadata derived from them) change.
+/// The pipeline re-runs from `Pending`; the ingest agent updates existing
+/// wiki pages that reference this `source_id` instead of creating
+/// duplicates (its `propose_new` would be rejected by the validator
+/// since those paths already exist).
+///
+/// Useful for: corrected scans, redacted versions, freshened reports.
+/// If the new bytes hash to the same SHA256 as the existing source,
+/// this is a no-op (returns 200 with the unchanged row).
+pub(crate) async fn replace_source(
+    State(s): State<AppState>,
+    user: User,
+    Path(id): Path<String>,
+    mut mp: Multipart,
+) -> Result<Json<Source>, ApiError> {
+    let sid = SourceId::from(id);
+
+    // Existing source must exist and be writable by the caller.
+    let Some(existing) = s
+        .ctx
+        .db
+        .get_source_in(&user.tenant, &sid)
+        .await
+        .map_err(ApiError::Internal)?
+    else {
+        return Err(ApiError::NotFound);
+    };
+    if !user.can_read(&existing.acl) {
+        return Err(ApiError::NotFound);
+    }
+
+    let mut filename = String::new();
+    let mut bytes: Option<bytes::Bytes> = None;
+    while let Some(field) = mp.next_field().await.map_err(|e| ApiError::Bad(e.to_string()))? {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                filename = field
+                    .file_name()
+                    .unwrap_or(existing.filename.as_str())
+                    .to_string();
+                bytes = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| ApiError::Bad(e.to_string()))?,
+                );
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let bytes = bytes.ok_or_else(|| ApiError::Bad("missing 'file' field".into()))?;
+    if filename.is_empty() {
+        filename = existing.filename.clone();
+    }
+
+    // Identical bytes — nothing to do. Return the existing row so the
+    // client UI just re-renders the unchanged source.
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha256 = hex::encode(hasher.finalize());
+    if sha256 == existing.sha256 {
+        info!(id = %sid, "replace: identical bytes — no-op");
+        return Ok(Json(existing));
+    }
+
+    let mime = mime_guess::from_path(&filename)
+        .first_or_octet_stream()
+        .to_string();
+    let size = bytes.len() as u64;
+
+    // Persist new blob first; on failure the DB row still points at the
+    // old SHA256 + filename and the source remains in its prior status.
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    s.ctx.blob.put(&sid, BlobKind::Original, ext, bytes).await?;
+
+    s.ctx
+        .db
+        .replace_source_blob(&user.tenant, &sid, &filename, &mime, &sha256, size)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let job = qpedia_ingest::ingest_job(&user.tenant, &sid).map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .enqueue(&user.tenant, &job)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    s.ctx
+        .db
+        .write_audit(
+            &user.tenant,
+            &user.id,
+            "source.replaced",
+            Some(sid.as_str()),
+            Some(&json!({
+                "old_sha256": existing.sha256,
+                "new_sha256": sha256,
+                "filename":   filename,
+            })),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Return the refreshed row so the client can re-render immediately.
+    let updated = s
+        .ctx
+        .db
+        .get_source_in(&user.tenant, &sid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or(ApiError::NotFound)?;
+    info!(id = %sid, mime = %mime, "source replaced; ingest re-enqueued");
+    Ok(Json(updated))
+}
+
 // ============================================================================
 // folders + move
 // ============================================================================

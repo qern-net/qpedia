@@ -161,6 +161,45 @@ impl PgStore {
         Ok(())
     }
 
+    /// Reset a source row for a replace-in-place re-upload. The public
+    /// slug, folder_path, ACL, and created_at are preserved; the file
+    /// identity (filename / mime / sha256 / size) is overwritten and
+    /// the classification / language / ingested_at are cleared so the
+    /// pipeline can re-run from `Pending` against the new bytes.
+    pub async fn replace_source_blob(
+        &self,
+        tenant: &Tenant,
+        slug: &SourceId,
+        filename: &str,
+        mime: &str,
+        sha256: &str,
+        size_bytes: u64,
+    ) -> Result<()> {
+        let mut tx = self.begin_for(tenant).await?;
+        sqlx::query(
+            "UPDATE sources SET \
+                 filename       = $1, \
+                 mime           = $2, \
+                 sha256         = $3, \
+                 size_bytes     = $4, \
+                 status         = 'pending', \
+                 classification = NULL, \
+                 language       = NULL, \
+                 ingested_at    = NULL \
+             WHERE slug = $5",
+        )
+        .bind(filename)
+        .bind(mime)
+        .bind(sha256)
+        .bind(size_bytes as i64)
+        .bind(slug.as_str())
+        .execute(&mut *tx)
+        .await
+        .context("replace_source_blob")?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn delete_source(&self, tenant: &Tenant, slug: &SourceId) -> Result<()> {
         let mut tx = self.begin_for(tenant).await?;
         sqlx::query("DELETE FROM sources WHERE slug = $1")

@@ -348,6 +348,10 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
             "/api/v1/sources/:id/original",
             get(routes::download_source_original),
         )
+        .route(
+            "/api/v1/sources/:id/replace",
+            post(routes::replace_source).layer(DefaultBodyLimit::max(upload_limit)),
+        )
         .route("/api/v1/sources/:id/move", post(routes::move_source))
         .route(
             "/api/v1/folders",

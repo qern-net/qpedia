@@ -73,6 +73,20 @@ export async function deleteSource(id: string): Promise<{ job_id: string }> {
   return json<{ job_id: string }>(await fetch(`/api/v1/sources/${id}`, { method: 'DELETE' }));
 }
 
+/**
+ * Replace a source's file in place. Keeps the slug, folder, and ACL;
+ * the pipeline re-runs from Pending so the wiki agent updates the
+ * already-existing pages that reference this source_id instead of
+ * creating duplicates. Identical bytes are a no-op.
+ */
+export async function replaceSource(id: string, file: File): Promise<Source> {
+  const fd = new FormData();
+  fd.append('file', file);
+  return json<Source>(
+    await fetch(`/api/v1/sources/${id}/replace`, { method: 'POST', body: fd })
+  );
+}
+
 /** Returns the URL for downloading the original file. Use as href or window.open. */
 export function sourceOriginalUrl(id: string): string {
   return `/api/v1/sources/${id}/original`;

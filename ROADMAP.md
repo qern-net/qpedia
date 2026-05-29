@@ -56,7 +56,7 @@ piece; don't start until the prior shipped.
 
 | # | Item | Repo | Notes |
 |---|---|---|---|
-| 2.1 | **Source replace-in-place** — re-upload a file with the same slug, cascade through wiki updates. Common operator need; today you delete + re-upload and lose the slug. | qpedia | ⚪ |
+| 2.1 | **Source replace-in-place** — re-upload a file with the same slug, cascade through wiki updates. Common operator need; today you delete + re-upload and lose the slug. | qpedia | ✅ |
 | 2.2 | **Bulk ingest UX** — drag a folder from the OS into the tree; auto-creates pinned subfolders mirroring the structure, uploads everything. Big leap in onboarding feel. | qpedia | ⚪ |
 | 2.3 | **GDrive connector** — the framework + extension points exist in `qpedia-connectors`. Validate Confluence's pattern on a second concrete connector. *Lives in OSS.* | qpedia | ⚪ |
 | 2.4 | **SharePoint Online connector** | qpedia-pvt | ⚪ (premium) |

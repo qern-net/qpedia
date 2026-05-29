@@ -8,7 +8,18 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ## [Unreleased]
 
-Work in flight, none yet released. See [`ROADMAP.md`](ROADMAP.md).
+### Added
+
+- **Source replace-in-place** (Band 2.1). New
+  `POST /api/v1/sources/:id/replace` multipart endpoint and matching
+  Replace button on each source row. Same slug, same folder, same ACL
+  are preserved; only the underlying bytes (and the metadata derived
+  from them — filename, mime, sha256, size) are overwritten and the
+  ingest pipeline re-runs from `Pending`. Existing wiki pages that
+  reference this `source_id` are refreshed by the agent's
+  `propose_patch` instead of being orphaned by a delete + re-upload.
+  Identical bytes are a no-op (returns 200 with the unchanged row).
+  Audited as `source.replaced`.
 
 ## [1.0.1] — 2026-05-28
 
