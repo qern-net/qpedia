@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Qpedia</title>
+  <!-- Primary lockup: sky mark on slate-900 tile -->
+  <rect width="64" height="64" rx="14" fill="#0f172a"/>
+  <!-- Q ring — nudged up-left for optical centering -->
+  <circle cx="29" cy="28" r="17" fill="none" stroke="#38bdf8" stroke-width="4.5" stroke-linecap="round"/>
+  <!-- Tail crossing ring at 45° lower-right (inside to outside) -->
+  <line x1="35" y1="34" x2="45" y2="44" stroke="#38bdf8" stroke-width="4.5" stroke-linecap="round"/>
+  <!-- 4-point spark at tail end: × shape centered at (45,44) -->
+  <line x1="42.5" y1="41.5" x2="47.5" y2="46.5" stroke="#38bdf8" stroke-width="4.5" stroke-linecap="round"/>
+  <line x1="47.5" y1="41.5" x2="42.5" y2="46.5" stroke="#38bdf8" stroke-width="4.5" stroke-linecap="round"/>
+</svg>

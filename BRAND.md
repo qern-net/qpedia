@@ -89,24 +89,29 @@ mark on `#0f172a` tile.
 
 ## 3. Favicon & app-icon asset set
 
-Produce all of these from one master vector. Square, centered, Primary
-lockup (dark tile) unless noted.
+Shipped in `web/static/` (SvelteKit copies it to the build root; the
+`<head>` suite in `app.html` + `site.webmanifest` reference them). Square,
+centered, Primary lockup (dark tile) unless noted.
 
 | File | Size | Format | Where it's used |
 |---|---|---|---|
-| `favicon.svg` | vector | SVG | Modern browser tabs |
-| `favicon.ico` | 16/32/48 | ICO (multi-res) | Legacy tabs, bookmarks |
+| `favicon.svg` | vector | SVG | Modern browser tabs (primary) |
 | `favicon-32.png` | 32×32 | PNG | Fallback tab icon |
 | `apple-touch-icon.png` | 180×180 | PNG (no alpha) | iOS home screen |
 | `icon-192.png` | 192×192 | PNG | PWA manifest |
-| `icon-512.png` | 512×512 | PNG | PWA manifest, splash |
-| `maskable-512.png` | 512×512 | PNG | PWA maskable — mark inside the **central 80% safe circle**, tile bleeds to edges |
+| `icon-512.png` | 512×512 | PNG | PWA manifest, splash, **OAuth icon source** |
+| `maskable-512.png` | 512×512 | PNG | PWA maskable — mark inside the central safe circle, tile bleeds to edges |
+| `site.webmanifest` | — | JSON | PWA manifest |
 
 Notes:
-- **Tiny sizes** (16/32): drop the spark detail if it muddies — ship a
-  simplified ring-only "Q" below 24px so it stays crisp.
-- **`apple-touch-icon`**: no transparency (iOS adds its own corners); use the
-  solid dark tile edge-to-edge.
+- **OAuth registrations** downscale `icon-512.png` to each provider's size
+  (Google ~120, Entra ~215, Slack 512) — same Primary lockup everywhere.
+- **`favicon.ico`** (legacy multi-res) is optional; the SVG + 32px PNG cover
+  every current browser. Add it only for IE / old-bookmark support.
+- **Tiny sizes** (≤24px): if the spark muddies, ship a ring-only "Q"
+  variant — the ring alone still reads as the mark.
+- **`apple-touch-icon`**: no transparency (iOS adds its own corners); solid
+  dark tile edge-to-edge. ✓ as produced.
 
 ---
 
