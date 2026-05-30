@@ -31,6 +31,16 @@ pub struct Member {
 }
 
 #[derive(Debug, Clone)]
+pub struct WorkspaceDomain {
+    pub id: i64,
+    pub domain: String,
+    pub verified: bool,
+    pub verified_via: Option<String>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub created_by: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Invite {
     pub id: i64,
     pub tenant: Tenant,
@@ -285,6 +295,127 @@ impl PgStore {
             .context("mark invite accepted")?;
         tx.commit().await?;
         Ok(invite.tenant)
+    }
+}
+
+impl PgStore {
+    // ---------- domain ownership (Band 4.2) ----------
+
+    /// Claim a domain for a workspace (unverified). Idempotent on
+    /// (tenant, domain). `token` is the DNS-method nonce (ignored by the
+    /// IdP-admin methods). Tenant-scoped.
+    pub async fn claim_domain(
+        &self,
+        tenant: &Tenant,
+        domain: &str,
+        created_by: &str,
+        token: &str,
+    ) -> Result<i64> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let mut tx = self.begin_for(tenant).await?;
+        let row = sqlx::query(
+            "INSERT INTO workspace_domains (tenant_id, domain, verification_token, created_by) \
+             VALUES ($1,$2,$3,$4) \
+             ON CONFLICT (tenant_id, domain) DO UPDATE SET verification_token = EXCLUDED.verification_token \
+             RETURNING id",
+        )
+        .bind(tenant.as_str())
+        .bind(&domain)
+        .bind(token)
+        .bind(created_by)
+        .fetch_one(&mut *tx)
+        .await
+        .context("claim_domain")?;
+        tx.commit().await?;
+        Ok(row.try_get::<i64, _>("id")?)
+    }
+
+    /// Mark a claimed domain verified via the given method. Fails (unique
+    /// violation) if another workspace already verified the same domain —
+    /// the storage-level partial unique index enforces this even though
+    /// RLS hides the other workspace's row. `via` ∈ {dns, microsoft_entra,
+    /// google_workspace, sso}.
+    pub async fn verify_domain(&self, tenant: &Tenant, domain: &str, via: &str) -> Result<()> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let mut tx = self.begin_for(tenant).await?;
+        let res = sqlx::query(
+            "UPDATE workspace_domains \
+             SET verified = TRUE, verified_via = $1, verified_at = now() \
+             WHERE domain = $2",
+        )
+        .bind(via)
+        .bind(&domain)
+        .execute(&mut *tx)
+        .await;
+        match res {
+            Ok(r) if r.rows_affected() == 0 => {
+                return Err(anyhow!("no claim for {domain} in this workspace"))
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Unique violation on the verified index = claimed elsewhere.
+                if let Some(db) = e.as_database_error() {
+                    if db.is_unique_violation() {
+                        return Err(anyhow!(
+                            "{domain} is already verified by another workspace"
+                        ));
+                    }
+                }
+                return Err(anyhow!("verify_domain: {e}"));
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_workspace_domains(&self, tenant: &Tenant) -> Result<Vec<WorkspaceDomain>> {
+        let mut tx = self.begin_for(tenant).await?;
+        let rows = sqlx::query(
+            "SELECT id, domain, verified, verified_via, verified_at, created_by \
+             FROM workspace_domains ORDER BY domain",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .context("list_workspace_domains")?;
+        tx.commit().await.ok();
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkspaceDomain {
+                id: r.get("id"),
+                domain: r.get("domain"),
+                verified: r.get("verified"),
+                verified_via: r.try_get("verified_via").ok(),
+                verified_at: r.try_get("verified_at").ok(),
+                created_by: r.get("created_by"),
+            })
+            .collect())
+    }
+
+    /// The workspace that has *verified* this domain, if any (cross-tenant;
+    /// admin pool). Used to route a corp email to its org / block a
+    /// duplicate claim.
+    pub async fn domain_owner(&self, domain: &str) -> Result<Option<Tenant>> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT tenant_id FROM workspace_domains WHERE domain = $1 AND verified LIMIT 1",
+        )
+        .bind(&domain)
+        .fetch_optional(self.pool())
+        .await
+        .context("domain_owner")?;
+        Ok(row.map(Tenant::new))
+    }
+
+    pub async fn delete_domain(&self, tenant: &Tenant, domain: &str) -> Result<()> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let mut tx = self.begin_for(tenant).await?;
+        sqlx::query("DELETE FROM workspace_domains WHERE domain = $1")
+            .bind(&domain)
+            .execute(&mut *tx)
+            .await
+            .context("delete_domain")?;
+        tx.commit().await?;
+        Ok(())
     }
 }
 

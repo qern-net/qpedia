@@ -10,6 +10,22 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Workspace domain ownership foundation** (Band 4.2, in progress).
+  New `workspace_domains` table (migration 0007, RLS-isolated) with a
+  partial unique index so a domain can be *claimed* by many workspaces
+  but *verified* by only one — enforced at the storage layer, so a
+  second workspace's verify fails closed even under RLS row-hiding.
+  PgStore: `claim_domain`, `verify_domain` (via = `dns` |
+  `microsoft_entra` | `google_workspace` | `sso`), `domain_owner`
+  (cross-tenant), `list_workspace_domains`, `delete_domain`. The
+  verification *methods* themselves (the Microsoft/Google IdP-admin
+  checks and the DNS resolver) are the next step. `AUTH-DESIGN.md`
+  reworked: **IdP-admin auto-verification** is now the primary path
+  (Entra `wids` Global-Admin + Graph `verifiedDomains`; Google Directory
+  API `domains.list`), with **DNS-TXT** as the fallback — and the
+  security rule restated: claim only IdP-*verified* domains, gated on
+  confirming the user is a directory admin.
+
 - **Team / org workspaces, invite-only** (Band 4.1 — `AUTH-DESIGN.md`
   stage S1). A user can create an **organization** workspace (they
   become its owner) and invite teammates by email; the invitee accepts

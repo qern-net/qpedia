@@ -26,16 +26,44 @@ whole org is forced onto that SSO"* — has a **domain-takeover hole**:
 > attacker's IdP — harvesting credentials or silently joining their
 > accounts to the attacker's org.
 
-The fix is non-negotiable and is exactly what every serious SaaS does:
+The fix is non-negotiable: **a domain must be *verified* before any
+domain-scoped privilege** (auto-join, SSO enforcement). What varies is
+*how* you verify. Several methods, strongest/easiest first:
 
-> **Domain verification (DNS TXT record) is required before any
-> domain-scoped privilege.** You may only enable domain auto-join or
-> enforce SSO for a domain whose ownership you've proven by placing a
-> one-time token in its DNS. Only someone with control of `acme.com`'s
-> DNS (i.e. real IT) can do that.
+### Verification methods
 
-With that gate, the rest of the sketched flow is fine: verify domain →
-configure SSO → test by logging in through it → that confirms you as the
+1. **IdP-admin auto-verification (preferred for Google / Microsoft).**
+   The claimant signs in via the provider and we confirm — from the
+   provider's *authoritative* API — that they are an **admin of that
+   directory**, then read the directory's *already-verified* domains.
+   - **Microsoft Entra / O365:** the OAuth token's `wids` claim lists
+     directory-role template IDs; Global Administrator is the fixed GUID
+     `62e90394-69f5-4237-9190-012177145e10`. Microsoft Graph
+     `/organization` returns `verifiedDomains`. Admin + verified-domain
+     in one round-trip.
+   - **Google Workspace:** request the `admin.directory.domain.readonly`
+     scope; only a Workspace admin can call Directory API `domains.list`
+     for the customer. Success ⇒ admin; the returned domains are
+     Google-verified.
+
+   **The subtlety that makes this safe (equal-or-better than DNS):** we
+   claim only domains the IdP itself reports as **verified**, *gated on
+   confirming the user is an admin of that directory*. We piggyback on
+   Microsoft/Google having already verified the domain; we just confirm
+   admin status. A mere member (not Global Admin) gets nothing. Never
+   claim a domain from the user's email address alone.
+
+2. **SSO-config proof (Okta / Ping / generic SAML-OIDC).** Wiring up the
+   SSO connection requires admin rights *in the IdP*, so completing the
+   config + a successful test login is itself the proof. Folds into 4.3.
+
+3. **DNS TXT (universal fallback).** Place `qpedia-verify=<nonce>` in the
+   domain's DNS. For self-hosted / custom domains / smaller IdPs, or any
+   time the admin APIs aren't available. Only someone controlling the
+   domain's DNS (real IT) can do it.
+
+With *any* of these as the gate, the rest of the sketched flow is fine:
+verify domain → configure SSO → test login → that confirms you as the
 org admin → enforce SSO for the verified domain.
 
 ---
@@ -127,11 +155,13 @@ safe.
 | 9 | acme employee | verified, SSO enforced | first SSO login | JIT-provisioned as member | membership auto-created |
 | 10 | alice@acme (pre-existing password user) | becomes verified+enforced | next login via SSO | account **links** by verified email; data kept | email-keyed user identity |
 | 11 | ex-employee | verified, SSO enforced | login after IdP removal | **denied** | IdP rejects; (SCIM/next-login revokes membership) |
-| 12 | acme owner | verified | remove DNS TXT / unverify | SSO enforcement **suspends** | periodic re-check; enforcement requires live verification |
+| 12 | acme owner | verified | verification lapses (DNS TXT removed / admin loses role) | SSO enforcement **suspends** | periodic re-check; enforcement requires live verification |
 | 13 | user | — | log in with GitHub (email private) | individual (no domain known) | can't domain-match without an email |
 | 14 | member of N orgs | — | log in | lands in last-used workspace; can switch | workspace switcher; session carries active workspace |
 | 15 | org admin | — | disable enforcement | members may use other methods again | reversible policy flag |
 | 16 | attacker | verified domain | replays another user's SSO assertion | rejected | standard OIDC/SAML signature + nonce/audience checks |
+| 17 | **Workspace Global Admin** | corp (Entra/Google) | claim domain via IdP-admin login | domain **instantly verified**; claimant = owner | `wids`=Global-Admin / Directory-API success; domains read from the IdP's *verified* list, not the email |
+| 18 | **non-admin member** | corp (Entra/Google) | tries IdP-admin verification | **denied** | `wids` lacks the admin role / Directory API call fails for non-admins |
 
 **Invariants to test:**
 - No path places a user in a workspace they didn't create, get invited
@@ -183,8 +213,8 @@ Each stage ships and is testable on its own.
 | Stage | Scope | Notes |
 |---|---|---|
 | **S0 (done)** | Everyone individual; owner-admin of `u-<uid>`; no env-var domains. | Current state after this commit. |
-| **S1** | `users` + `workspace_members` tables; workspace **switcher** UI; "Create org" → org workspace with the creator as owner; **invites** (email + token). | Org via invite only — no domain magic yet, so zero takeover surface. Delivers real teams immediately. |
-| **S2** | `workspace_domains` + **DNS-TXT verification**. Verified-domain **auto-join** (optional per org). | The security gate. Pure qpedia code. |
+| **S1 (done)** | `workspace_members` + `workspace_invites`; workspace **switcher** UI; "Create org" → org workspace with the creator as owner; **invites** (email + token). | Org via invite only — no domain magic, zero takeover surface. |
+| **S2** | `workspace_domains` + verification. **IdP-admin auto-verification** for Microsoft Entra (`wids` Global-Admin + Graph `verifiedDomains`) and Google Workspace (Directory API `domains.list`) as the primary path; **DNS-TXT** as the fallback for self-hosted / custom domains / smaller IdPs. Verified-domain **auto-join** (optional per org). | The security gate. Per §0, claim only IdP-*verified* domains, gated on confirming admin. |
 | **S3** | `workspace_sso` via **GCIP or WorkOS**; test-login; **enforce SSO** for verified domains; JIT provisioning; account linking. | Federation bought, policy built. Implements the full sketch — safely. |
 | **S4** | SCIM deprovisioning; audit of all auth events (already have `EventSink`); admin portal. | Enterprise polish. |
 

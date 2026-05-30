@@ -323,6 +323,27 @@ async fn smoke_full_lifecycle() {
     db.remove_member(&org, &user_b).await.expect("remove member b");
     assert_eq!(db.list_members(&org).await.unwrap().len(), 1);
 
+    // ── Workspace domains: claim + verify + single-verified-owner ────
+    let dom = format!("acme-{}.example", &tenant.as_str()[3..]);
+    db.claim_domain(&org, &dom, &user_a, "tok-dns").await.expect("claim domain");
+    db.verify_domain(&org, &dom, "microsoft_entra").await.expect("verify domain");
+    assert_eq!(
+        db.domain_owner(&dom).await.unwrap().map(|t| t.as_str().to_string()),
+        Some(org.as_str().to_string())
+    );
+    let listed = db.list_workspace_domains(&org).await.unwrap();
+    assert!(listed.iter().any(|d| d.domain == dom && d.verified
+        && d.verified_via.as_deref() == Some("microsoft_entra")));
+
+    // A second workspace may CLAIM the same domain but cannot VERIFY it.
+    let org2 = Tenant::new(format!("org2-{}", &tenant.as_str()[3..]));
+    db.create_org_workspace(&org2, "Other", &user_a, Some("a@x.com")).await.expect("create org2");
+    db.claim_domain(&org2, &dom, &user_a, "tok-dns2").await.expect("claim in org2 ok");
+    assert!(
+        db.verify_domain(&org2, &dom, "dns").await.is_err(),
+        "a domain verified by org cannot be verified by org2"
+    );
+
     // ── Wiki: pgvector + tsvector round trip ─────────────────────────
     let page = WikiPageUpsert {
         page_id: "ci-page".into(),

@@ -30,7 +30,7 @@ pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slu
 pub use sessions::SessionRow;
 pub use tenants::TenantRow;
 pub use wiki::{SearchHit, WikiPageUpsert};
-pub use workspaces::{Invite, Member, WorkspaceMembership};
+pub use workspaces::{Invite, Member, WorkspaceDomain, WorkspaceMembership};
 
 use anyhow::{Context, Result};
 use qpedia_core::tenant::Tenant;
