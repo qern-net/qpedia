@@ -215,6 +215,20 @@ pub(crate) async fn firebase_login_route(
     let token = auth::random_token(32);
     let token_hash = auth::hash_token(&token);
     let user_id = format!("firebase:{}", claims.sub);
+
+    // Ensure a membership row exists for the resolved workspace — owner of
+    // your own individual space, member otherwise. Idempotent.
+    let role = if tenant.as_str() == individual_tenant_id(&claims.sub) {
+        "owner"
+    } else {
+        "member"
+    };
+    let _ = s
+        .ctx
+        .db
+        .ensure_membership(&tenant, &user_id, claims.email.as_deref(), role)
+        .await;
+
     mint_session(
         &s.ctx.db,
         &token_hash,
@@ -1463,6 +1477,329 @@ fn urlencode_q(s: &str) -> String {
         }
     }
     out
+}
+
+// ============================================================================
+// workspaces — membership, org creation, invites (Band 4.1)
+// ============================================================================
+
+/// Map a membership role to the session groups it grants *within that
+/// workspace*. RLS scopes the power to the tenant, so "admin" here means
+/// "admin of this workspace," never cross-tenant.
+fn role_to_groups(role: &str) -> Vec<String> {
+    match role {
+        "owner" | "admin" => vec!["admin".to_string()],
+        _ => vec!["member".to_string()],
+    }
+}
+
+/// Slugify an org name into a tenant id, avoiding the individual (`u-`)
+/// and reserved (`default`) namespaces so the workspace-kind heuristic
+/// stays correct.
+fn org_slug_base(name: &str) -> String {
+    let base = qpedia_pg_store::slugify(name);
+    if base.starts_with("u-") || base == "default" {
+        format!("team-{base}")
+    } else {
+        base
+    }
+}
+
+/// List the workspaces the caller belongs to, plus which is active.
+pub(crate) async fn list_workspaces(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    let rows = s
+        .ctx
+        .db
+        .list_user_workspaces(&user.id)
+        .await
+        .map_err(ApiError::Internal)?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|w| {
+            json!({
+                "tenant": w.tenant.as_str(),
+                "name": w.name,
+                "role": w.role,
+                "kind": w.kind,
+                "active": w.tenant.as_str() == user.tenant.as_str(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "workspaces": items, "active": user.tenant.as_str() })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateWorkspaceBody {
+    name: String,
+}
+
+/// Create an org workspace; the caller becomes its owner.
+pub(crate) async fn create_workspace(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<CreateWorkspaceBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::Bad("workspace name required".into()));
+    }
+    // Unique tenant slug.
+    let base = org_slug_base(name);
+    let mut slug = base.clone();
+    let mut n = 2u32;
+    loop {
+        let t = qpedia_core::tenant::Tenant::new(slug.clone());
+        if s.ctx.db.get_tenant(&t).await.map_err(ApiError::Internal)?.is_none() {
+            break;
+        }
+        slug = format!("{base}-{n}");
+        n += 1;
+        if n > 1000 {
+            return Err(ApiError::Internal(anyhow::anyhow!("no free workspace slug")));
+        }
+    }
+    let tenant = qpedia_core::tenant::Tenant::new(slug);
+    s.ctx
+        .db
+        .create_org_workspace(&tenant, name, &user.id, user.email.as_deref())
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&tenant, &user.id, "workspace.create", Some(tenant.as_str()), Some(&json!({"name": name})))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "tenant": tenant.as_str(), "name": name, "role": "owner" })))
+}
+
+/// Switch the active workspace. Verifies membership, then re-points the
+/// session cookie at the target tenant with the role's groups.
+pub(crate) async fn switch_workspace(
+    State(s): State<AppState>,
+    user: User,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let target = qpedia_core::tenant::Tenant::new(id);
+    let role = s
+        .ctx
+        .db
+        .membership_role(&target, &user.id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or(ApiError::Forbidden)?; // not a member
+    let token = auth::read_session_token(&headers).ok_or(ApiError::Forbidden)?;
+    s.ctx
+        .db
+        .update_session_workspace(&auth::hash_token(&token), &target, &role_to_groups(&role))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "tenant": target.as_str(), "role": role })))
+}
+
+pub(crate) async fn list_workspace_members(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let members = s.ctx.db.list_members(&user.tenant).await.map_err(ApiError::Internal)?;
+    let items: Vec<Value> = members
+        .into_iter()
+        .map(|m| {
+            json!({
+                "user_id": m.user_id,
+                "email": m.email,
+                "role": m.role,
+                "joined_at": m.created_at.to_rfc3339(),
+                "is_you": m.user_id == user.id,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+pub(crate) async fn remove_workspace_member(
+    State(s): State<AppState>,
+    user: User,
+    Path(target_user): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    s.ctx
+        .db
+        .remove_member(&user.tenant, &target_user)
+        .await
+        .map_err(|e| ApiError::Bad(e.to_string()))?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "workspace.member.remove", Some(&target_user), None)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "removed": target_user })))
+}
+
+const INVITE_TTL_SECS: i64 = 14 * 24 * 60 * 60; // 14 days
+
+#[derive(Deserialize)]
+pub(crate) struct CreateInviteBody {
+    email: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+pub(crate) async fn create_workspace_invite(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<CreateInviteBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let email = body.email.trim().to_ascii_lowercase();
+    if !email.contains('@') {
+        return Err(ApiError::Bad("valid email required".into()));
+    }
+    let role = match body.role.as_deref() {
+        Some("admin") => "admin",
+        _ => "member",
+    };
+    // Individual workspaces can't have other members — invites are an
+    // org concept.
+    if user.tenant.as_str().starts_with(INDIVIDUAL_TENANT_PREFIX) {
+        return Err(ApiError::Bad(
+            "create an organization workspace before inviting people".into(),
+        ));
+    }
+    let token = auth::random_token(24);
+    let id = s
+        .ctx
+        .db
+        .create_invite(&user.tenant, &email, role, &token, &user.id, INVITE_TTL_SECS)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "workspace.invite.create", Some(&email), Some(&json!({"role": role})))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({
+        "id": id,
+        "email": email,
+        "role": role,
+        // The accept link the inviter shares. (Email delivery is a
+        // follow-up; for now the admin copies this.)
+        "invite_path": format!("/invite/{token}"),
+        "token": token,
+    })))
+}
+
+pub(crate) async fn list_workspace_invites(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let invites = s.ctx.db.list_invites(&user.tenant).await.map_err(ApiError::Internal)?;
+    let items: Vec<Value> = invites
+        .into_iter()
+        .map(|i| {
+            json!({
+                "id": i.id,
+                "email": i.email,
+                "role": i.role,
+                "expires_at": i.expires_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+pub(crate) async fn delete_workspace_invite(
+    State(s): State<AppState>,
+    user: User,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    s.ctx.db.delete_invite(&user.tenant, id).await.map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "deleted": id })))
+}
+
+/// Preview an invite by token (for the accept page). Requires login so
+/// we can show whether the invitee's email matches.
+pub(crate) async fn get_invite(
+    State(s): State<AppState>,
+    _user: User,
+    Path(token): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let invite = s
+        .ctx
+        .db
+        .get_invite_by_token(&token)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or(ApiError::NotFound)?;
+    let name = s
+        .ctx
+        .db
+        .get_tenant(&invite.tenant)
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.display_name)
+        .unwrap_or_else(|| invite.tenant.as_str().to_string());
+    let valid = invite.accepted_at.is_none() && invite.expires_at > chrono::Utc::now();
+    Ok(Json(json!({
+        "workspace": name,
+        "tenant": invite.tenant.as_str(),
+        "role": invite.role,
+        "email": invite.email,
+        "valid": valid,
+    })))
+}
+
+/// Accept an invite and switch the session into the joined workspace.
+pub(crate) async fn accept_invite(
+    State(s): State<AppState>,
+    user: User,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let tenant = s
+        .ctx
+        .db
+        .accept_invite(&token, &user.id, user.email.as_deref())
+        .await
+        .map_err(|e| ApiError::Bad(e.to_string()))?;
+    let role = s
+        .ctx
+        .db
+        .membership_role(&tenant, &user.id)
+        .await
+        .map_err(ApiError::Internal)?
+        .unwrap_or_else(|| "member".to_string());
+    // Switch the session into the workspace they just joined.
+    if let Some(tok) = auth::read_session_token(&headers) {
+        let _ = s
+            .ctx
+            .db
+            .update_session_workspace(&auth::hash_token(&tok), &tenant, &role_to_groups(&role))
+            .await;
+    }
+    s.ctx
+        .db
+        .write_audit(&tenant, &user.id, "workspace.invite.accept", Some(tenant.as_str()), None)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "tenant": tenant.as_str(), "role": role })))
 }
 
 // ---------- first-run bootstrap ----------

@@ -262,6 +262,67 @@ async fn smoke_full_lifecycle() {
         "grant should be gone after delete"
     );
 
+    // ── Workspaces: membership, org creation, invites (Band 4.1) ─────
+    let user_a = format!("firebase:{}", &tenant.as_str()[3..]); // arbitrary stable id
+    // Owner membership in this (acting as individual) workspace.
+    db.ensure_membership(&tenant, &user_a, Some("a@x.com"), "owner")
+        .await
+        .expect("ensure membership");
+    assert_eq!(
+        db.membership_role(&tenant, &user_a).await.unwrap().as_deref(),
+        Some("owner")
+    );
+    let my_ws = db.list_user_workspaces(&user_a).await.expect("list workspaces");
+    assert!(my_ws.iter().any(|w| w.tenant.as_str() == tenant.as_str()));
+
+    // Create an org workspace; owner is user_a.
+    let org = Tenant::new(format!("org-{}", &tenant.as_str()[3..]));
+    db.create_org_workspace(&org, "Acme", &user_a, Some("a@x.com"))
+        .await
+        .expect("create org");
+    assert_eq!(
+        db.membership_role(&org, &user_a).await.unwrap().as_deref(),
+        Some("owner")
+    );
+    assert_eq!(
+        db.list_user_workspaces(&user_a).await.unwrap().len(),
+        2,
+        "user_a now belongs to individual + org"
+    );
+
+    // Invite user_b into the org; accept it.
+    let token = format!("tok-{}", &tenant.as_str()[3..]);
+    db.create_invite(&org, "b@x.com", "member", &token, &user_a, 3600)
+        .await
+        .expect("create invite");
+    assert_eq!(db.list_invites(&org).await.unwrap().len(), 1);
+    let preview = db.get_invite_by_token(&token).await.unwrap().expect("invite exists");
+    assert_eq!(preview.email, "b@x.com");
+
+    let user_b = format!("firebase:b-{}", &tenant.as_str()[3..]);
+    let joined = db
+        .accept_invite(&token, &user_b, Some("b@x.com"))
+        .await
+        .expect("accept invite");
+    assert_eq!(joined.as_str(), org.as_str());
+    assert_eq!(
+        db.membership_role(&org, &user_b).await.unwrap().as_deref(),
+        Some("member")
+    );
+    // Re-accepting fails (already accepted).
+    assert!(db.accept_invite(&token, &user_b, Some("b@x.com")).await.is_err());
+    // Pending list is now empty.
+    assert_eq!(db.list_invites(&org).await.unwrap().len(), 0);
+
+    // org now has 2 members; can't strand it ownerless.
+    assert_eq!(db.list_members(&org).await.unwrap().len(), 2);
+    assert!(
+        db.remove_member(&org, &user_a).await.is_err(),
+        "removing the last owner must fail"
+    );
+    db.remove_member(&org, &user_b).await.expect("remove member b");
+    assert_eq!(db.list_members(&org).await.unwrap().len(), 1);
+
     // ── Wiki: pgvector + tsvector round trip ─────────────────────────
     let page = WikiPageUpsert {
         page_id: "ci-page".into(),

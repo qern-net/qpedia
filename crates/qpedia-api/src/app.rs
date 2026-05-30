@@ -420,6 +420,35 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
             get(routes::google_callback),
         )
         .route("/api/v1/admin/bootstrap", post(routes::bootstrap_tenant))
+        // ---- workspaces (Band 4.1) ----
+        .route(
+            "/api/v1/workspaces",
+            get(routes::list_workspaces).post(routes::create_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/:id/switch",
+            post(routes::switch_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/members",
+            get(routes::list_workspace_members),
+        )
+        .route(
+            "/api/v1/workspaces/members/:user_id",
+            axum::routing::delete(routes::remove_workspace_member),
+        )
+        .route(
+            "/api/v1/workspaces/invites",
+            get(routes::list_workspace_invites).post(routes::create_workspace_invite),
+        )
+        .route(
+            "/api/v1/workspaces/invites/:id",
+            axum::routing::delete(routes::delete_workspace_invite),
+        )
+        .route(
+            "/api/v1/invites/:token",
+            get(routes::get_invite).post(routes::accept_invite),
+        )
 }
 
 // ---------- background spawns --------------------------------------------------

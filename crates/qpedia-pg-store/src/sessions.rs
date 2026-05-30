@@ -89,6 +89,28 @@ impl PgStore {
         }))
     }
 
+    /// Point an existing session at a different workspace (and update the
+    /// groups derived from the user's role there). Used by the workspace
+    /// switcher. Admin pool: the lookup-by-token isn't tenant-scoped, and
+    /// the new tenant may differ from the old.
+    pub async fn update_session_workspace(
+        &self,
+        token_hash: &str,
+        tenant: &Tenant,
+        groups: &[String],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET tenant_id = $1, groups = $2 WHERE token_hash = $3",
+        )
+        .bind(tenant.as_str())
+        .bind(groups)
+        .bind(token_hash)
+        .execute(self.pool())
+        .await
+        .context("update_session_workspace")?;
+        Ok(())
+    }
+
     pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
             .bind(token_hash)
