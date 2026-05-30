@@ -341,6 +341,7 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
     Router::new()
         .route("/healthz", get(routes::healthz))
         .route("/api/v1/version", get(routes::version))
+        .route("/api/v1/auth/config", get(routes::auth_config))
         .route("/api/v1/auth/me", get(routes::auth_me))
         .route("/auth/login", get(routes::auth_login_route))
         .route("/auth/callback", get(routes::auth_callback_route))

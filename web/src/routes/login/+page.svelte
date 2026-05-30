@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
+  import { getAuthConfig, type AuthConfig } from '$lib/api';
   import {
     firebaseConfig,
     signInWith,
@@ -9,11 +10,14 @@
   } from '$lib/firebase';
 
   let configured = $state(true);
+  let mode = $state<AuthConfig['mode'] | null>(null);
   let busy = $state<ProviderId | null>(null);
   let error = $state<string | null>(null);
 
-  onMount(() => {
+  onMount(async () => {
     configured = firebaseConfig() !== null;
+    try { mode = (await getAuthConfig()).mode; }
+    catch { mode = null; }
   });
 
   type ProviderButton = {
@@ -55,13 +59,26 @@
 <div class="login-shell">
   <h1>Sign in to Qpedia</h1>
 
-  {#if !configured}
+  {#if mode === 'dev'}
     <div class="card muted">
-      <p>Firebase auth isn't configured.</p>
+      <p>The backend is in <strong>dev mode</strong> — every request is
+      <code>dev:admin</code>, no sign-in needed.</p>
+      <p><a href="/">Go to the app →</a></p>
+    </div>
+  {:else if mode === 'oidc'}
+    <div class="providers">
+      <button class="provider sso" onclick={() => (window.location.href = '/auth/login')}>
+        Continue with SSO
+      </button>
+    </div>
+  {:else if !configured}
+    <div class="card muted">
+      <p>Firebase auth isn't configured on the frontend build.</p>
       <p class="mono" style="font-size: 12px;">
         Set <code>VITE_FIREBASE_API_KEY</code>, <code>VITE_FIREBASE_AUTH_DOMAIN</code>,
-        and <code>VITE_FIREBASE_PROJECT_ID</code> at build time, plus
-        <code>QPEDIA_FIREBASE_PROJECT_ID</code> on the backend.
+        and <code>VITE_FIREBASE_PROJECT_ID</code> at build time (web/.env or
+        docker-compose build args), plus <code>QPEDIA_FIREBASE_PROJECT_ID</code>
+        on the backend.
       </p>
       <p>Running in dev mode? <a href="/">Go to the app</a> — every request is `dev:admin`.</p>
     </div>

@@ -35,7 +35,9 @@
         </span>
         <a href="/auth/logout" style="margin-left: 12px;">logout</a>
       {:else}
-        <a href="/auth/login">login</a>
+        <!-- /login is the universal front door; it adapts to the backend
+             auth mode (Firebase buttons, OIDC SSO, or dev notice). -->
+        <a href="/login">login</a>
       {/if}
     {/if}
   </header>

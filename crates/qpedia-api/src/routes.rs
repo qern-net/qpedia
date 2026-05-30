@@ -52,6 +52,21 @@ pub(crate) async fn version() -> Json<Value> {
 // auth routes
 // ============================================================================
 
+/// Public, unauthenticated: tells the frontend which login UI to show.
+/// `mode` is dev | firebase | oidc; `firebase` is whether a Firebase
+/// verifier is configured. The `/login` page routes off this.
+pub(crate) async fn auth_config(State(s): State<AppState>) -> Json<Value> {
+    let mode = match s.auth.mode {
+        AuthMode::Dev => "dev",
+        AuthMode::Session => "firebase",
+        AuthMode::Oidc(_) => "oidc",
+    };
+    Json(json!({
+        "mode": mode,
+        "firebase": s.auth.firebase.is_some(),
+    }))
+}
+
 pub(crate) async fn auth_me(user: User) -> Json<Value> {
     Json(json!({
         "id": user.id,

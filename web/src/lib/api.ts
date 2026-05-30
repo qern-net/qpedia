@@ -164,6 +164,15 @@ export async function getMe(): Promise<Me | null> {
   return r.json();
 }
 
+export type AuthConfig = { mode: 'dev' | 'firebase' | 'oidc'; firebase: boolean };
+
+/** Public — tells the SPA which login UI to render. */
+export async function getAuthConfig(): Promise<AuthConfig> {
+  const r = await fetch('/api/v1/auth/config');
+  if (!r.ok) throw new Error(`auth config ${r.status}`);
+  return r.json();
+}
+
 // ---------- admin: folder ACLs ----------
 
 export type FolderAcl = {

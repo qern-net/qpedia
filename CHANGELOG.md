@@ -26,6 +26,13 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
     `firebase.ts` also reads an optional `VITE_FIREBASE_APP_ID`.
   - `.env.example` documents the three modes (dev | firebase | oidc) and
     the new vars.
+  - **`/login` is now the universal front door.** New public
+    `GET /api/v1/auth/config` returns `{ mode, firebase }`; the header
+    "login" link points at `/login` (not the OIDC-only `/auth/login`),
+    and `/login` renders the right UI per mode — Firebase provider
+    buttons, an OIDC "Continue with SSO" button, or a dev-mode notice.
+    Fixes "OIDC routes not active in this auth mode" when signing in
+    under Firebase.
 
 - **Google Drive connector + SSO-aligned OAuth foundation** (Band 2.3).
   The second concrete connector after Confluence, plus the credential
