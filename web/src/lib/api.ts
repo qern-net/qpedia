@@ -300,6 +300,45 @@ export async function acceptInvite(token: string): Promise<{ tenant: string; rol
   return json(await fetch(`/api/v1/invites/${encodeURIComponent(token)}`, { method: 'POST' }));
 }
 
+// ---------- workspace domains (Band 4.2) ----------
+
+export type WorkspaceDomain = {
+  domain: string;
+  verified: boolean;
+  verified_via: string | null;
+  verified_at: string | null;
+};
+
+export async function listDomains(): Promise<{ items: WorkspaceDomain[] }> {
+  return json(await fetch('/api/v1/workspaces/domains'));
+}
+
+export async function addDomain(domain: string): Promise<{
+  domain: string;
+  verified: boolean;
+  txt_name: string;
+  txt_value: string;
+}> {
+  return json(
+    await fetch('/api/v1/workspaces/domains', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ domain })
+    })
+  );
+}
+
+export async function verifyDomain(domain: string): Promise<{ domain: string; verified: boolean; verified_via: string }> {
+  return json(
+    await fetch(`/api/v1/workspaces/domains/${encodeURIComponent(domain)}/verify`, { method: 'POST' })
+  );
+}
+
+export async function deleteDomain(domain: string): Promise<void> {
+  const r = await fetch(`/api/v1/workspaces/domains/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`delete domain: ${r.status}`);
+}
+
 // ---------- admin: connectors ----------
 
 export type Connector = {

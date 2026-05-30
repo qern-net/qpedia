@@ -449,6 +449,18 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
             "/api/v1/invites/:token",
             get(routes::get_invite).post(routes::accept_invite),
         )
+        .route(
+            "/api/v1/workspaces/domains",
+            get(routes::list_domains).post(routes::add_domain),
+        )
+        .route(
+            "/api/v1/workspaces/domains/:domain/verify",
+            post(routes::verify_domain),
+        )
+        .route(
+            "/api/v1/workspaces/domains/:domain",
+            axum::routing::delete(routes::delete_domain),
+        )
 }
 
 // ---------- background spawns --------------------------------------------------

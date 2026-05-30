@@ -16,12 +16,24 @@
     resumeStalledSources,
     setFolderAcl,
     triggerConnectorSync,
+    listWorkspaceMembers,
+    removeWorkspaceMember,
+    listWorkspaceInvites,
+    createWorkspaceInvite,
+    deleteWorkspaceInvite,
+    listDomains,
+    addDomain,
+    verifyDomain,
+    deleteDomain,
     type Connector,
     type Folder,
     type FolderAcl,
     type LintReport,
     type Me,
-    type Source
+    type Source,
+    type WorkspaceMember,
+    type WorkspaceInvite,
+    type WorkspaceDomain
   } from '$lib/api';
   import { page } from '$app/stores';
   import StatusChip from '$lib/components/StatusChip.svelte';
@@ -58,6 +70,21 @@
   let connectMsg = $state<string | null>(null);
   let gdriveFolder = $state('');
   let connecting = $state(false);
+
+  // Members & invites state
+  let members = $state<WorkspaceMember[]>([]);
+  let invites = $state<WorkspaceInvite[]>([]);
+  let membersError = $state<string | null>(null);
+  let inviteEmail = $state('');
+  let inviteRole = $state<'member' | 'admin'>('member');
+  let lastInviteLink = $state<string | null>(null);
+
+  // Domains state
+  let domains = $state<WorkspaceDomain[]>([]);
+  let domainsError = $state<string | null>(null);
+  let newDomain = $state('');
+  let pendingTxt = $state<{ name: string; value: string } | null>(null);
+  let verifyingDomain = $state<string | null>(null);
 
   // New / edit form state.
   let formPath = $state('/');
@@ -139,6 +166,82 @@
     }
   }
 
+  async function refreshMembers() {
+    membersError = null;
+    try {
+      members = (await listWorkspaceMembers()).items;
+      invites = (await listWorkspaceInvites()).items;
+    } catch (e: any) {
+      membersError = String(e?.message ?? e);
+    }
+  }
+
+  async function onInvite() {
+    membersError = null; lastInviteLink = null;
+    const email = inviteEmail.trim();
+    if (!email) return;
+    try {
+      const r = await createWorkspaceInvite(email, inviteRole);
+      lastInviteLink = `${window.location.origin}${r.invite_path}`;
+      inviteEmail = '';
+      await refreshMembers();
+    } catch (e: any) {
+      membersError = String(e?.message ?? e);
+    }
+  }
+
+  async function onRevokeInvite(i: WorkspaceInvite) {
+    try { await deleteWorkspaceInvite(i.id); await refreshMembers(); }
+    catch (e: any) { membersError = String(e?.message ?? e); }
+  }
+
+  async function onRemoveMember(m: WorkspaceMember) {
+    if (!confirm(`Remove ${m.email || m.user_id} from this workspace?`)) return;
+    try { await removeWorkspaceMember(m.user_id); await refreshMembers(); }
+    catch (e: any) { membersError = String(e?.message ?? e); }
+  }
+
+  async function copyInviteLink() {
+    if (lastInviteLink) { try { await navigator.clipboard.writeText(lastInviteLink); } catch {} }
+  }
+
+  async function refreshDomains() {
+    domainsError = null;
+    try { domains = (await listDomains()).items; }
+    catch (e: any) { domainsError = String(e?.message ?? e); }
+  }
+
+  async function onAddDomain() {
+    const d = newDomain.trim();
+    if (!d) return;
+    domainsError = null; pendingTxt = null;
+    try {
+      const r = await addDomain(d);
+      pendingTxt = { name: r.txt_name, value: r.txt_value };
+      newDomain = '';
+      await refreshDomains();
+    } catch (e: any) { domainsError = String(e?.message ?? e); }
+  }
+
+  async function onVerifyDomain(d: WorkspaceDomain) {
+    verifyingDomain = d.domain; domainsError = null;
+    try {
+      await verifyDomain(d.domain);
+      pendingTxt = null;
+      await refreshDomains();
+    } catch (e: any) {
+      domainsError = String(e?.message ?? e);
+    } finally {
+      verifyingDomain = null;
+    }
+  }
+
+  async function onDeleteDomain(d: WorkspaceDomain) {
+    if (!confirm(`Remove ${d.domain}?`)) return;
+    try { await deleteDomain(d.domain); await refreshDomains(); }
+    catch (e: any) { domainsError = String(e?.message ?? e); }
+  }
+
   async function onConnectGoogleDrive() {
     connecting = true; connectMsg = null; connectorsError = null;
     try {
@@ -175,7 +278,7 @@
     try { me = await getMe(); } catch {}
     loaded = true;
     if (me?.is_admin) {
-      await Promise.all([refresh(), refreshStalled(), refreshLint(), refreshConnectors()]);
+      await Promise.all([refresh(), refreshStalled(), refreshLint(), refreshConnectors(), refreshMembers(), refreshDomains()]);
       // Surface the result of a returning Google OAuth round-trip.
       const params = $page.url.searchParams;
       if (params.get('google_connected')) {
@@ -353,6 +456,148 @@
       {/if}
       {#if reembedMsg}
         <div style="color: var(--ok); font-size: 12px;">{reembedMsg}</div>
+      {/if}
+    </div>
+
+    <!-- ── Members & Invites ── -->
+    <div class="card">
+      <h2 style="margin: 0 0 4px;">Members & Invites</h2>
+      {#if me.tenant_kind === 'individual'}
+        <p class="muted" style="margin: 0; font-size: 13px;">
+          This is your <strong>personal workspace</strong> — it's just you. Use the
+          workspace switcher (top right) to <strong>Create an organization</strong>,
+          then invite teammates here.
+        </p>
+      {:else}
+        <p class="muted" style="margin: 0 0 12px; font-size: 12px;">
+          People in this organization. Invite by email — they accept via a link and
+          join with the role you choose.
+        </p>
+
+        {#if membersError}
+          <div class="card" style="border-color: var(--err); color: var(--err); margin-bottom: 12px;">{membersError}</div>
+        {/if}
+
+        <!-- Invite form -->
+        <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+          <input type="email" bind:value={inviteEmail} placeholder="teammate@company.com" style="flex: 1; min-width: 240px;" />
+          <select bind:value={inviteRole} style="background: var(--bg-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px;">
+            <option value="member">member</option>
+            <option value="admin">admin</option>
+          </select>
+          <button class="primary" onclick={onInvite} disabled={!inviteEmail.trim()}>Send invite</button>
+        </div>
+
+        {#if lastInviteLink}
+          <div class="card" style="border-color: var(--ok); margin-bottom: 12px; font-size: 13px;">
+            Invite created. Share this link with them:
+            <div class="row" style="gap: 8px; margin-top: 6px;">
+              <span class="mono" style="flex: 1; overflow: hidden; text-overflow: ellipsis;">{lastInviteLink}</span>
+              <button onclick={copyInviteLink} style="font-size: 12px; padding: 4px 10px;">Copy</button>
+            </div>
+            <div class="muted" style="font-size: 11px; margin-top: 4px;">
+              (Email delivery is coming; for now copy the link.)
+            </div>
+          </div>
+        {/if}
+
+        <!-- Members table -->
+        <div class="card" style="padding: 0; overflow: hidden; margin-bottom: 12px;">
+          <table>
+            <thead><tr><th>Member</th><th>Role</th><th>Joined</th><th></th></tr></thead>
+            <tbody>
+              {#each members as m (m.user_id)}
+                <tr>
+                  <td>{m.email || m.user_id}{m.is_you ? ' (you)' : ''}</td>
+                  <td><span class="chip" style="background: var(--bg-3); color: var(--fg);">{m.role}</span></td>
+                  <td class="muted" style="font-size: 12px;">{m.joined_at.slice(0, 10)}</td>
+                  <td>
+                    {#if !m.is_you && m.role !== 'owner'}
+                      <button onclick={() => onRemoveMember(m)} style="font-size: 12px; padding: 4px 10px;">remove</button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        {#if invites.length > 0}
+          <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Pending invites</div>
+          <div class="card" style="padding: 0; overflow: hidden;">
+            <table>
+              <thead><tr><th>Email</th><th>Role</th><th>Expires</th><th></th></tr></thead>
+              <tbody>
+                {#each invites as i (i.id)}
+                  <tr>
+                    <td>{i.email}</td>
+                    <td class="muted">{i.role}</td>
+                    <td class="muted" style="font-size: 12px;">{i.expires_at.slice(0, 10)}</td>
+                    <td><button onclick={() => onRevokeInvite(i)} style="font-size: 12px; padding: 4px 10px;">revoke</button></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+
+        <!-- ── Verified domains ── -->
+        <div style="margin-top: 20px;">
+          <h3 style="margin: 0 0 4px; text-transform: none; letter-spacing: 0; color: var(--fg);">Domains</h3>
+          <p class="muted" style="margin: 0 0 12px; font-size: 12px;">
+            Verify a domain you control to enable domain-based features (and, later,
+            SSO enforcement). Add the TXT record below to your DNS, then click Verify.
+          </p>
+
+          {#if domainsError}
+            <div class="card" style="border-color: var(--err); color: var(--err); margin-bottom: 12px;">{domainsError}</div>
+          {/if}
+
+          <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+            <input type="text" bind:value={newDomain} placeholder="acme.com" style="flex: 1; min-width: 200px;" />
+            <button class="primary" onclick={onAddDomain} disabled={!newDomain.trim()}>Add domain</button>
+          </div>
+
+          {#if pendingTxt}
+            <div class="card" style="margin-bottom: 12px; font-size: 13px;">
+              Add this <strong>TXT</strong> record to <span class="mono">{pendingTxt.name}</span>, then click Verify:
+              <div class="mono" style="background: var(--code-bg); padding: 8px 10px; border-radius: 6px; margin-top: 6px; word-break: break-all;">
+                {pendingTxt.value}
+              </div>
+              <div class="muted" style="font-size: 11px; margin-top: 4px;">DNS changes can take a few minutes to propagate.</div>
+            </div>
+          {/if}
+
+          {#if domains.length > 0}
+            <div class="card" style="padding: 0; overflow: hidden;">
+              <table>
+                <thead><tr><th>Domain</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                  {#each domains as d (d.domain)}
+                    <tr>
+                      <td class="mono">{d.domain}</td>
+                      <td>
+                        {#if d.verified}
+                          <span class="chip" style="background: #14532d; color: #bbf7d0;">verified · {d.verified_via}</span>
+                        {:else}
+                          <span class="chip" style="background: #78350f; color: #fde68a;">pending</span>
+                        {/if}
+                      </td>
+                      <td style="white-space: nowrap;">
+                        {#if !d.verified}
+                          <button onclick={() => onVerifyDomain(d)} disabled={verifyingDomain === d.domain} style="font-size: 12px; padding: 4px 10px; margin-right: 4px;">
+                            {verifyingDomain === d.domain ? 'checking…' : 'Verify'}
+                          </button>
+                        {/if}
+                        <button onclick={() => onDeleteDomain(d)} style="font-size: 12px; padding: 4px 10px;">remove</button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
 

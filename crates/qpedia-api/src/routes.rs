@@ -1802,6 +1802,208 @@ pub(crate) async fn accept_invite(
     Ok(Json(json!({ "tenant": tenant.as_str(), "role": role })))
 }
 
+// ---------- domain verification (DNS-TXT method; Band 4.2) ----------
+
+const DOMAIN_TXT_PREFIX: &str = "qpedia-verify=";
+
+/// Normalize user-entered domain input to a bare hostname.
+fn normalize_domain(input: &str) -> String {
+    let mut d = input.trim().to_ascii_lowercase();
+    for p in ["https://", "http://"] {
+        if let Some(rest) = d.strip_prefix(p) {
+            d = rest.to_string();
+        }
+    }
+    d = d.split('/').next().unwrap_or(&d).to_string();
+    d = d.trim_start_matches("www.").trim_end_matches('.').to_string();
+    d
+}
+
+/// Resolve a domain's TXT records via DNS-over-HTTPS (Google's JSON API),
+/// so it works in any container without special resolver config and
+/// without a heavyweight DNS crate.
+async fn txt_records(domain: &str) -> Result<Vec<String>, ApiError> {
+    let url = format!("https://dns.google/resolve?name={}&type=TXT", urlencode_q(domain));
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("accept", "application/dns-json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    let v: Value = resp.json().await.map_err(|e| ApiError::Internal(e.into()))?;
+    Ok(parse_txt_answer(&v))
+}
+
+/// Extract TXT strings (type 16) from a DoH JSON response, stripping the
+/// quoting. Pure, so it's unit-testable without the network.
+fn parse_txt_answer(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(ans) = v.get("Answer").and_then(|a| a.as_array()) {
+        for a in ans {
+            if a.get("type").and_then(|t| t.as_i64()) == Some(16) {
+                if let Some(data) = a.get("data").and_then(|d| d.as_str()) {
+                    out.push(data.replace('"', ""));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod domain_tests {
+    use super::{normalize_domain, parse_txt_answer};
+    use serde_json::json;
+
+    #[test]
+    fn normalizes_domain_input() {
+        assert_eq!(normalize_domain("  https://WWW.Acme.com/foo "), "acme.com");
+        assert_eq!(normalize_domain("acme.com."), "acme.com");
+        assert_eq!(normalize_domain("http://sub.acme.co.uk"), "sub.acme.co.uk");
+    }
+
+    #[test]
+    fn parses_txt_answer() {
+        let v = json!({
+            "Answer": [
+                { "type": 16, "data": "\"qpedia-verify=abc123\"" },
+                { "type": 16, "data": "\"v=spf1 include:_spf.google.com ~all\"" },
+                { "type": 1,  "data": "1.2.3.4" }
+            ]
+        });
+        let txt = parse_txt_answer(&v);
+        assert!(txt.contains(&"qpedia-verify=abc123".to_string()));
+        assert_eq!(txt.len(), 2, "only TXT (type 16) records");
+    }
+
+    #[test]
+    fn empty_answer() {
+        assert!(parse_txt_answer(&json!({})).is_empty());
+    }
+}
+
+pub(crate) async fn list_domains(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let rows = s
+        .ctx
+        .db
+        .list_workspace_domains(&user.tenant)
+        .await
+        .map_err(ApiError::Internal)?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|d| {
+            json!({
+                "domain": d.domain,
+                "verified": d.verified,
+                "verified_via": d.verified_via,
+                "verified_at": d.verified_at.map(|t| t.to_rfc3339()),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AddDomainBody {
+    domain: String,
+}
+
+/// Claim a domain (unverified) and return the DNS TXT record to add.
+pub(crate) async fn add_domain(
+    State(s): State<AppState>,
+    user: User,
+    Json(body): Json<AddDomainBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    if user.tenant.as_str().starts_with(INDIVIDUAL_TENANT_PREFIX) {
+        return Err(ApiError::Bad(
+            "create an organization workspace before adding a domain".into(),
+        ));
+    }
+    let domain = normalize_domain(&body.domain);
+    if !domain.contains('.') || domain.contains(' ') {
+        return Err(ApiError::Bad("enter a valid domain, e.g. acme.com".into()));
+    }
+    let token = auth::random_token(16);
+    s.ctx
+        .db
+        .claim_domain(&user.tenant, &domain, &user.id, &token)
+        .await
+        .map_err(ApiError::Internal)?;
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "workspace.domain.claim", Some(&domain), None)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({
+        "domain": domain,
+        "verified": false,
+        // The record the admin adds to their DNS: a TXT on the apex with
+        // this exact value (alongside any existing TXT records).
+        "txt_name": domain,
+        "txt_value": format!("{DOMAIN_TXT_PREFIX}{token}"),
+    })))
+}
+
+/// Check the DNS TXT record and, if present, mark the domain verified.
+pub(crate) async fn verify_domain(
+    State(s): State<AppState>,
+    user: User,
+    Path(domain): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let domain = normalize_domain(&domain);
+    let token = s
+        .ctx
+        .db
+        .domain_verification_token(&user.tenant, &domain)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::Bad("domain not claimed in this workspace".into()))?;
+    let expected = format!("{DOMAIN_TXT_PREFIX}{token}");
+    let records = txt_records(&domain).await?;
+    if !records.iter().any(|r| r == &expected) {
+        return Err(ApiError::Bad(format!(
+            "TXT record not found yet. Add a TXT record on {domain} with value \"{expected}\", then retry (DNS can take a few minutes)."
+        )));
+    }
+    s.ctx
+        .db
+        .verify_domain(&user.tenant, &domain, "dns")
+        .await
+        .map_err(|e| ApiError::Bad(e.to_string()))?; // e.g. already verified elsewhere
+    s.ctx
+        .db
+        .write_audit(&user.tenant, &user.id, "workspace.domain.verify", Some(&domain), Some(&json!({"via": "dns"})))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "domain": domain, "verified": true, "verified_via": "dns" })))
+}
+
+pub(crate) async fn delete_domain(
+    State(s): State<AppState>,
+    user: User,
+    Path(domain): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let domain = normalize_domain(&domain);
+    s.ctx.db.delete_domain(&user.tenant, &domain).await.map_err(ApiError::Internal)?;
+    Ok(Json(json!({ "deleted": domain })))
+}
+
 // ---------- first-run bootstrap ----------
 
 #[derive(Deserialize)]

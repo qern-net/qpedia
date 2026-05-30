@@ -391,6 +391,27 @@ impl PgStore {
             .collect())
     }
 
+    /// The DNS-method verification token stored for a (workspace, domain)
+    /// claim, if any. Tenant-scoped.
+    pub async fn domain_verification_token(
+        &self,
+        tenant: &Tenant,
+        domain: &str,
+    ) -> Result<Option<String>> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let mut tx = self.begin_for(tenant).await?;
+        let token: Option<String> = sqlx::query_scalar(
+            "SELECT verification_token FROM workspace_domains WHERE domain = $1",
+        )
+        .bind(&domain)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("domain_verification_token")?
+        .flatten();
+        tx.commit().await.ok();
+        Ok(token)
+    }
+
     /// The workspace that has *verified* this domain, if any (cross-tenant;
     /// admin pool). Used to route a corp email to its org / block a
     /// duplicate claim.
