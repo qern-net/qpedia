@@ -111,12 +111,16 @@ th { color: var(--fg-dim); font-weight: 600; font-size: 12px; text-transform: up
 .markdown h2 { font-size: 22px; margin: 32px 0 12px; }
 .markdown h3 { font-size: 18px; margin: 24px 0 8px; color: var(--fg); text-transform: none; letter-spacing: 0; }
 .markdown p { margin: 12px 0; }
-.markdown ul, .markdown ol { padding-left: 24px; }
+/* Logical properties so the layout mirrors correctly under dir="rtl"
+   (Arabic/Urdu/Hebrew pages): list indent + blockquote rule flip side. */
+.markdown ul, .markdown ol { padding-inline-start: 24px; }
 .markdown code { background: var(--code-bg); padding: 2px 6px; border-radius: 3px; font-size: 12.5px; }
 .markdown pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
 .markdown pre code { background: transparent; padding: 0; }
-.markdown blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--fg-dim); margin: 12px 0; }
-.markdown table th, .markdown table td { border-bottom: 1px solid var(--border); }
+/* Code is always left-to-right, even inside an RTL page. */
+.markdown pre, .markdown pre code { direction: ltr; text-align: left; }
+.markdown blockquote { border-inline-start: 3px solid var(--accent); padding-inline-start: 12px; color: var(--fg-dim); margin: 12px 0; }
+.markdown table th, .markdown table td { border-bottom: 1px solid var(--border); text-align: start; }
 
 .frontmatter {
   background: var(--bg-2);

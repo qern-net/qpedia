@@ -10,6 +10,16 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Right-to-left (RTL) wiki rendering.** Wiki pages now detect their
+  dominant script (Arabic, Urdu, Farsi, Pashto, Hebrew, Syriac, Thaana,
+  NKo, …) and set the container base direction accordingly; every block
+  (paragraph, heading, list item, table cell, blockquote) also carries
+  `dir="auto"` so a *mixed* page self-orients per block — an Arabic quote
+  inside an English page flows right-to-left while the page stays LTR, and
+  vice-versa. Markdown CSS switched to logical properties so list indents
+  and blockquote rules mirror correctly under RTL; code blocks are pinned
+  LTR. Search-result titles/snippets also self-orient. No backend change.
+
 - **Image files no longer dead-letter on ingest** (ROADMAP Band 6.0). A
   new `ImageExtractor` registers `image/*`, so uploads like `.jpg`/`.png`/
   `.jfif` that previously failed the job with `no extractor for mime:

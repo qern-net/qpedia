@@ -74,6 +74,30 @@
     }
   });
 
+  // ── Right-to-left support ───────────────────────────────────────────
+  // Strong RTL scripts: Hebrew, Arabic (+ Supplement/Extended/Presentation
+  // forms), Syriac, Thaana, NKo, Samaritan, Mandaic. Covers Arabic, Urdu,
+  // Farsi, Pashto, Hebrew, etc. — the languages in the corpus.
+  const RTL_CHARS =
+    '\\u0590-\\u05FF\\u0600-\\u06FF\\u0700-\\u074F\\u0750-\\u077F\\u0780-\\u07BF' +
+    '\\u07C0-\\u07FF\\u0800-\\u083F\\u0840-\\u085F\\u08A0-\\u08FF' +
+    '\\uFB1D-\\uFB4F\\uFB50-\\uFDFF\\uFE70-\\uFEFF';
+  const RTL_G = new RegExp(`[${RTL_CHARS}]`, 'g');
+  // Strong LTR: Latin, Greek, Cyrillic (enough to weigh against RTL).
+  const LTR_G = /[A-Za-zÀ-ɏͰ-ϿЀ-ӿ]/g;
+
+  /** Dominant base direction of a chunk of text. A page that is mostly
+   *  Arabic/Urdu gets an `rtl` container; English-with-quotes stays `ltr`
+   *  and the quotes self-orient via per-block `dir="auto"`. */
+  function detectDir(text: string): 'rtl' | 'ltr' {
+    const rtl = (text.match(RTL_G) || []).length;
+    if (rtl === 0) return 'ltr';
+    const ltr = (text.match(LTR_G) || []).length;
+    return rtl >= ltr ? 'rtl' : 'ltr';
+  }
+
+  const pageDir = $derived(detectDir(parts.body));
+
   const html = $derived(() => {
     if (!parts.body) return '';
     // [[concepts/foo.md]] → standard markdown link to /wiki/concepts/foo.md
@@ -88,7 +112,12 @@
       if (!n) return '';
       return `<sup class="cite-ref"><a href="#cite-${n}" title="Source ${n}">${n}</a></sup>`;
     });
-    return marked.parse(s, { async: false }) as string;
+    let out = marked.parse(s, { async: false }) as string;
+    // Per-block `dir="auto"` lets each paragraph/heading/cell self-orient
+    // by its first strong character — so a mixed-language page renders each
+    // block correctly regardless of the container's base direction.
+    out = out.replace(/<(p|h[1-6]|li|blockquote|td|th)(>|\s)/g, '<$1 dir="auto"$2');
+    return out;
   });
 </script>
 
@@ -125,14 +154,14 @@
     </div>
   {/if}
 
-  <div class="markdown">{@html html()}</div>
+  <div class="markdown" dir={pageDir}>{@html html()}</div>
 
   {#if citations.order.length > 0}
-    <section class="citations">
-      <h2>Sources cited</h2>
+    <section class="citations" dir={pageDir}>
+      <h2 dir="auto">Sources cited</h2>
       <ol>
         {#each citations.order as sid, i (sid)}
-          <li id="cite-{i + 1}">
+          <li id="cite-{i + 1}" dir="auto">
             <a href={sourceOriginalUrl(sid)} download title="Download original file">
               {citeNames[sid] ?? sid}
             </a>

@@ -46,9 +46,9 @@
 {:else}
   {#each hits as h}
     <div class="search-hit">
-      <div class="title"><a href={`/wiki/${h.path}`}>{h.title || h.path}</a></div>
+      <div class="title" dir="auto"><a href={`/wiki/${h.path}`}>{h.title || h.path}</a></div>
       <div class="path">{h.path}</div>
-      <div class="snippet">{h.snippet}</div>
+      <div class="snippet" dir="auto">{h.snippet}</div>
     </div>
   {/each}
 {/if}
