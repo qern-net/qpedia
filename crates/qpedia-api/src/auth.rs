@@ -56,8 +56,18 @@ pub struct AuthState {
 
 #[derive(Clone)]
 pub enum AuthMode {
+    /// Every request is the synthetic `dev:admin` user; sessions ignored.
+    /// Local dev + smoke tests.
     Dev,
+    /// Full OIDC authorization-code flow against an external IdP.
     Oidc(Arc<OidcConfig>),
+    /// Session-gated, but without a built-in OIDC issuer. Login happens
+    /// out-of-band (Firebase ID token → `/api/v1/auth/firebase/login`
+    /// mints a session); the `User` extractor enforces the session
+    /// cookie on every request. This is the "Firebase is the only IdP"
+    /// path — enabled by setting `QPEDIA_FIREBASE_PROJECT_ID` with no
+    /// OIDC issuer.
+    Session,
 }
 
 pub struct OidcConfig {
@@ -90,8 +100,36 @@ impl AuthState {
                 crate::firebase::FirebaseVerifier::new(pid)
             });
 
+        // Validate an explicit mode up front.
+        if let Some(m) = mode.as_deref() {
+            if !matches!(m, "dev" | "oidc" | "firebase") {
+                return Err(anyhow!(
+                    "unknown QPEDIA_AUTH_MODE: {m} (expected dev|oidc|firebase)"
+                ));
+            }
+        }
+
+        // 1. Explicit dev always wins (even with Firebase configured —
+        //    useful for exercising the login UI without enforcement).
+        if mode.as_deref() == Some("dev") {
+            info!("auth: dev mode (anonymous admin)");
+            return Ok(Self { mode: AuthMode::Dev, firebase });
+        }
+
+        // 2. Session/Firebase mode: requested explicitly, or implied by a
+        //    Firebase project being configured with no OIDC issuer.
+        if mode.as_deref() == Some("firebase")
+            || (issuer.is_none() && firebase.is_some())
+        {
+            info!("auth: session mode (Firebase login enforced)");
+            return Ok(Self { mode: AuthMode::Session, firebase });
+        }
+
         match (mode.as_deref(), issuer) {
-            (Some("dev"), _) | (None, None) => {
+            (Some("oidc"), None) => {
+                Err(anyhow!("QPEDIA_AUTH_MODE=oidc requires QPEDIA_OIDC_ISSUER"))
+            }
+            (_, None) => {
                 info!("auth: dev mode (anonymous admin)");
                 Ok(Self { mode: AuthMode::Dev, firebase })
             }
@@ -137,7 +175,6 @@ impl AuthState {
                     firebase,
                 })
             }
-            (Some(other), _) => Err(anyhow!("unknown QPEDIA_AUTH_MODE: {other}")),
         }
     }
 }
@@ -244,6 +281,39 @@ pub fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(&buf)
 }
 
+/// Bootstrap admin access by email. `QPEDIA_ADMIN_EMAILS` is a comma- or
+/// space-separated allowlist; a login whose verified email matches (case-
+/// insensitive) gets the `admin` group added if it isn't already present.
+///
+/// This is how the *first* admin exists on a fresh Firebase deployment —
+/// before that, a fresh Google sign-in has no `groups` custom claim and
+/// would land with zero privileges. For finer control, set a `groups`
+/// custom claim via the Firebase Admin SDK and leave this unset.
+pub fn augment_admin_by_email(email: Option<&str>, groups: Vec<String>) -> Vec<String> {
+    let allow = std::env::var("QPEDIA_ADMIN_EMAILS").unwrap_or_default();
+    augment_admin_with_allow(email, groups, &allow)
+}
+
+/// Pure core of [`augment_admin_by_email`] — the allowlist is passed in so
+/// it's deterministic to test (no process-global env).
+fn augment_admin_with_allow(
+    email: Option<&str>,
+    mut groups: Vec<String>,
+    allow: &str,
+) -> Vec<String> {
+    let Some(email) = email else { return groups };
+    let email_lc = email.trim().to_ascii_lowercase();
+    let is_admin_email = allow
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .any(|allowed| allowed == email_lc);
+    if is_admin_email && !groups.iter().any(|g| g == "admin") {
+        groups.push("admin".to_string());
+    }
+    groups
+}
+
 /// Convenience wrapper that turns a TTL (seconds) into a `session_expires_at`
 /// timestamp and bridges to `PgStore::create_session`.
 pub async fn mint_session(
@@ -278,7 +348,9 @@ where
         let ext = AuthExtractorState::from_ref(state);
         match &ext.auth.mode {
             AuthMode::Dev => Ok(User::dev_admin()),
-            AuthMode::Oidc(_) => {
+            // Both real modes are session-cookie gated; OIDC and Firebase
+            // differ only in how the session is *minted*, not read.
+            AuthMode::Oidc(_) | AuthMode::Session => {
                 let token =
                     read_session_token(&parts.headers).ok_or(AuthRejection::Unauthorized)?;
                 let session = ext
@@ -336,8 +408,11 @@ pub async fn oidc_login(
 ) -> Result<Redirect, Response> {
     let cfg = match &auth.mode {
         AuthMode::Oidc(c) => c.clone(),
-        AuthMode::Dev => {
-            return Err((StatusCode::BAD_REQUEST, "auth is in dev mode").into_response())
+        // The /auth/login + /auth/callback OIDC routes only apply in OIDC
+        // mode. Firebase (Session mode) logs in via
+        // /api/v1/auth/firebase/login instead.
+        AuthMode::Dev | AuthMode::Session => {
+            return Err((StatusCode::BAD_REQUEST, "OIDC routes not active in this auth mode").into_response())
         }
     };
 
@@ -374,8 +449,11 @@ pub async fn oidc_callback(
 ) -> Result<(HeaderMap, Redirect), Response> {
     let cfg = match &auth.mode {
         AuthMode::Oidc(c) => c.clone(),
-        AuthMode::Dev => {
-            return Err((StatusCode::BAD_REQUEST, "auth is in dev mode").into_response())
+        // The /auth/login + /auth/callback OIDC routes only apply in OIDC
+        // mode. Firebase (Session mode) logs in via
+        // /api/v1/auth/firebase/login instead.
+        AuthMode::Dev | AuthMode::Session => {
+            return Err((StatusCode::BAD_REQUEST, "OIDC routes not active in this auth mode").into_response())
         }
     };
 
@@ -471,9 +549,45 @@ pub async fn oidc_logout(
             .end_session_endpoint
             .clone()
             .unwrap_or_else(|| "/".into()),
-        AuthMode::Dev => "/".into(),
+        AuthMode::Dev | AuthMode::Session => "/".into(),
     };
     (out, Redirect::to(&redirect))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::augment_admin_with_allow;
+
+    #[test]
+    fn admin_email_grants_admin() {
+        // case-insensitive, comma + space separated
+        let g = augment_admin_with_allow(Some("B@Y.com"), vec![], "a@x.com, b@y.com");
+        assert!(g.contains(&"admin".to_string()));
+    }
+
+    #[test]
+    fn non_admin_email_unchanged() {
+        let g = augment_admin_with_allow(Some("c@z.com"), vec!["staff".into()], "a@x.com");
+        assert_eq!(g, vec!["staff".to_string()]);
+    }
+
+    #[test]
+    fn empty_allowlist_no_admin() {
+        let g = augment_admin_with_allow(Some("a@x.com"), vec![], "");
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn admin_not_duplicated() {
+        let g = augment_admin_with_allow(Some("a@x.com"), vec!["admin".into()], "a@x.com");
+        assert_eq!(g.iter().filter(|x| *x == "admin").count(), 1);
+    }
+
+    #[test]
+    fn no_email_no_admin() {
+        let g = augment_admin_with_allow(None, vec![], "a@x.com");
+        assert!(g.is_empty());
+    }
 }
 
 fn extract_groups(

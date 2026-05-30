@@ -28,6 +28,20 @@ RUN cargo build --release --bin qpedia-api
 # ---------- frontend ----------
 FROM node:22-bookworm AS web
 WORKDIR /web
+# Firebase web config is build-time: Vite inlines VITE_* into the bundle at
+# `npm run build`. Passed as build args from docker-compose (which reads them
+# from the top-level .env). Without these the /login page renders the
+# "Firebase isn't configured" notice and falls back to dev mode.
+ARG VITE_FIREBASE_API_KEY
+ARG VITE_FIREBASE_AUTH_DOMAIN
+ARG VITE_FIREBASE_PROJECT_ID
+ARG VITE_FIREBASE_APP_ID
+ARG VITE_FIREBASE_SSO_PROVIDER_ID
+ENV VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY \
+    VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN \
+    VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID \
+    VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID \
+    VITE_FIREBASE_SSO_PROVIDER_ID=$VITE_FIREBASE_SSO_PROVIDER_ID
 COPY web/package*.json ./
 RUN [ -f package.json ] && npm ci || echo "no frontend yet"
 COPY web ./

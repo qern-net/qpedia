@@ -20,17 +20,22 @@ export type FirebaseConfig = {
   apiKey: string;
   authDomain: string;
   projectId: string;
+  /** Optional — not needed for Auth popup sign-in, but including it
+   *  silences an SDK warning and is required if you later add Analytics. */
+  appId?: string;
 };
 
 let cachedApp: FirebaseApp | null = null;
 let cachedAuth: Auth | null = null;
 
 export function firebaseConfig(): FirebaseConfig | null {
-  const apiKey      = (import.meta as any).env?.VITE_FIREBASE_API_KEY as string | undefined;
-  const authDomain  = (import.meta as any).env?.VITE_FIREBASE_AUTH_DOMAIN as string | undefined;
-  const projectId   = (import.meta as any).env?.VITE_FIREBASE_PROJECT_ID as string | undefined;
+  const env = (import.meta as any).env ?? {};
+  const apiKey      = env.VITE_FIREBASE_API_KEY as string | undefined;
+  const authDomain  = env.VITE_FIREBASE_AUTH_DOMAIN as string | undefined;
+  const projectId   = env.VITE_FIREBASE_PROJECT_ID as string | undefined;
+  const appId       = env.VITE_FIREBASE_APP_ID as string | undefined;
   if (!apiKey || !authDomain || !projectId) return null;
-  return { apiKey, authDomain, projectId };
+  return { apiKey, authDomain, projectId, ...(appId ? { appId } : {}) };
 }
 
 export function firebaseAuth(): Auth | null {

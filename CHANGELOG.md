@@ -10,6 +10,23 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Firebase / Google sign-in, enforced.** New `AuthMode::Session` — a
+  session-cookie-gated mode that doesn't require a full OIDC issuer.
+  Auto-selected when `QPEDIA_FIREBASE_PROJECT_ID` is set with no OIDC
+  issuer (or `QPEDIA_AUTH_MODE=firebase`). Previously a Firebase login
+  minted a session that the default Dev-mode `User` extractor ignored,
+  so sign-in was cosmetic; now the cookie is enforced on every request.
+  - **Admin bootstrap:** `QPEDIA_ADMIN_EMAILS` (comma/space allowlist) —
+    a login whose verified email matches gets the `admin` group, so the
+    first operator can administer a fresh deployment before any Firebase
+    custom claims exist.
+  - **Frontend build config** wired end-to-end: `web/.env(.example)` for
+    `VITE_FIREBASE_*`, the Dockerfile web stage takes them as build args,
+    and docker-compose passes them through from the top-level `.env`.
+    `firebase.ts` also reads an optional `VITE_FIREBASE_APP_ID`.
+  - `.env.example` documents the three modes (dev | firebase | oidc) and
+    the new vars.
+
 - **Google Drive connector + SSO-aligned OAuth foundation** (Band 2.3).
   The second concrete connector after Confluence, plus the credential
   plumbing the rest of the connector line will share.

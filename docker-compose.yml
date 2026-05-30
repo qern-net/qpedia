@@ -3,6 +3,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Frontend Firebase config — inlined into the SPA bundle at build
+        # time. Read from the top-level .env. Safe to be empty (login page
+        # then shows the "not configured" notice).
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+        VITE_FIREBASE_SSO_PROVIDER_ID: ${VITE_FIREBASE_SSO_PROVIDER_ID:-}
     image: qpedia/app:${QPEDIA_VERSION:-dev}
     env_file: .env
     # Compose owns the container's DB URL explicitly so it always points at

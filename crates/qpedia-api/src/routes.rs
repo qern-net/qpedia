@@ -138,6 +138,11 @@ pub(crate) async fn firebase_login_route(
             .unwrap_or_else(qpedia_core::tenant::Tenant::default_tenant)
     };
 
+    // Groups from the Firebase custom claim, plus admin-by-email bootstrap
+    // (QPEDIA_ADMIN_EMAILS) so the first operator can administer a fresh
+    // deployment before any custom claims are set.
+    let groups = auth::augment_admin_by_email(claims.email.as_deref(), claims.groups.clone());
+
     let token = auth::random_token(32);
     let token_hash = auth::hash_token(&token);
     let user_id = format!("firebase:{}", claims.sub);
@@ -149,7 +154,7 @@ pub(crate) async fn firebase_login_route(
         claims.email.as_deref(),
         claims.name.as_deref(),
         Some(&claims.firebase.sign_in_provider),
-        &claims.groups,
+        &groups,
         auth::SESSION_TTL_SECS,
     )
     .await
@@ -176,7 +181,7 @@ pub(crate) async fn firebase_login_route(
             "email": claims.email,
             "name": claims.name,
             "provider": claims.firebase.sign_in_provider,
-            "groups": claims.groups,
+            "groups": groups,
         })),
     ))
 }
