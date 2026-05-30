@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { getMe, type Me } from '$lib/api';
+  import WorkspaceSwitcher from '$lib/components/WorkspaceSwitcher.svelte';
 
   let { children } = $props();
   let me = $state<Me | null>(null);
@@ -30,7 +31,8 @@
     <span class="spacer"></span>
     {#if authChecked}
       {#if me}
-        <span class="muted mono" title={me.groups.join(', ')}>
+        <WorkspaceSwitcher />
+        <span class="muted mono" title={me.groups.join(', ')} style="margin-left: 12px;">
           {me.name || me.email || me.id}{me.is_admin ? ' · admin' : ''}
         </span>
         <a href="/auth/logout" class="logout-btn" title="Sign out">Log out</a>

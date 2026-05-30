@@ -207,6 +207,99 @@ export async function deleteFolderAcl(folder_path: string): Promise<void> {
   if (!r.ok) throw new Error(`delete folder acl: ${r.status}`);
 }
 
+// ---------- workspaces (Band 4.1) ----------
+
+export type Workspace = {
+  tenant: string;
+  name: string;
+  role: 'owner' | 'admin' | 'member';
+  kind: 'individual' | 'org';
+  active: boolean;
+};
+
+export type WorkspaceMember = {
+  user_id: string;
+  email: string | null;
+  role: string;
+  joined_at: string;
+  is_you: boolean;
+};
+
+export type WorkspaceInvite = {
+  id: number;
+  email: string;
+  role: string;
+  expires_at: string;
+};
+
+export async function listWorkspaces(): Promise<{ workspaces: Workspace[]; active: string }> {
+  return json(await fetch('/api/v1/workspaces'));
+}
+
+export async function createWorkspace(name: string): Promise<{ tenant: string; name: string; role: string }> {
+  return json(
+    await fetch('/api/v1/workspaces', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name })
+    })
+  );
+}
+
+export async function switchWorkspace(tenant: string): Promise<{ tenant: string; role: string }> {
+  return json(await fetch(`/api/v1/workspaces/${encodeURIComponent(tenant)}/switch`, { method: 'POST' }));
+}
+
+export async function listWorkspaceMembers(): Promise<{ items: WorkspaceMember[] }> {
+  return json(await fetch('/api/v1/workspaces/members'));
+}
+
+export async function removeWorkspaceMember(userId: string): Promise<void> {
+  const r = await fetch(`/api/v1/workspaces/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+  if (!r.ok) {
+    let d = ''; try { d = (await r.text()).slice(0, 200); } catch {}
+    throw new Error(d || `remove member: ${r.status}`);
+  }
+}
+
+export async function listWorkspaceInvites(): Promise<{ items: WorkspaceInvite[] }> {
+  return json(await fetch('/api/v1/workspaces/invites'));
+}
+
+export async function createWorkspaceInvite(
+  email: string,
+  role: 'member' | 'admin' = 'member'
+): Promise<{ id: number; email: string; role: string; invite_path: string; token: string }> {
+  return json(
+    await fetch('/api/v1/workspaces/invites', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, role })
+    })
+  );
+}
+
+export async function deleteWorkspaceInvite(id: number): Promise<void> {
+  const r = await fetch(`/api/v1/workspaces/invites/${id}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`delete invite: ${r.status}`);
+}
+
+export type InvitePreview = {
+  workspace: string;
+  tenant: string;
+  role: string;
+  email: string;
+  valid: boolean;
+};
+
+export async function getInvite(token: string): Promise<InvitePreview> {
+  return json(await fetch(`/api/v1/invites/${encodeURIComponent(token)}`));
+}
+
+export async function acceptInvite(token: string): Promise<{ tenant: string; role: string }> {
+  return json(await fetch(`/api/v1/invites/${encodeURIComponent(token)}`, { method: 'POST' }));
+}
+
 // ---------- admin: connectors ----------
 
 export type Connector = {

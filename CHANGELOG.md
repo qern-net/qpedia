@@ -8,6 +8,23 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **Team / org workspaces, invite-only** (Band 4.1 — `AUTH-DESIGN.md`
+  stage S1). A user can create an **organization** workspace (they
+  become its owner) and invite teammates by email; the invitee accepts
+  via a tokened link and joins with the chosen role. A **workspace
+  switcher** in the header lists every workspace you belong to and
+  switches the active one (re-points the session). The Admin tab gains
+  a **Members & Invites** panel (invite, list/revoke pending invites,
+  list/remove members; last-owner removal is refused). Joining a
+  workspace other than your own individual one is *only* by org
+  creation or invite — no domain/SSO surface yet, so zero takeover
+  risk at this stage. New `workspace_members` + `workspace_invites`
+  tables (migration 0006, RLS-isolated); endpoints under
+  `/api/v1/workspaces` and `/api/v1/invites/:token`; accept page at
+  `/invite/<token>`.
+
 ### Changed
 
 - **Every login now starts in an isolated individual workspace** —
