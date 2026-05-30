@@ -10,6 +10,17 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Inline wiki citations now render.** The wiki agent emits
+  `[^src:<source-id>]` markers to tie a fact to the source it came from,
+  but the page renderer only rewrote `[[wiki links]]` and showed the
+  frontmatter `source_ids` as chips — so the inline markers leaked as raw
+  text (`marked` has no footnote support). They now render as numbered
+  superscripts (first-appearance order; a repeated source reuses its
+  number) that link to a **Sources cited** list at the foot of the page;
+  each entry resolves to the source's filename (best-effort via
+  `getSource`, falling back to the slug) and links to its original-file
+  download.
+
 - **Domain verification — DNS-TXT method** (Band 4.2). An org admin adds
   a domain → gets a `qpedia-verify=<token>` TXT record to place in DNS →
   clicks **Verify**; the backend resolves the domain's TXT records via
