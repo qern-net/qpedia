@@ -10,6 +10,25 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Image files no longer dead-letter on ingest** (ROADMAP Band 6.0). A
+  new `ImageExtractor` registers `image/*`, so uploads like `.jpg`/`.png`/
+  `.jfif` that previously failed the job with `no extractor for mime:
+  image/jpeg` are now indexed by metadata (format + pixel dimensions +
+  byte size) and flow through the pipeline. Header-only read via
+  `imagesize` (no full decode), graceful on unreadable bytes. OCR of image
+  *contents* is staged as Band 6.1 (Marker/surya sidecar). Already-failed
+  images are stuck at `extracting`, so **Admin → Resume stalled** re-drives
+  them (or just re-upload).
+
+- **`STORAGE-MODEL.md` + ROADMAP Bands 5 & 6.** Design note on serve-to vs
+  index-in-place: keep upload, make connectors the primary path, persist
+  an additive **origin back-reference** on `sources` (the one near-term
+  schema change), demote blob storage to a *cache* for connector sources,
+  and add a `localfs` zero-copy connector for self-hosted — with
+  source-ACL passthrough explicitly deferred. Band 6 tracks extraction
+  coverage (image OCR, HTML *distillation* file/tree/remote, zip→folder
+  expansion, xlsx/email).
+
 - **Inline wiki citations now render.** The wiki agent emits
   `[^src:<source-id>]` markers to tie a fact to the source it came from,
   but the page renderer only rewrote `[[wiki links]]` and showed the

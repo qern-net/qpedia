@@ -105,6 +105,50 @@ surface; lays the `users`/`members` foundation 4.2–4.4 need.
 
 ---
 
+## Band 5 — Storage model & index-in-place
+
+Full rationale in [`STORAGE-MODEL.md`](STORAGE-MODEL.md). We already have
+point-at-a-folder ingestion (connectors), but it's *pull-and-copy* and
+throws away the remote linkage. Goal: keep upload, make connectors
+primary, demote blob storage to a *cache* (not system of record), and add
+a true zero-copy mode for self-hosted. Ship S0 first — it's the additive
+schema change that ossifies if we wait.
+
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 5.0 | **Origin-linkage migration** — add `origin` (`uploaded`/`connector`/`localfs`), `connector_id`, `remote_id`, `remote_version` to `sources` (+ unique index on `(tenant, connector_id, remote_id)`); populate from `sync.rs::ingest_one` (the `remote_id` is already in hand, just discarded). Additive, non-breaking. | qpedia | ⚪ |
+| 5.1 | **Incremental sync + deletion propagation** — re-ingest on `remote_version` change (reuses replace-in-place); source gone at origin → tombstone (`status=removed`) + remove-cascade on derived pages. | qpedia | ⚪ |
+| 5.2 | **Blob-as-cache** for `origin=connector` — download endpoint serves from blob if cached else re-fetches via the connector; make the cached original evictable (TTL/LRU). Extracted text stays kept (no re-OCR). | qpedia | ⚪ |
+| 5.3 | **`localfs` zero-copy connector** — point Qpedia at a bind-mounted folder; index in place, serve originals straight from the path, watch for changes. The cleanest "in situ" mode; great self-hosted/OSS story. | qpedia | ⚪ |
+| 5.4 | **Source-ACL passthrough** — defer to Drive/SharePoint ACLs at query time. Glean-class hard (derived pages blend differently-permissioned sources). Deferred; customer-driven. | qpedia-pvt | ⚪ |
+
+**Build next in this band:** 5.0 — additive, unblocks 5.1–5.3, prevents
+schema ossification.
+
+---
+
+## Band 6 — Extraction coverage
+
+`qpedia-extract` dispatches by mime over a `Vec<Box<dyn Extractor>>`.
+Registered today: Text (`text/*`, json, xml), PDF (+Marker OCR fallback),
+Docx (pandoc: docx/pptx/odt/rtf/epub). Anything else **hard-fails the
+job** (`no extractor for mime: …`). Each item below is one new `Extractor`
+(or a sidecar capability) — orthogonal to Band 5.
+
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 6.0 | **Image metadata extractor** — register `image/*` so images stop dead-lettering; index dimensions + filename + mime as searchable text. The "at least index the metadata" floor. | qpedia | ✅ |
+| 6.1 | **Image OCR** — route `image/*` through the Marker sidecar (same class as scanned-PDF OCR; surya/tesseract there) when configured; fall back to 6.0 metadata when the sidecar is down/absent. Keeps OCR out of the Rust binary. | qpedia | ⚪ |
+| 6.2 | **HTML distillation — file-based** — `HtmlExtractor` for `text/html`: a *readability* pass (strip nav/boilerplate/ads) → markdown, **not** raw `pandoc -f html` (which keeps the junk). Tree-based "just works" once registered (HTML files in the folder tree). | qpedia | ⚪ |
+| 6.3 | **HTML — remote** — a URL source: paste a URL (or sitemap) → fetch → distill (6.2) → ingest; optional same-origin crawl to depth N. A lightweight "web connector" sibling to Band 2. | qpedia | ⚪ |
+| 6.4 | **Archive (zip) expansion** — treat a `.zip` upload like server-side mirror-upload: expand entries into a **locked folder named `<original>.zip`** (suffix kept as the archive marker 🙂), ingest each entry to its mirrored subpath. Guards required: zip-slip (path traversal), max entries/size/depth, skip encrypted. Generalizes the existing client-side mirror-upload. | qpedia | ⚪ |
+| 6.5 | **Xlsx / Email** — `XlsxExtractor` (pandoc/calamine), `EmailExtractor` (mail-parser; eml/msg). Already noted in `qpedia-extract/src/lib.rs` TODO. | qpedia | ⚪ |
+
+**Build next in this band:** 6.1 (image OCR) or 6.2 (HTML distillation) —
+both high-value; pick per demand. 6.0 shipped to stop the bleeding.
+
+---
+
 ## Vision threads (longer-running design ideas)
 
 ### SSO-aligned connectors

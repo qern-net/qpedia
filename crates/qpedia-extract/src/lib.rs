@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 pub mod text;
 pub mod pdf;
 pub mod docx;
+pub mod image;
 pub mod marker;
 
 pub use text::TextExtractor;
 pub use pdf::PdfExtractor;
 pub use docx::DocxExtractor;
+pub use image::ImageExtractor;
 pub use marker::MarkerExtractor;
 
 #[async_trait]
@@ -64,6 +66,9 @@ impl ExtractorRegistry {
             Err(e) => tracing::warn!(error = %e, "PdfExtractor disabled — run scripts/fetch-pdfium.sh"),
         }
         reg.register(Box::new(DocxExtractor));
+        // Images: index metadata so they don't dead-letter. OCR (Band 6.1)
+        // is a separate sidecar capability layered on later.
+        reg.register(Box::new(ImageExtractor));
         reg
     }
 
@@ -89,8 +94,9 @@ impl Default for ExtractorRegistry {
     fn default() -> Self { Self::with_default() }
 }
 
-// Concrete impls planned next (DESIGN.md §5.2):
-//   HtmlExtractor (readability + pulldown-cmark)
-//   ImageOcr      (tesseract — for scanned PDFs and images)
-//   XlsxExtractor / PptxExtractor (pandoc)
-//   EmailExtractor (mail-parser, eml/msg)
+// Concrete impls planned next (DESIGN.md §5.2, ROADMAP Band 6):
+//   HtmlExtractor (readability distillation, not raw pandoc)  — 6.2
+//   ImageOcr      (Marker/surya sidecar — images + scanned PDFs) — 6.1
+//   XlsxExtractor / PptxExtractor (pandoc/calamine)            — 6.5
+//   EmailExtractor (mail-parser, eml/msg)                      — 6.5
+//   ImageExtractor (metadata floor) is registered above        — 6.0 ✅
