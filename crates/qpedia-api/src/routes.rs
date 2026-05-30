@@ -68,12 +68,18 @@ pub(crate) async fn auth_config(State(s): State<AppState>) -> Json<Value> {
 }
 
 pub(crate) async fn auth_me(user: User) -> Json<Value> {
+    let kind = if user.tenant.as_str().starts_with(INDIVIDUAL_TENANT_PREFIX) {
+        "individual"
+    } else {
+        "org"
+    };
     Json(json!({
         "id": user.id,
         "email": user.email,
         "name": user.name,
         "groups": user.groups,
         "tenant": user.tenant.as_str(),
+        "tenant_kind": kind,
         "is_admin": user.is_admin(),
     }))
 }
@@ -111,6 +117,98 @@ pub(crate) struct FirebaseLoginBody {
     id_token: String,
 }
 
+/// Prefix marking an individual (per-user) tenant. Org tenants never
+/// start with this; the `auth_me` endpoint reports the workspace kind
+/// from it.
+pub(crate) const INDIVIDUAL_TENANT_PREFIX: &str = "u-";
+
+/// Comma/space-separated corporate email domains that should resolve to
+/// a shared **org** tenant (auto-provisioned). Public providers
+/// (gmail.com, outlook.com, …) must NOT be listed — those users get
+/// isolated individual workspaces.
+fn org_domains() -> Vec<String> {
+    std::env::var("QPEDIA_ORG_DOMAINS")
+        .unwrap_or_default()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Resolve the tenant for a Firebase login. Order:
+///   1. Explicit `tenant_id` custom claim (admin-assigned org).
+///   2. Email domain in `QPEDIA_ORG_DOMAINS` → auto-provisioned org
+///      tenant `slug(domain)`.
+///   3. Email domain matching a registered `tenants.email_domain` row.
+///   4. Otherwise → an **individual** tenant `u-<uid>`, isolated per
+///      user. NEVER the shared `default` tenant — that would expose
+///      whatever was ingested in dev/single-user mode. This is the fix
+///      for the cross-context data exposure.
+///
+/// Auto-derived tenants (1, 2, 4) are upserted so the row exists for the
+/// FK + RLS before the session is minted.
+async fn resolve_firebase_tenant(
+    db: &qpedia_pg_store::PgStore,
+    claims: &crate::firebase::FirebaseClaims,
+) -> Result<qpedia_core::tenant::Tenant, ApiError> {
+    use qpedia_core::tenant::Tenant;
+
+    // 1. Explicit org assignment.
+    if let Some(t) = claims.tenant_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let tenant = Tenant::new(t);
+        ensure_tenant(db, &tenant, t, None).await?;
+        return Ok(tenant);
+    }
+
+    let domain = claims
+        .email
+        .as_deref()
+        .and_then(|e| e.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()));
+
+    if let Some(domain) = &domain {
+        // 2. Configured corporate domain → shared org tenant.
+        if org_domains().iter().any(|d| d == domain) {
+            let tenant = Tenant::new(qpedia_pg_store::slugify(domain));
+            ensure_tenant(db, &tenant, domain, Some(domain)).await?;
+            return Ok(tenant);
+        }
+        // 3. Previously registered org domain.
+        if let Ok(Some(tenant)) = db.tenant_by_email_domain(domain).await {
+            return Ok(tenant);
+        }
+    }
+
+    // 4. Individual, isolated workspace.
+    let tenant = Tenant::new(format!(
+        "{INDIVIDUAL_TENANT_PREFIX}{}",
+        qpedia_pg_store::slugify(&claims.sub)
+    ));
+    let display = claims.email.as_deref().unwrap_or("Individual");
+    ensure_tenant(db, &tenant, display, None).await?;
+    Ok(tenant)
+}
+
+/// Create the tenant row if it doesn't already exist (preserves the
+/// display name / domain of registered tenants).
+async fn ensure_tenant(
+    db: &qpedia_pg_store::PgStore,
+    tenant: &qpedia_core::tenant::Tenant,
+    display_name: &str,
+    email_domain: Option<&str>,
+) -> Result<(), ApiError> {
+    if db
+        .get_tenant(tenant)
+        .await
+        .map_err(ApiError::Internal)?
+        .is_none()
+    {
+        db.upsert_tenant(tenant, display_name, email_domain)
+            .await
+            .map_err(ApiError::Internal)?;
+    }
+    Ok(())
+}
+
 /// Exchange a Firebase ID token for a qpedia session cookie. Frontend
 /// signs the user in via the Firebase JS SDK (any provider — Google,
 /// GitHub, Microsoft, X, Apple, generic OIDC SSO) and POSTs the
@@ -132,26 +230,7 @@ pub(crate) async fn firebase_login_route(
         .await
         .map_err(|e| ApiError::Bad(format!("invalid Firebase ID token: {e}")))?;
 
-    let tenant = if let Some(t) = &claims.tenant_id {
-        qpedia_core::tenant::Tenant::new(t.clone())
-    } else if let Some(domain) = claims
-        .email
-        .as_deref()
-        .and_then(|e| e.split_once('@').map(|(_, d)| d.to_string()))
-    {
-        match s.ctx.db.tenant_by_email_domain(&domain).await {
-            Ok(Some(t)) => t,
-            _ => std::env::var("QPEDIA_DEV_TENANT")
-                .ok()
-                .map(qpedia_core::tenant::Tenant::new)
-                .unwrap_or_else(qpedia_core::tenant::Tenant::default_tenant),
-        }
-    } else {
-        std::env::var("QPEDIA_DEV_TENANT")
-            .ok()
-            .map(qpedia_core::tenant::Tenant::new)
-            .unwrap_or_else(qpedia_core::tenant::Tenant::default_tenant)
-    };
+    let tenant = resolve_firebase_tenant(&s.ctx.db, &claims).await?;
 
     // Groups from the Firebase custom claim, plus admin-by-email bootstrap
     // (QPEDIA_ADMIN_EMAILS) so the first operator can administer a fresh

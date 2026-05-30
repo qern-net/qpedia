@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import { getAuthConfig, type AuthConfig } from '$lib/api';
   import {
@@ -47,7 +46,10 @@
       const cred = await signInWith(id);
       const idToken = await cred.user.getIdToken();
       await exchangeForSession(idToken);
-      goto('/', { replaceState: true });
+      // Full reload (not client-side goto) so the root layout remounts
+      // and re-fetches /auth/me with the new session cookie — otherwise
+      // the header still shows "login" and no workspace banner.
+      window.location.href = '/';
     } catch (e: any) {
       error = String(e?.message ?? e);
     } finally {

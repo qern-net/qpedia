@@ -154,6 +154,10 @@ export type Me = {
   email: string | null;
   name: string | null;
   groups: string[];
+  tenant: string;
+  /** "individual" = an isolated per-user workspace; "org" = a shared
+   *  organization tenant. */
+  tenant_kind: 'individual' | 'org';
   is_admin: boolean;
 };
 

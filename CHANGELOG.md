@@ -8,7 +8,31 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Firebase logins no longer fall back to the shared `default` tenant.**
+  Previously a Firebase login with no `tenant_id` claim and no
+  domain-matched tenant resolved to `default` — the same tenant
+  dev/single-user ingestion writes to — so a freshly signed-in user saw
+  that pre-existing data. Tenant resolution now: `tenant_id` claim →
+  `QPEDIA_ORG_DOMAINS` match (shared org tenant, auto-provisioned) →
+  registered `tenants.email_domain` → **isolated individual tenant
+  `u-<uid>`**. Never `default`. (RLS was always enforcing isolation;
+  the bug was the resolver collapsing distinct users into one tenant.)
+- **Missing logout button / no workspace indicator after login.** The
+  `/login` page did a client-side navigation that didn't remount the
+  root layout, so it never re-fetched the session — the header kept
+  showing "login". Login now does a full reload. The header shows a
+  **Log out** button, and a new **workspace banner** makes the active
+  tenant + individual-vs-org mode unmistakable (`/api/v1/auth/me` now
+  returns `tenant` + `tenant_kind`).
+
 ### Added
+
+- **`QPEDIA_ORG_DOMAINS`** — comma/space list of corporate email
+  domains that resolve to a shared org tenant (slug of the domain).
+  Everyone else gets an isolated individual workspace; public providers
+  must not be listed.
 
 - **Firebase / Google sign-in, enforced.** New `AuthMode::Session` — a
   session-cookie-gated mode that doesn't require a full OIDC issuer.
