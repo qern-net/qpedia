@@ -8,6 +8,21 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every login now starts in an isolated individual workspace** —
+  including corporate-domain emails. Dropped the `QPEDIA_ORG_DOMAINS`
+  env-var domain→org mapping (a self-serve product shouldn't decide org
+  membership from a server env var). Tenant resolution is now just:
+  explicit `tenant_id` claim (set by the future org/SSO flow) → else the
+  user's individual `u-<uid>`. The login also grants the user `admin` in
+  their *own* individual workspace (RLS-scoped, never cross-tenant), so
+  they can manage it. Org/team is a separate, **domain-verified** flow —
+  see the new `AUTH-DESIGN.md` (model + full security matrix +
+  recommendation to buy the SAML/OIDC federation layer, GCIP/WorkOS, and
+  build only the workspace/membership/domain-verification policy in-app).
+  Staged as Band 4 in `ROADMAP.md`.
+
 ### Fixed
 
 - **Firebase logins no longer fall back to the shared `default` tenant.**

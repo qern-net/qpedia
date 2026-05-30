@@ -85,6 +85,26 @@ Do these before / alongside the qpedia-pvt SaaS launch.
 
 ---
 
+## Band 4 — Self-serve identity & org workspaces
+
+Full design + security matrix in [`AUTH-DESIGN.md`](AUTH-DESIGN.md).
+Everyone signs up individual; org/team is an explicit, **domain-verified**
+flow; enterprise SSO federation is bought (GCIP/WorkOS), policy is built
+in-app. Staged so each ships safely.
+
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 4.0 | Everyone individual; owner-admin of `u-<uid>`; drop env-var domains. | qpedia | ✅ |
+| 4.1 | `users` + `workspace_members`; **Create org** (owner = creator); **invites** (email+token); workspace switcher. Invite-only orgs — zero domain/SSO attack surface. | qpedia | ⚪ |
+| 4.2 | `workspace_domains` + **DNS-TXT domain verification**; optional verified-domain auto-join. The security gate for anything domain-scoped. | qpedia | ⚪ |
+| 4.3 | `workspace_sso` via **GCIP or WorkOS**; test-login; **enforce SSO** per verified domain; JIT provisioning; account linking by verified email. Delivers the "Team/Org switch → SSO → org admin → org is SSO-only" flow — safely. | qpedia-pvt (enterprise) | ⚪ |
+| 4.4 | SCIM deprovisioning; auth-event audit (via `EventSink`); admin portal. | qpedia-pvt | ⚪ |
+
+**Build next:** 4.1 — real team workspaces, invite-only, no takeover
+surface; lays the `users`/`members` foundation 4.2–4.4 need.
+
+---
+
 ## Vision threads (longer-running design ideas)
 
 ### SSO-aligned connectors

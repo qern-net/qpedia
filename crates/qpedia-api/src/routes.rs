@@ -122,67 +122,35 @@ pub(crate) struct FirebaseLoginBody {
 /// from it.
 pub(crate) const INDIVIDUAL_TENANT_PREFIX: &str = "u-";
 
-/// Comma/space-separated corporate email domains that should resolve to
-/// a shared **org** tenant (auto-provisioned). Public providers
-/// (gmail.com, outlook.com, …) must NOT be listed — those users get
-/// isolated individual workspaces.
-fn org_domains() -> Vec<String> {
-    std::env::var("QPEDIA_ORG_DOMAINS")
-        .unwrap_or_default()
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect()
+/// The individual (per-user) tenant id for a Firebase uid. Stable per
+/// user, so two people at the same email domain never collide.
+pub(crate) fn individual_tenant_id(sub: &str) -> String {
+    format!("{INDIVIDUAL_TENANT_PREFIX}{}", qpedia_pg_store::slugify(sub))
 }
 
-/// Resolve the tenant for a Firebase login. Order:
-///   1. Explicit `tenant_id` custom claim (admin-assigned org).
-///   2. Email domain in `QPEDIA_ORG_DOMAINS` → auto-provisioned org
-///      tenant `slug(domain)`.
-///   3. Email domain matching a registered `tenants.email_domain` row.
-///   4. Otherwise → an **individual** tenant `u-<uid>`, isolated per
-///      user. NEVER the shared `default` tenant — that would expose
-///      whatever was ingested in dev/single-user mode. This is the fix
-///      for the cross-context data exposure.
+/// Resolve the tenant for a Firebase login.
+///   1. Explicit `tenant_id` custom claim — set only by the (future)
+///      org SSO / invite flow when a user is provisioned into an org.
+///   2. Otherwise → the user's **individual** workspace `u-<uid>`,
+///      isolated per user.
 ///
-/// Auto-derived tenants (1, 2, 4) are upserted so the row exists for the
-/// FK + RLS before the session is minted.
+/// Every login starts individual, even a corporate-domain email; joining
+/// or creating an org is an explicit, separately-authorized action (see
+/// AUTH-DESIGN.md). The resolved tenant is upserted so the row exists for
+/// the FK + RLS before the session is minted.
 async fn resolve_firebase_tenant(
     db: &qpedia_pg_store::PgStore,
     claims: &crate::firebase::FirebaseClaims,
 ) -> Result<qpedia_core::tenant::Tenant, ApiError> {
     use qpedia_core::tenant::Tenant;
 
-    // 1. Explicit org assignment.
     if let Some(t) = claims.tenant_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let tenant = Tenant::new(t);
         ensure_tenant(db, &tenant, t, None).await?;
         return Ok(tenant);
     }
 
-    let domain = claims
-        .email
-        .as_deref()
-        .and_then(|e| e.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()));
-
-    if let Some(domain) = &domain {
-        // 2. Configured corporate domain → shared org tenant.
-        if org_domains().iter().any(|d| d == domain) {
-            let tenant = Tenant::new(qpedia_pg_store::slugify(domain));
-            ensure_tenant(db, &tenant, domain, Some(domain)).await?;
-            return Ok(tenant);
-        }
-        // 3. Previously registered org domain.
-        if let Ok(Some(tenant)) = db.tenant_by_email_domain(domain).await {
-            return Ok(tenant);
-        }
-    }
-
-    // 4. Individual, isolated workspace.
-    let tenant = Tenant::new(format!(
-        "{INDIVIDUAL_TENANT_PREFIX}{}",
-        qpedia_pg_store::slugify(&claims.sub)
-    ));
+    let tenant = Tenant::new(individual_tenant_id(&claims.sub));
     let display = claims.email.as_deref().unwrap_or("Individual");
     ensure_tenant(db, &tenant, display, None).await?;
     Ok(tenant)
@@ -232,10 +200,17 @@ pub(crate) async fn firebase_login_route(
 
     let tenant = resolve_firebase_tenant(&s.ctx.db, &claims).await?;
 
-    // Groups from the Firebase custom claim, plus admin-by-email bootstrap
-    // (QPEDIA_ADMIN_EMAILS) so the first operator can administer a fresh
-    // deployment before any custom claims are set.
-    let groups = auth::augment_admin_by_email(claims.email.as_deref(), claims.groups.clone());
+    // Groups: start from the Firebase custom claim, add the platform
+    // admin-by-email bootstrap (QPEDIA_ADMIN_EMAILS), and — crucially —
+    // grant `admin` when this is the user's OWN individual workspace.
+    // RLS scopes that power to `u-<uid>`, so it's "owner of my own space,"
+    // never cross-tenant. Org admin is decided by the org flow, not here.
+    let mut groups = auth::augment_admin_by_email(claims.email.as_deref(), claims.groups.clone());
+    if tenant.as_str() == individual_tenant_id(&claims.sub)
+        && !groups.iter().any(|g| g == "admin")
+    {
+        groups.push("admin".to_string());
+    }
 
     let token = auth::random_token(32);
     let token_hash = auth::hash_token(&token);
