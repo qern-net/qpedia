@@ -9,6 +9,7 @@
 
   let busy = $state(false);
   let progress = $state<string | null>(null);
+  let pct = $state(0); // 0..1 upload fraction, drives the bar
   let error = $state<string | null>(null);
   let fileInput: HTMLInputElement | undefined = $state();
   let folderInput: HTMLInputElement | undefined = $state();
@@ -64,18 +65,20 @@
    *  classify.rs moves each root-/ file into /{doc_type}. */
   async function flatUpload(files: File[], target: string = folderPath) {
     if (files.length === 0) return;
-    busy = true; error = null;
+    busy = true; error = null; pct = 0;
     let done = 0;
     progress = `Uploading 0 / ${files.length}…`;
     try {
       for (const f of files) {
         await uploadSource(target, f);
         done++;
-        progress = `Uploaded ${done} / ${files.length}…`;
+        pct = done / files.length;
+        progress = `Uploading ${done} / ${files.length}…`;
+        if (done % 10 === 0) onUploaded?.(); // refresh the tree periodically
       }
       note(
         `Uploaded ${files.length} file${files.length === 1 ? '' : 's'}` +
-        (target === '/' ? ' — AI will auto-organize by doc type as they classify.' : ` to ${target}.`)
+        (target === '/' ? ' — AI will auto-organize by doc type as they classify.' : ` to ${target}. Watch each folder's progress bar as they ingest.`)
       );
       onUploaded?.();
     } catch (e: any) {
@@ -96,7 +99,7 @@
    */
   async function mirrorUpload(items: Item[]) {
     if (items.length === 0) return;
-    busy = true; error = null;
+    busy = true; error = null; pct = 0;
 
     // 1. Collect every distinct parent folder we'll need.
     const folderSet = new Set<string>();
@@ -143,11 +146,14 @@
         const target = rawToSlug.get(raw) ?? raw;
         await uploadSource(target, it.file);
         done++;
-        progress = `Uploaded ${done} / ${items.length}…`;
+        pct = done / items.length;
+        progress = `Uploading ${done} / ${items.length}…`;
+        if (done % 10 === 0) onUploaded?.();
       }
       note(
         `Uploaded ${items.length} file${items.length === 1 ? '' : 's'} into ` +
-        `${folders.length} new folder${folders.length === 1 ? '' : 's'}.`
+        `${folders.length} new 🔒 locked folder${folders.length === 1 ? '' : 's'} ` +
+        `(mirroring your structure; the AI won't reorganize them). Watch each folder's progress bar as they ingest.`
       );
       onUploaded?.();
     } catch (e: any) {
@@ -263,8 +269,17 @@
     drag a flat batch of files for a flat upload.
     To let the AI design the structure for you, upload at <span class="mono">/</span> with the file
     picker (classification auto-moves each file into <span class="mono">/&lt;doc_type&gt;</span>).
+    <br />
+    <strong>🔒 Mirror upload</strong> creates <em>locked</em> folders — the AI auto-organizer
+    won't move files in/out or rename them, so your structure is preserved exactly.
+    After upload, watch each folder's progress bar in the tree fill as files ingest.
   </div>
 
+  {#if busy}
+    <div class="upload-bar" title="Upload progress">
+      <span class="upload-fill" style="width: {Math.round(pct * 100)}%"></span>
+    </div>
+  {/if}
   {#if progress}
     <div class="muted" style="margin-top: 10px; font-size: 13px;">{progress}</div>
   {/if}
@@ -277,5 +292,19 @@
   .card.drag-hot {
     outline: 2px dashed var(--accent);
     background: var(--bg-2);
+  }
+  /* Overall upload progress while the POST loop runs. */
+  .upload-bar {
+    margin-top: 12px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-3, var(--border));
+    overflow: hidden;
+  }
+  .upload-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s ease;
   }
 </style>

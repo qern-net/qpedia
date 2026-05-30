@@ -48,15 +48,9 @@
        unmistakable so you always know whose data you're looking at. -->
   {#if me}
     <div class="workspace-banner" class:individual={me.tenant_kind === 'individual'}>
-      {#if me.tenant_kind === 'individual'}
-        <span class="ws-icon">👤</span>
-        <strong>Individual workspace</strong>
-        — your private space, isolated from other users
-      {:else}
-        <span class="ws-icon">🏢</span>
-        <strong>Organization workspace</strong>
-        — shared with your team
-      {/if}
+      <span class="ws-icon">{me.tenant_kind === 'individual' ? '👤' : '🏢'}</span>
+      <strong class="ws-label">{me.tenant_kind === 'individual' ? 'Individual workspace' : 'Organization workspace'}</strong>
+      <span class="ws-desc muted">{me.tenant_kind === 'individual' ? '— your private space, isolated from other users' : '— shared with your team'}</span>
       <span class="ws-tenant mono">{me.tenant}</span>
       <span class="ws-who muted">{me.email || me.id}{me.is_admin ? ' · admin' : ''}</span>
     </div>
@@ -83,7 +77,13 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 7px 24px;
+    padding: 0 24px;
+    /* Fixed height + nowrap so the bar never reflows to two lines when a
+       page below forces a narrower width. This was the height jitter. */
+    height: 38px;
+    flex: none;
+    white-space: nowrap;
+    overflow: hidden;
     font-size: 13px;
     /* Org = brand sky; the border-left makes the mode readable at a glance. */
     background: color-mix(in srgb, var(--accent) 14%, var(--bg));
@@ -95,13 +95,17 @@
     background: color-mix(in srgb, var(--warn) 14%, var(--bg));
     border-left-color: var(--warn);
   }
-  .workspace-banner .ws-icon { font-size: 15px; }
+  .workspace-banner .ws-icon { font-size: 15px; flex: none; }
+  .workspace-banner .ws-label { flex: none; }
+  /* The description is the first thing to truncate when space is tight. */
+  .workspace-banner .ws-desc { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .workspace-banner .ws-tenant {
     background: var(--bg-2);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 1px 10px;
     font-size: 12px;
+    flex: none;
   }
-  .workspace-banner .ws-who { margin-left: auto; font-size: 12px; }
+  .workspace-banner .ws-who { margin-left: auto; font-size: 12px; flex: none; }
 </style>

@@ -276,6 +276,29 @@ SvelteKit 5 + TypeScript, built into the container and served by axum.
 | `/chat` | Agentic chat with citations |
 | `/admin` | Stalled sources, folder ACLs (admin only) |
 
+### Uploading & folders
+
+The Sources tab gives you three ways to add documents, which differ only in
+how files land in the folder tree:
+
+| Action | Where files land | Folder lock |
+|---|---|---|
+| **File picker / drag a flat batch** | The folder selected in the tree (`/` by default) | — |
+| **📁 Upload folder (mirror)** / drag a folder | Subfolders mirroring your OS structure, created under the selected folder | 🔒 **Locked** |
+| **🤖 Upload folder (AI organize)** | Everything at `/`; classification then auto-moves each file into `/<doc_type>` | — |
+
+A **🔒 locked** (pinned) folder is excluded from AI auto-organization: the
+classifier and linter will not move files in or out of it, rename it, or delete
+it — your structure is preserved exactly as uploaded. Mirror uploads lock the
+folders they create so a hand-curated tree survives ingestion. You can toggle
+the lock on any folder from the tree (🔒/🔓), and manually-created folders are
+locked by default. Auto-organized files (root `/` uploads) flow into unlocked
+`/<doc_type>` folders the AI manages.
+
+While files ingest, each tree node shows a live progress bar (`done/total`,
+rolled up over its subtree) that fills as sources reach the `done` state; the
+list polls every 2 s until the queue drains.
+
 ---
 
 ## Connectors

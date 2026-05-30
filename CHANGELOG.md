@@ -68,6 +68,25 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Fixed
 
+- **Bulk-upload progress is now visible** (live-test feedback). Each
+  folder-tree node shows a per-folder progress bar (`done/total`, rolled
+  up over its subtree) that fills as sources reach `done`; the Sources
+  list already polls every 2 s while the queue is draining. The upload
+  panel shows an overall progress bar during the POST loop and refreshes
+  the tree every 10 files, so a 300+-file folder upload reports progress
+  instead of looking frozen.
+- **Workspace banner height jitter.** The individual/organization banner
+  could grow/shrink vertically as its description text reflowed to two
+  lines depending on page width. The banner and header are now
+  fixed-height, single-line (`nowrap`, description ellipsizes first), so
+  the bar height is stable across pages.
+- **Lock indication on mirror uploads clarified** (no behavior change).
+  Mirror/drag-folder uploads already create *locked* (pinned) folders so
+  the AI auto-organizer can't rearrange a hand-curated tree; the success
+  toast, panel hint, and tree tooltip now say "🔒 locked" explicitly, and
+  the README documents the three upload modes and what a locked folder
+  means.
+
 - **Firebase logins no longer fall back to the shared `default` tenant.**
   Previously a Firebase login with no `tenant_id` claim and no
   domain-matched tenant resolved to `default` — the same tenant

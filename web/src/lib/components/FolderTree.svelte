@@ -34,7 +34,9 @@
     name: string;
     pinned: boolean;
     children: TreeNode[];
-    fileCount: number;
+    fileCount: number;   // files directly in this folder
+    total: number;       // files in this folder + all descendants
+    done: number;        // …of those, finished ingesting (status 'done')
   };
 
   const tree = $derived(buildTree(folders, sources));
@@ -43,7 +45,7 @@
   let collapsed = $state<Set<string>>(new Set());
 
   function buildTree(folders: Folder[], sources: Source[]): TreeNode {
-    const root: TreeNode = { path: '/', name: 'All files', pinned: false, children: [], fileCount: 0 };
+    const root: TreeNode = { path: '/', name: 'All files', pinned: false, children: [], fileCount: 0, total: 0, done: 0 };
     const byPath = new Map<string, TreeNode>([['/', root]]);
     const pinnedOf = new Map<string, boolean>();
     for (const f of folders) pinnedOf.set(f.path, f.pinned);
@@ -59,7 +61,9 @@
         name: path.slice(idx + 1),
         pinned: pinnedOf.get(path) ?? false,
         children: [],
-        fileCount: 0
+        fileCount: 0,
+        total: 0,
+        done: 0
       };
       byPath.set(path, node);
       parent.children.push(node);
@@ -68,7 +72,22 @@
 
     for (const f of folders) ensure(f.path);
     for (const s of sources) ensure(s.folder_path || '/');
-    for (const s of sources) (byPath.get(s.folder_path || '/') ?? root).fileCount++;
+    // Direct counts.
+    for (const s of sources) {
+      const node = byPath.get(s.folder_path || '/') ?? root;
+      node.fileCount++;
+      node.total++;
+      if (s.status === 'done') node.done++;
+    }
+    // Roll total/done up into ancestors (post-order).
+    const rollup = (n: TreeNode) => {
+      for (const c of n.children) {
+        rollup(c);
+        n.total += c.total;
+        n.done += c.done;
+      }
+    };
+    rollup(root);
 
     const sortRec = (n: TreeNode) => {
       n.children.sort((a, b) => a.name.localeCompare(b.name));
@@ -140,10 +159,17 @@
     <span class="icon">{n.path === '/' ? '🗂' : '📁'}</span>
     <span class="label">{n.name}</span>
     {#if n.pinned}
-      <span class="pin" title="Pinned — the AI auto-organizer won't move files in/out or delete this folder">🔒</span>
+      <span class="pin" title="Locked — the AI auto-organizer won't move files in/out or delete this folder">🔒</span>
     {/if}
-    {#if n.fileCount > 0}
-      <span class="count">{n.fileCount}</span>
+    {#if n.total > 0}
+      {#if n.done < n.total}
+        <span class="progress" title="{n.done} of {n.total} files ingested">
+          <span class="progress-bar"><span class="progress-fill" style="width: {Math.round((100 * n.done) / n.total)}%"></span></span>
+          <span class="progress-txt">{n.done}/{n.total}</span>
+        </span>
+      {:else}
+        <span class="count" title="{n.total} files · all ingested">{n.total} ✓</span>
+      {/if}
     {/if}
 
     <span class="grow"></span>
@@ -204,6 +230,17 @@
     font-size: 11px; color: var(--muted, #888);
     background: var(--bg-2); border-radius: 10px; padding: 0 7px;
   }
+  /* Live ingest progress for a folder (subtree). */
+  .progress { display: inline-flex; align-items: center; gap: 6px; }
+  .progress-bar {
+    width: 56px; height: 5px; border-radius: 3px;
+    background: var(--bg-3, var(--border)); overflow: hidden;
+  }
+  .progress-fill {
+    display: block; height: 100%; background: var(--accent);
+    transition: width 0.4s ease;
+  }
+  .progress-txt { font-size: 11px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
   .grow { flex: 1; }
   .controls { display: none; gap: 2px; }
   .node:hover .controls { display: inline-flex; }
