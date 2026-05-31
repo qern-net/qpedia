@@ -8,6 +8,18 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unsupported file types no longer hang as "extracting"** (Band 6.7). A
+  source whose mime has no extractor previously returned a hard error,
+  which failed the ingest job and left the source stranded at `extracting`
+  — looking like it was still processing forever. It now degrades to a
+  terminal `tainted` state with a `source.unsupported` audit note (the
+  mime is recorded), and is re-drivable once an extractor for its type
+  lands. In the qern corpus this cleanly resolved 15 stuck files (12
+  `.mp4`, 3 `.zip`) that had no pipeline; images (48) already ingest via
+  the Band 6.0 extractor.
+
 ### Added
 
 - **Deeper wiki taxonomy** (ROADMAP Band 7.0). The wiki agent now organizes

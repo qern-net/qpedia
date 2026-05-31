@@ -143,9 +143,12 @@ job** (`no extractor for mime: …`). Each item below is one new `Extractor`
 | 6.3 | **HTML — remote** — a URL source: paste a URL (or sitemap) → fetch → distill (6.2) → ingest; optional same-origin crawl to depth N. A lightweight "web connector" sibling to Band 2. | qpedia | ⚪ |
 | 6.4 | **Archive (zip) expansion** — treat a `.zip` upload like server-side mirror-upload: expand entries into a **locked folder named `<original>.zip`** (suffix kept as the archive marker 🙂), ingest each entry to its mirrored subpath. Guards required: zip-slip (path traversal), max entries/size/depth, skip encrypted. Generalizes the existing client-side mirror-upload. | qpedia | ⚪ |
 | 6.5 | **Xlsx / Email** — `XlsxExtractor` (pandoc/calamine), `EmailExtractor` (mail-parser; eml/msg). Already noted in `qpedia-extract/src/lib.rs` TODO. | qpedia | ⚪ |
+| 6.6 | **Video / audio transcription** — `video/*` and `audio/*` currently have no pipeline (12 `.mp4` in the qern corpus sit `tainted`). A Whisper/whisper.cpp sidecar (or faster-whisper) transcribes to text → ingest like any document. Sidecar, like Marker — keeps the heavy model out of the Rust binary. | qpedia | ⚪ |
+| 6.7 | **Graceful unsupported-mime handling** — a source whose mime has no extractor now degrades to a terminal `tainted` state with a `source.unsupported` audit note, instead of failing the job and stranding the source at `extracting` (where it masqueraded as in-progress). Re-drivable once an extractor for its type lands. | qpedia | ✅ |
 
-**Build next in this band:** 6.1 (image OCR) or 6.2 (HTML distillation) —
-both high-value; pick per demand. 6.0 shipped to stop the bleeding.
+**Build next in this band:** 6.4 (zip expansion — 3 zips waiting) or 6.1
+(image OCR) / 6.2 (HTML distillation). 6.0 + 6.7 shipped; images now ingest
+and unsupported types fail cleanly instead of hanging.
 
 ---
 

@@ -86,8 +86,23 @@ async fn extract_phase(
 
     let bytes = ctx.blob.get(source_id, BlobKind::Original, ext).await?;
 
+    // Unsupported type: degrade gracefully to a terminal `tainted` state with
+    // a clear note, rather than returning Err (which fails the job and leaves
+    // the source stranded at `extracting`, masquerading as in-progress). A
+    // tainted source is re-drivable once an extractor for its mime lands
+    // (e.g. zip → Band 6.4, video/audio transcription → Band 6.6).
     if !ctx.extractors.handles_mime(mime) {
-        return Err(anyhow!("no extractor for mime: {mime}"));
+        info!(id = %source_id, %mime, "no extractor for mime — marking tainted (unsupported type)");
+        let note = serde_json::json!({
+            "reason": "no extractor for mime",
+            "mime": mime,
+            "stopped_at": "extracting",
+        });
+        ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
+        ctx.db
+            .write_audit(tenant, "qpedia-bot", "source.unsupported", Some(source_id.as_str()), Some(&note))
+            .await?;
+        return Ok(());
     }
 
     let extraction = ctx.extractors.extract(mime, bytes).await?;
