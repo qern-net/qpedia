@@ -10,6 +10,24 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Deeper wiki taxonomy** (ROADMAP Band 7.0). The wiki agent now organizes
+  pages into a shallow, navigable hierarchy — `concepts/<category>/`,
+  `entities/<type>/` (people/organizations/places/products/systems/works),
+  `topics/<area>` hub pages that link down into a subject, and a
+  hierarchical `index.md` — instead of four flat folders. Guardrails keep it
+  from over-fragmenting: reuse existing categories, never nest deeper than
+  category+page, and split pages by topic coherence (not to fill a folder).
+  Helps human browsing and gives RAG better link anchors + abstraction
+  levels. Compiled into the agent prompt, so it applies to all tenants on
+  the next ingest; existing pages keep their flat paths until re-ingested (a
+  one-time reorg lint is Band 7.1). New-wiki seed (`QPEDIA.md`/`index.md`)
+  updated to match.
+
+- **List pagination** (Band 7.2). The Sources file table paginates
+  client-side (50/page, prev/next) — the folder tree still gets every row
+  for its rollup counts. The wiki list caps each bucket at 50 with a per-
+  bucket "show all" expander.
+
 - **Right-to-left (RTL) wiki rendering.** Wiki pages now detect their
   dominant script (Arabic, Urdu, Farsi, Pashto, Hebrew, Syriac, Thaana,
   NKo, …) and set the container base direction accordingly; every block

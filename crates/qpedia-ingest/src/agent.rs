@@ -45,7 +45,7 @@ Every page (new or patched) must start with YAML frontmatter:
 ---
 title: "<noun phrase>"
 kind: summary | concept | entity | comparison
-source_ids: ["<source ulid>", ...]
+source_ids: ["<source id>", ...]
 tags: ["short", "lowercase", "tags"]
 ---
 
@@ -54,17 +54,48 @@ tags: ["short", "lowercase", "tags"]
 <body in markdown>
 
 Cite source facts as [^src:<source_id>].
-Link other wiki pages as [[concepts/foo.md]].
+Link other wiki pages as [[concepts/<category>/foo.md]].
+
+WIKI TAXONOMY — a shallow, navigable tree (at most kind / category / page)
+
+- summaries/<SOURCE_ID>.md        one page per source (a leaf).
+- concepts/<category>/<name>.md   ideas, processes, frameworks, grouped by a
+                                  domain category (e.g. law, finance,
+                                  theology, governance, technology).
+- entities/<type>/<name>.md       type ∈ people | organizations | places |
+                                  products | systems | works.
+- topics/<area>.md                a HUB page (kind: concept) that introduces
+                                  a subject area and links DOWN into its
+                                  concepts/entities — the high-level entry
+                                  point for readers and retrieval.
+- comparisons/<x>-vs-<y>.md       "X vs Y" syntheses.
+
+CATEGORIZATION RULES (avoid over-fragmentation)
+
+- Reuse existing categories/types. Read index.md and search_wiki BEFORE
+  minting a new category; match the existing spelling exactly.
+- Categorize only when it aids navigation. If no category fits yet, place
+  the page one level up (concepts/<name>.md) — don't invent a category for
+  a single page.
+- Keep it SHALLOW: never nest deeper than category + page.
+- Page granularity follows TOPIC COHERENCE, not folder depth. Don't split a
+  page just to fill a category, nor merge unrelated subjects to avoid one.
+  Target 300–2000 words; split only when a page covers ≥2 distinct subjects.
 
 INGEST PROTOCOL
 
 1. read_source(SOURCE_ID) to ground yourself.
-2. search_wiki for topics this source touches; read_page on candidates.
+2. search_wiki for topics this source touches; read_page on candidates and on
+   index.md to learn the existing categories/types.
 3. propose_new for a summary at "summaries/<SOURCE_ID>.md".
-4. propose_new or propose_patch for any concept/entity pages (1–3 max).
-5. propose_patch on "index.md" to list new pages under their sections.
-6. propose_patch on "log.md" — APPEND one timestamped line.
-7. done(summary) with one sentence.
+4. propose_new or propose_patch for the concept/entity pages this source
+   warrants (1–3 max), under their category/type path.
+5. Maintain the subject-area hub: propose_patch an existing topics/ hub to
+   link the new pages; create a hub only once ≥3 related pages exist.
+6. propose_patch on "index.md" — list new pages under their category in the
+   hierarchical catalog.
+7. propose_patch on "log.md" — APPEND one timestamped line.
+8. done(summary) with one sentence.
 
 BUDGETS
 

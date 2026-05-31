@@ -149,6 +149,43 @@ both high-value; pick per demand. 6.0 shipped to stop the bleeding.
 
 ---
 
+## Band 7 — Wiki taxonomy & RAG depth
+
+The wiki agent organizes pages into a hierarchy. Deepening it (shallowly)
+helps human navigation and gives the agent better link anchors + abstraction
+levels for retrieval — without over-fragmenting into thin pages.
+
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 7.0 | **Deepen the taxonomy** — `concepts/<category>/`, `entities/<type>/`, `topics/<area>` hub pages, hierarchical `index.md`; guardrails (reuse categories, shallow, coherence-driven granularity). Compiled into the agent prompt (affects all tenants on next ingest) + new-wiki seed (`QPEDIA.md`/`index.md`). | qpedia | ✅ |
+| 7.1 | **One-time reorg lint** — existing pages keep their old flat paths until re-ingested; a lint/migration pass that re-files them into the deeper taxonomy (move + fix inbound `[[links]]`) so an existing wiki gets the new structure without a full re-ingest. | qpedia | ⚪ |
+| 7.2 | **List pagination** — Sources file table (client-side, tree keeps full fetch) ✅; wiki list per-bucket expand ✅. Remaining: search "load more" beyond 20, and server-side folder counts so very large corpora don't fetch all sources for the tree. | qpedia | 🟢 |
+
+---
+
+## Band 8 — Native / non-Docker packaging
+
+Today's target is two containers (`app` + `weaviate`/`postgres`) via
+`docker compose`. We also need a **non-Docker install** for environments
+where Docker isn't available or wanted (air-gapped, locked-down corp
+laptops, simple single-binary self-host). In that mode the two services we
+currently get "for free" from compose — **Postgres+pgvector** and the
+**Marker OCR sidecar** — must be embedded or bundled.
+
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 8.0 | **Installer(s)** — produce native installers / a self-contained bundle per OS (e.g. MSI/winget on Windows, `.pkg`/Homebrew on macOS, `.deb`/`.rpm` + tarball on Linux). One command to a running Qpedia, no Docker. | qpedia | ⚪ |
+| 8.1 | **Embed Postgres + pgvector** — ship/manage a local Postgres (bundled binaries or an embedded-postgres helper that downloads + runs a private instance under the data dir) with the `vector` extension available; fall back to a connection string when the operator supplies their own. | qpedia | ⚪ |
+| 8.2 | **Embed / bundle Marker** — the OCR sidecar is a Python service today. For native installs, bundle it (PyInstaller/standalone) or make OCR degrade gracefully to pdfium + the image-metadata floor when no sidecar is present. Decide: optional add-on vs always-bundled (size cost). | qpedia | ⚪ |
+| 8.3 | **Single data dir + backup parity** — native mode keeps Postgres data, the git wiki repos, and blobs under one configurable root; the Band 3.3 backup runbook must cover the embedded Postgres too. | qpedia | ⚪ |
+
+**Note:** this trades operational simplicity (`docker compose up`) for
+reach. Keep Docker the primary, supported path; native is the
+escape-hatch for no-Docker environments. Embedding Postgres + Marker is the
+crux — both are currently external processes the app just connects to.
+
+---
+
 ## Vision threads (longer-running design ideas)
 
 ### SSO-aligned connectors

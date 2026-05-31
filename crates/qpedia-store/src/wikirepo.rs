@@ -20,31 +20,45 @@ const QPEDIA_MD: &str = r#"# QPEDIA.md — Wiki Style & Operations Guide
 
 This file governs how the LLM (qpedia-bot) writes and maintains this wiki.
 
-## Page kinds
-- **concepts/**: ideas, processes, frameworks. Title = noun phrase.
-- **entities/**: people, companies, products, systems. Title = proper noun.
-- **comparisons/**: "X vs Y" syntheses. Created when 2+ entities or concepts overlap.
-- **summaries/**: one page per raw source. Created on ingest.
+## Page kinds & hierarchy
+Organize pages into a SHALLOW, navigable tree — at most `kind/category/page`:
+- **topics/**: hub pages (kind: concept) that introduce a subject area and
+  link down into its concepts and entities. High-level entry points for
+  readers and search.
+- **concepts/<category>/**: ideas, processes, frameworks, grouped by domain
+  category (e.g. law, finance, theology, governance). Title = noun phrase.
+- **entities/<type>/**: people, organizations, places, products, systems,
+  works. Title = proper noun.
+- **comparisons/**: "X vs Y" syntheses. Created when 2+ entities/concepts overlap.
+- **summaries/**: one page per raw source. Created on ingest (a leaf).
+
+## Categorization
+- Reuse existing categories/types — read `index.md` before minting a new one.
+- Categorize only when it aids navigation; a lone page sits one level up.
+- Keep it SHALLOW (category + page). Page granularity follows topic
+  coherence, NOT folder depth — never split a page just to fill a category.
 
 ## Writing rules
 - Every page is standalone-readable. Never write "see above" — link instead.
 - Every claim has a source citation: `[^src:<source_id>]`.
 - Prefer bullet lists over paragraphs for fact-dense content.
-- Page length target: 300–2000 words. Split if longer.
+- Page length target: 300–2000 words. Split only when covering ≥2 subjects.
 - New terms introduced → create a concept page → link.
 
 ## Linking
 - Use `[[path/to/page.md]]` for internal links.
 - Every page should have ≥2 outbound links (unless it's a leaf summary).
+- Topic hubs link down to their pages; concept/entity pages link up to the hub.
 - When adding a fact that contradicts an existing page, add a `> ⚠ contradicts [[...]]` callout.
 
 ## Ingest protocol
 1. Read the source.
-2. search_wiki for related pages.
+2. search_wiki for related pages; read `index.md` for existing categories.
 3. Create one summary page at `summaries/<source_id>.md`.
-4. Update or create concept/entity pages referenced by the source.
-5. Update `index.md` (alpha-sorted catalog).
-6. Append one line to `log.md`.
+4. Create/update the concept/entity pages under their category/type path.
+5. Maintain the subject-area hub in `topics/` (create once ≥3 related pages exist).
+6. Update `index.md` (hierarchical catalog: kind → category → page).
+7. Append one line to `log.md`.
 
 ## Forbidden
 - Never rewrite content you can't derive from the sources.
@@ -54,19 +68,22 @@ This file governs how the LLM (qpedia-bot) writes and maintains this wiki.
 
 const INDEX_MD: &str = r#"# Index
 
-LLM-maintained catalog of every page in this wiki, alpha-sorted by category.
+LLM-maintained catalog of every page, grouped by kind → category.
 
-## Summaries
-<!-- one entry per ingested source -->
+## Topics
+<!-- subject-area hub pages -->
 
 ## Concepts
-<!-- ideas, processes, frameworks -->
+<!-- by category, e.g. ### law / ### finance -->
 
 ## Entities
-<!-- people, companies, products, systems -->
+<!-- by type, e.g. ### people / ### organizations -->
 
 ## Comparisons
 <!-- "X vs Y" syntheses -->
+
+## Summaries
+<!-- one entry per ingested source -->
 "#;
 
 const LOG_MD: &str = r#"# Log
@@ -113,7 +130,7 @@ impl WikiRepo {
             tokio::fs::write(root.join("QPEDIA.md"), QPEDIA_MD).await?;
             tokio::fs::write(root.join("index.md"), INDEX_MD).await?;
             tokio::fs::write(root.join("log.md"), LOG_MD).await?;
-            for d in &["concepts", "entities", "comparisons", "summaries", "_meta"] {
+            for d in &["topics", "concepts", "entities", "comparisons", "summaries", "_meta"] {
                 let dir = root.join(d);
                 tokio::fs::create_dir_all(&dir).await?;
                 tokio::fs::write(dir.join(".gitkeep"), "").await?;

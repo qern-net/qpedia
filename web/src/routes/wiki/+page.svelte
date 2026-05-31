@@ -30,6 +30,16 @@
   });
 
   const systemPages = $derived(pages.filter((p) => SYSTEM_PAGES.includes(p)));
+
+  // Pagination: cap each bucket, expandable on demand (buckets can be long
+  // once the taxonomy deepens).
+  const BUCKET_CAP = 50;
+  let expanded = $state<Set<string>>(new Set());
+  function toggleBucket(b: string) {
+    const next = new Set(expanded);
+    next.has(b) ? next.delete(b) : next.add(b);
+    expanded = next;
+  }
 </script>
 
 <h1>Wiki</h1>
@@ -54,11 +64,31 @@
 
       <!-- Content pages grouped by directory -->
       {#each Object.keys(grouped).sort() as bucket}
-        <div class="dir">{bucket}/</div>
-        {#each grouped[bucket] as path}
+        <div class="dir">{bucket}/ <span class="muted" style="font-weight: 400;">({grouped[bucket].length})</span></div>
+        {#each (expanded.has(bucket) ? grouped[bucket] : grouped[bucket].slice(0, BUCKET_CAP)) as path}
           <a href={`/wiki/${path}`} style="padding-left: 16px;">{path}</a>
         {/each}
+        {#if grouped[bucket].length > BUCKET_CAP}
+          <button class="more" onclick={() => toggleBucket(bucket)}>
+            {expanded.has(bucket)
+              ? '▴ show less'
+              : `▾ show all ${grouped[bucket].length}`}
+          </button>
+        {/if}
       {/each}
     </div>
   </div>
 {/if}
+
+<style>
+  .more {
+    margin: 2px 0 8px 16px;
+    padding: 2px 8px;
+    font-size: 12px;
+    background: none;
+    border: none;
+    color: var(--fg-dim);
+    cursor: pointer;
+  }
+  .more:hover { color: var(--fg); background: var(--bg-3); border-radius: 4px; }
+</style>

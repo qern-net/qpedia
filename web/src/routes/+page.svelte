@@ -27,6 +27,19 @@
   // Files shown in the right pane: those directly in the selected folder.
   const visible = $derived(sources.filter((s) => (s.folder_path || '/') === selected));
 
+  // Client-side pagination for the file table. The tree needs *all* rows for
+  // its rollup counts, so we page the right-pane list rather than the fetch.
+  const PAGE_SIZE = 50;
+  let pageIdx = $state(0);
+  let lastSelected = '';
+  const pageCount = $derived(Math.max(1, Math.ceil(visible.length / PAGE_SIZE)));
+  const paged = $derived(visible.slice(pageIdx * PAGE_SIZE, pageIdx * PAGE_SIZE + PAGE_SIZE));
+  // Reset to page 1 when the folder changes; clamp if the list shrank.
+  $effect(() => {
+    if (selected !== lastSelected) { lastSelected = selected; pageIdx = 0; }
+  });
+  $effect(() => { if (pageIdx > pageCount - 1) pageIdx = pageCount - 1; });
+
   async function refresh() {
     try {
       // folder='/' returns every source (prefix match), so we can build the
@@ -217,7 +230,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each visible as src (src.id)}
+              {#each paged as src (src.id)}
                 <tr draggable="true" ondragstart={(e) => onDragStart(e, src)} title="Drag to a folder to move">
                   <td>
                     <div>{src.filename}</div>
@@ -264,6 +277,24 @@
             </tbody>
           </table>
         </div>
+        {#if pageCount > 1}
+          <div class="row" style="justify-content: flex-end; gap: 10px; margin-top: 8px;">
+            <span class="muted" style="font-size: 12px;">
+              {pageIdx * PAGE_SIZE + 1}–{Math.min((pageIdx + 1) * PAGE_SIZE, visible.length)} of {visible.length}
+            </span>
+            <button
+              onclick={() => (pageIdx = Math.max(0, pageIdx - 1))}
+              disabled={pageIdx === 0}
+              style="font-size: 12px; padding: 3px 10px;"
+            >‹ Prev</button>
+            <span class="muted" style="font-size: 12px;">{pageIdx + 1} / {pageCount}</span>
+            <button
+              onclick={() => (pageIdx = Math.min(pageCount - 1, pageIdx + 1))}
+              disabled={pageIdx >= pageCount - 1}
+              style="font-size: 12px; padding: 3px 10px;"
+            >Next ›</button>
+          </div>
+        {/if}
       {/if}
     </section>
   </div>
