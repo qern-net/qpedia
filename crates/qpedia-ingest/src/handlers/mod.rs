@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod classify;
 pub mod distill;
 pub mod embed;

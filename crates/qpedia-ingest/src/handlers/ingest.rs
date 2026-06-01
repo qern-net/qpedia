@@ -21,7 +21,12 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
         match src.status {
             SourceStatus::Pending | SourceStatus::Extracting | SourceStatus::Failed => {
-                extract_phase(ctx, tenant, source_id, &src.mime, &src.filename).await?;
+                if super::archive::is_archive_mime(&src.mime) {
+                    // A zip isn't a document — expand it into child sources.
+                    super::archive::expand(ctx, tenant, source_id, &src).await?;
+                } else {
+                    extract_phase(ctx, tenant, source_id, &src.mime, &src.filename).await?;
+                }
             }
             SourceStatus::Extracted | SourceStatus::Classifying => {
                 if ctx.llm.is_some() {

@@ -8,6 +8,21 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **Zip ingestion** (ROADMAP Band 6.4). A `.zip` source is no longer an
+  unsupported dead-end — it expands into a **locked folder named after the
+  archive** (slugified, e.g. `foo.zip` → `foo-zip`), fanning out one child
+  source + ingest job per entry and mirroring the archive's internal
+  directory structure. Each child then flows through the normal pipeline
+  (a PDF distills, a nested zip expands again, etc.). Guards against
+  zip-slip (`enclosed_name`), encrypted entries, and zip-bombs (caps on
+  entry count, per-entry size, and total uncompressed size); decompression
+  runs on a blocking thread so the `!Send` zip reader never touches the
+  async runtime. The container is marked `done` with an `archive.expanded`
+  manifest. Verified on the qern corpus: 3 stuck zips expanded into 12
+  child PDFs now ingesting.
+
 ### Fixed
 
 - **Unsupported file types no longer hang as "extracting"** (Band 6.7). A
