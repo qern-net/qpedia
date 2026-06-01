@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
     job::{Job, JobKind, JobState},
+    source::SourceStatus,
     tenant::Tenant,
     JobId, SourceId,
 };
@@ -193,13 +194,44 @@ impl JobRunner {
             match self.ctx.db.claim_next_job(&self.worker_id, 5 * 60_000).await {
                 Ok(Some(job)) => {
                     let id = job.id.clone();
+                    // Capture the ingest target up front: if the job dies
+                    // permanently we mark the source `failed` so it surfaces
+                    // as a terminal error instead of being stranded
+                    // mid-pipeline (e.g. stuck at `extracting`).
+                    let ingest_target = matches!(job.kind, JobKind::Ingest)
+                        .then(|| serde_json::from_value::<IngestPayload>(job.payload.clone()).ok())
+                        .flatten();
                     if let Err(e) = self.handle(job).await {
-                        error!(job = %id, error = %format!("{e:#}"), "job failed");
-                        let _ = self
-                            .ctx
-                            .db
-                            .fail_job(&id, &format!("{e:#}"), Some(5_000))
-                            .await;
+                        let msg = format!("{e:#}");
+                        error!(job = %id, error = %msg, "job failed");
+                        match self.ctx.db.fail_job(&id, &msg, Some(5_000)).await {
+                            Ok(true) => {
+                                if let Some(p) = ingest_target {
+                                    warn!(job = %id, source = %p.source_id, "ingest job exhausted retries — marking source failed");
+                                    let _ = self
+                                        .ctx
+                                        .db
+                                        .update_status(&p.tenant, &p.source_id, SourceStatus::Failed)
+                                        .await;
+                                    let _ = self
+                                        .ctx
+                                        .db
+                                        .write_audit(
+                                            &p.tenant,
+                                            "qpedia-bot",
+                                            "source.failed",
+                                            Some(p.source_id.as_str()),
+                                            Some(&serde_json::json!({
+                                                "reason": "ingest job exhausted retries",
+                                                "error": msg,
+                                            })),
+                                        )
+                                        .await;
+                                }
+                            }
+                            Ok(false) => {} // re-queued for another attempt
+                            Err(fe) => warn!(job = %id, error = %format!("{fe:#}"), "fail_job errored"),
+                        }
                     } else {
                         let _ = self.ctx.db.complete_job(&id).await;
                     }

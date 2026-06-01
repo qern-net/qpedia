@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
+    getQueueOverview,
+    type QueueOverview,
     deleteConnector,
     deleteFolderAcl,
     enqueueLint,
@@ -44,6 +46,11 @@
   let acls = $state<FolderAcl[]>([]);
   let error = $state<string | null>(null);
   let busy = $state(false);
+
+  // Processing-queue state (live-polled).
+  let queue = $state<QueueOverview | null>(null);
+  let queueError = $state<string | null>(null);
+  let queueTimer: ReturnType<typeof setInterval> | null = null;
 
   // Stalled sources state
   let stalled = $state<Source[]>([]);
@@ -108,6 +115,27 @@
     } catch (e: any) {
       error = String(e?.message ?? e);
     }
+  }
+
+  async function refreshQueue() {
+    try {
+      queue = await getQueueOverview();
+      queueError = null;
+    } catch (e: any) {
+      queueError = String(e?.message ?? e);
+    }
+  }
+
+  /** Total jobs not yet in a terminal state — drives the poll cadence. */
+  function queueInFlight(q: QueueOverview | null): number {
+    if (!q) return 0;
+    return (q.by_state.queued ?? 0) + (q.by_state.running ?? 0);
+  }
+
+  function fmtAge(secs: number): string {
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
   }
 
   async function refreshStalled() {
@@ -278,7 +306,11 @@
     try { me = await getMe(); } catch {}
     loaded = true;
     if (me?.is_admin) {
-      await Promise.all([refresh(), refreshStalled(), refreshLint(), refreshConnectors(), refreshMembers(), refreshDomains()]);
+      await Promise.all([refresh(), refreshQueue(), refreshStalled(), refreshLint(), refreshConnectors(), refreshMembers(), refreshDomains()]);
+      // Poll the queue: fast while work is in flight, slow when idle.
+      queueTimer = setInterval(() => {
+        refreshQueue();
+      }, 2000);
       // Surface the result of a returning Google OAuth round-trip.
       const params = $page.url.searchParams;
       if (params.get('google_connected')) {
@@ -363,6 +395,8 @@
   function fmtDate(s: string) {
     return s ? new Date(s).toLocaleString() : '—';
   }
+
+  onDestroy(() => { if (queueTimer) clearInterval(queueTimer); });
 </script>
 
 <h1>Admin</h1>
@@ -379,6 +413,81 @@
   </div>
 {:else}
   <div class="col" style="gap: 32px;">
+
+    <!-- ── Processing queue (live) ── -->
+    <div>
+      <div class="row" style="margin-bottom: 8px; align-items: baseline;">
+        <h2 style="margin: 0;">Processing queue</h2>
+        <span class="spacer"></span>
+        {#if queue}
+          <span class="muted" style="font-size: 12px;">
+            {queueInFlight(queue) > 0 ? 'live · refreshing every 2s' : 'idle'}
+          </span>
+        {/if}
+      </div>
+
+      {#if queueError}
+        <div class="card" style="border-color: var(--err); color: var(--err);">{queueError}</div>
+      {:else if !queue}
+        <div class="card muted">Loading queue…</div>
+      {:else}
+        <!-- State counts -->
+        <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+          {#each [['queued', 'chip-pending'], ['running', 'chip-embedding'], ['done', 'chip-done'], ['dead', 'chip-failed']] as [st, cls]}
+            <span class="chip {cls}" style="display: inline-flex; gap: 6px;">
+              {st}<strong>{queue.by_state[st] ?? 0}</strong>
+            </span>
+          {/each}
+        </div>
+
+        <!-- Live processors: running jobs grouped by worker -->
+        {#if queue.active.filter((j) => j.state === 'running').length > 0}
+          <div class="card" style="padding: 0; overflow: hidden; margin-bottom: 10px;">
+            <table>
+              <thead>
+                <tr><th>Processor</th><th>Job</th><th>Source</th><th>Running for</th></tr>
+              </thead>
+              <tbody>
+                {#each queue.active.filter((j) => j.state === 'running') as j (j.id)}
+                  <tr>
+                    <td class="mono">{j.worker ?? '—'}</td>
+                    <td>{j.kind} <span class="mono muted" style="font-size: 11px;">#{j.id}</span></td>
+                    <td class="mono" style="font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{j.source ?? '—'}</td>
+                    <td>{fmtAge(j.age_secs)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <div class="muted" style="font-size: 13px; margin-bottom: 6px;">No jobs running right now.</div>
+        {/if}
+
+        <!-- Queued backlog (just a count + the next few) -->
+        {#if (queue.by_state.queued ?? 0) > 0}
+          <div class="muted" style="font-size: 13px;">
+            {queue.by_state.queued} queued · next:
+            {queue.active.filter((j) => j.state === 'queued').slice(0, 5).map((j) => j.source ?? j.kind).join(', ')}{(queue.by_state.queued ?? 0) > 5 ? ' …' : ''}
+          </div>
+        {/if}
+
+        <!-- Recent failures -->
+        {#if queue.dead.length > 0}
+          <details style="margin-top: 10px;">
+            <summary class="muted" style="cursor: pointer; font-size: 13px;">⚠ {queue.dead.length} dead job(s) — last error each</summary>
+            <div class="card" style="margin-top: 6px;">
+              {#each queue.dead as d (d.id)}
+                <div style="padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px;">
+                  <span class="mono">{d.kind} #{d.id}</span>
+                  {#if d.source}<span class="mono muted"> · {d.source}</span>{/if}
+                  <div class="mono" style="color: var(--err); white-space: pre-wrap; word-break: break-word;">{d.error ?? '(no error recorded)'}</div>
+                </div>
+              {/each}
+            </div>
+          </details>
+        {/if}
+      {/if}
+    </div>
 
     <!-- ── Stalled Sources ── -->
     <div>

@@ -10,6 +10,7 @@ use qpedia_core::{
     tenant::Tenant,
     JobId,
 };
+use serde_json::{json, Value};
 use sqlx::Row;
 
 impl PgStore {
@@ -77,11 +78,20 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn fail_job(&self, id: &JobId, err: &str, retry_in_ms: Option<i64>) -> Result<()> {
+    /// Record a job failure. With `retry_in_ms`, the job re-queues unless it
+    /// has exhausted `max_attempts`, in which case it goes `dead`. Returns
+    /// `true` when the job is now permanently `dead` (so the caller can mark
+    /// the underlying source `failed`).
+    pub async fn fail_job(
+        &self,
+        id: &JobId,
+        err: &str,
+        retry_in_ms: Option<i64>,
+    ) -> Result<bool> {
         let now = Utc::now();
         if let Some(delay) = retry_in_ms {
             let next = now + chrono::Duration::milliseconds(delay);
-            sqlx::query(
+            let row = sqlx::query(
                 "UPDATE jobs SET \
                      state = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END, \
                      last_error = $1, \
@@ -89,15 +99,18 @@ impl PgStore {
                      locked_by = NULL, \
                      locked_until = NULL, \
                      updated_at = $3 \
-                 WHERE id::text = $4",
+                 WHERE id::text = $4 \
+                 RETURNING state",
             )
             .bind(err)
             .bind(next)
             .bind(now)
             .bind(id.as_str())
-            .execute(self.pool())
+            .fetch_one(self.pool())
             .await
             .context("fail_job with retry")?;
+            let state: String = row.get("state");
+            Ok(state == "dead")
         } else {
             sqlx::query(
                 "UPDATE jobs SET state = 'dead', last_error = $1, updated_at = $2 \
@@ -109,8 +122,73 @@ impl PgStore {
             .execute(self.pool())
             .await
             .context("fail_job dead")?;
+            Ok(true)
         }
-        Ok(())
+    }
+
+    /// Snapshot of the job queue for the tenant: counts by state, the
+    /// currently active jobs (running first, with their worker + source +
+    /// age), and recent dead jobs with their error. Drives the Admin queue
+    /// view. Tenant-scoped via RLS.
+    pub async fn queue_overview(&self, tenant: &Tenant) -> Result<Value> {
+        let mut tx = self.begin_for(tenant).await?;
+
+        let by_state = sqlx::query("SELECT state, count(*)::bigint AS n FROM jobs GROUP BY state")
+            .fetch_all(&mut *tx)
+            .await
+            .context("queue by_state")?;
+        let mut states = serde_json::Map::new();
+        for r in &by_state {
+            states.insert(r.get::<String, _>("state"), json!(r.get::<i64, _>("n")));
+        }
+
+        // Running first (the live processors), then the queued backlog.
+        let active = sqlx::query(
+            "SELECT id, kind, state, locked_by, \
+                    payload->>'source_id' AS source_id, \
+                    EXTRACT(EPOCH FROM (now() - updated_at))::bigint AS age_secs \
+             FROM jobs WHERE state IN ('running', 'queued') \
+             ORDER BY (state = 'running') DESC, updated_at ASC \
+             LIMIT 100",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .context("queue active")?;
+        let active: Vec<Value> = active
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.get::<i64, _>("id").to_string(),
+                    "kind": r.get::<String, _>("kind"),
+                    "state": r.get::<String, _>("state"),
+                    "worker": r.try_get::<Option<String>, _>("locked_by").ok().flatten(),
+                    "source": r.try_get::<Option<String>, _>("source_id").ok().flatten(),
+                    "age_secs": r.get::<i64, _>("age_secs"),
+                })
+            })
+            .collect();
+
+        let dead = sqlx::query(
+            "SELECT id, kind, payload->>'source_id' AS source_id, last_error \
+             FROM jobs WHERE state = 'dead' ORDER BY updated_at DESC LIMIT 20",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .context("queue dead")?;
+        let dead: Vec<Value> = dead
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.get::<i64, _>("id").to_string(),
+                    "kind": r.get::<String, _>("kind"),
+                    "source": r.try_get::<Option<String>, _>("source_id").ok().flatten(),
+                    "error": r.try_get::<Option<String>, _>("last_error").ok().flatten(),
+                })
+            })
+            .collect();
+
+        tx.commit().await.ok();
+        Ok(json!({ "by_state": states, "active": active, "dead": dead }))
     }
 }
 

@@ -381,6 +381,23 @@ export async function listStalledSources(): Promise<{ sources: Source[]; count: 
   return json(await fetch('/api/v1/admin/sources/stalled'));
 }
 
+export type QueueJob = {
+  id: string;
+  kind: string;
+  state: string;
+  worker: string | null;
+  source: string | null;
+  age_secs: number;
+};
+export type QueueOverview = {
+  by_state: Record<string, number>;
+  active: QueueJob[];
+  dead: { id: string; kind: string; source: string | null; error: string | null }[];
+};
+export async function getQueueOverview(): Promise<QueueOverview> {
+  return json(await fetch('/api/v1/admin/queue'));
+}
+
 export async function resumeStalledSources(): Promise<{ enqueued: number }> {
   return json(await fetch('/api/v1/admin/sources/resume', { method: 'POST' }));
 }

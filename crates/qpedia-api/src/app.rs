@@ -391,6 +391,7 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
                 .put(routes::set_folder_acl)
                 .delete(routes::delete_folder_acl),
         )
+        .route("/api/v1/admin/queue", get(routes::queue_overview))
         .route(
             "/api/v1/admin/sources/stalled",
             get(routes::list_stalled_sources),

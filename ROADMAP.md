@@ -80,6 +80,8 @@ Do these before / alongside the qpedia-pvt SaaS launch.
 | 3.5 | **CI for migrations** — spin up a fresh pgvector container, apply all migrations, run `cargo test`. Catches accidental schema regressions. | qpedia | ✅ |
 | 3.6 | **Premium-LLM ops** — vendor failover, per-tenant quotas, cost dashboards. | qpedia-pvt | ⚪ |
 | 3.7 | **Compliance** — SOC2 / ISO27001 audit hooks, GDPR data export / erasure flows. | qpedia-pvt | ⚪ |
+| 3.8 | **Visual processing queue** — Admin "Processing queue" panel: live (2s poll) counts by state (queued/running/done/dead), the running jobs by **worker/processor** (kind · source · running-for), the queued backlog, and recent dead jobs with their last error. Backed by `GET /api/v1/admin/queue`. | qpedia | ✅ |
+| 3.9 | **Terminal `failed` state** — when an ingest job exhausts its retries (`dead`), the source is now marked `failed` with a `source.failed` audit note, instead of being stranded mid-pipeline. Complements `tainted` (unsupported/stopped) — `failed` = genuine error after retries. Both are visible in the queue panel and source list. | qpedia | ✅ |
 
 ---
 
@@ -138,17 +140,18 @@ job** (`no extractor for mime: …`). Each item below is one new `Extractor`
 | # | Item | Repo | Status |
 |---|---|---|---|
 | 6.0 | **Image metadata extractor** — register `image/*` so images stop dead-lettering; index dimensions + filename + mime as searchable text. The "at least index the metadata" floor. | qpedia | ✅ |
-| 6.1 | **Image OCR** — route `image/*` through the Marker sidecar (same class as scanned-PDF OCR; surya/tesseract there) when configured; fall back to 6.0 metadata when the sidecar is down/absent. Keeps OCR out of the Rust binary. | qpedia | ⚪ |
+| 6.1 | **Image OCR + vision description** — for a text image (scan/screenshot) extract the text; for pictorial/mixed content, *describe the image in words* and use that as the page content. Needs **multimodal-LLM plumbing**: extend `qpedia_llm::Message` to carry image parts, wire the OpenAI/Anthropic vision request shape, and add a vision step in the image path (the extractor has no LLM; the ingest pipeline does). Falls back to 6.0 metadata when no vision model is configured. The next build. | qpedia | ⚪ |
 | 6.2 | **HTML distillation — file-based** — `HtmlExtractor` for `text/html`: a *readability* pass (strip nav/boilerplate/ads) → markdown, **not** raw `pandoc -f html` (which keeps the junk). Tree-based "just works" once registered (HTML files in the folder tree). | qpedia | ⚪ |
 | 6.3 | **HTML — remote** — a URL source: paste a URL (or sitemap) → fetch → distill (6.2) → ingest; optional same-origin crawl to depth N. A lightweight "web connector" sibling to Band 2. | qpedia | ⚪ |
 | 6.4 | **Archive (zip) expansion** — a `.zip` source expands into a **locked folder named after the archive** (slugified, so `foo.zip` → `foo-zip`), fanning out one child Source + ingest job per entry, mirroring the internal directory structure; each child flows through the normal pipeline (nested zips expand again). Guards: zip-slip (`enclosed_name`), skip encrypted, cap entries (2000) / per-entry (200 MiB) / total uncompressed (1 GiB) against zip-bombs. Decompression runs in `spawn_blocking` (the zip reader is `!Send`). The container is marked `done` with an `archive.expanded` manifest. | qpedia | ✅ |
 | 6.5 | **Xlsx / Email** — `XlsxExtractor` (pandoc/calamine), `EmailExtractor` (mail-parser; eml/msg). Already noted in `qpedia-extract/src/lib.rs` TODO. | qpedia | ⚪ |
-| 6.6 | **Video / audio transcription** — `video/*` and `audio/*` currently have no pipeline (12 `.mp4` in the qern corpus sit `tainted`). A Whisper/whisper.cpp sidecar (or faster-whisper) transcribes to text → ingest like any document. Sidecar, like Marker — keeps the heavy model out of the Rust binary. | qpedia | ⚪ |
+| 6.6 | **Audio/video — metadata floor ✅, transcription ⚪** — `MediaExtractor` registers `audio/*` + `video/*` and indexes container format + byte size + (best-effort via `lofty`) duration and title/artist tags, so media stops dead-lettering (the 12 `.mp4` now ingest, duration captured). **Transcription** still pending: a Whisper/whisper.cpp sidecar → real speech-to-text for the page content. Sidecar, like Marker. | qpedia | 🟢 |
 | 6.7 | **Graceful unsupported-mime handling** — a source whose mime has no extractor now degrades to a terminal `tainted` state with a `source.unsupported` audit note, instead of failing the job and stranding the source at `extracting` (where it masqueraded as in-progress). Re-drivable once an extractor for its type lands. | qpedia | ✅ |
 
-**Build next in this band:** 6.1 (image OCR) or 6.2 (HTML distillation),
-then 6.6 (video/audio — 12 `.mp4` waiting). 6.0 + 6.4 + 6.7 shipped: images
-ingest, zips expand into their contents, and unsupported types fail cleanly.
+**Build next in this band:** 6.1 (image OCR + vision description) — the
+user-requested next build; or 6.2 (HTML distillation). 6.0 + 6.4 + 6.6-floor
++ 6.7 shipped: images, zips, and media all ingest; unsupported types fail
+cleanly.
 
 ---
 

@@ -10,12 +10,14 @@ pub mod text;
 pub mod pdf;
 pub mod docx;
 pub mod image;
+pub mod media;
 pub mod marker;
 
 pub use text::TextExtractor;
 pub use pdf::PdfExtractor;
 pub use docx::DocxExtractor;
 pub use image::ImageExtractor;
+pub use media::MediaExtractor;
 pub use marker::MarkerExtractor;
 
 #[async_trait]
@@ -69,6 +71,9 @@ impl ExtractorRegistry {
         // Images: index metadata so they don't dead-letter. OCR (Band 6.1)
         // is a separate sidecar capability layered on later.
         reg.register(Box::new(ImageExtractor));
+        // Audio/video: index container metadata (duration/tags). Transcription
+        // (Band 6.6) is a separate sidecar step.
+        reg.register(Box::new(MediaExtractor));
         reg
     }
 

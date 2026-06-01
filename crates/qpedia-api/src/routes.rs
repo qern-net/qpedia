@@ -2148,6 +2148,24 @@ pub(crate) async fn list_stalled_sources(
     Ok(Json(json!({ "sources": sources, "count": count })))
 }
 
+/// Live job-queue snapshot for the Admin "Processing queue" view: counts by
+/// state, the active jobs (running processors first), and recent failures.
+pub(crate) async fn queue_overview(
+    State(s): State<AppState>,
+    user: User,
+) -> Result<Json<Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(ApiError::Forbidden);
+    }
+    let overview = s
+        .ctx
+        .db
+        .queue_overview(&user.tenant)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(overview))
+}
+
 pub(crate) async fn resume_stalled_sources(
     State(s): State<AppState>,
     user: User,

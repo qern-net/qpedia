@@ -10,6 +10,20 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Visual processing queue** (ROADMAP Band 3.8). The Admin tab now has a
+  live **Processing queue** panel (polls every 2s): counts by job state
+  (queued / running / done / dead), the **running jobs grouped by worker**
+  (the "processors" — kind · source · running-for), the queued backlog,
+  and an expandable list of recent dead jobs with their last error. Backed
+  by a new admin-only `GET /api/v1/admin/queue`.
+
+- **Audio/video metadata** (Band 6.6 floor). A `MediaExtractor` registers
+  `audio/*` and `video/*` so media files stop dead-lettering: it indexes
+  the container format, byte size, and — best-effort via `lofty` —
+  duration and any title/artist tags. The 12 `.mp4` in the corpus now
+  ingest (duration captured, e.g. `1:52`) and flow into the wiki.
+  Speech-to-text **transcription** remains Band 6.6 (a Whisper sidecar).
+
 - **Zip ingestion** (ROADMAP Band 6.4). A `.zip` source is no longer an
   unsupported dead-end — it expands into a **locked folder named after the
   archive** (slugified, e.g. `foo.zip` → `foo-zip`), fanning out one child
@@ -24,6 +38,13 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
   child PDFs now ingesting.
 
 ### Fixed
+
+- **Genuine processing failures surface as `failed`** (Band 3.9). When an
+  ingest job exhausts its retries and goes `dead`, the source is now
+  marked `failed` with a `source.failed` audit note, instead of being
+  stranded mid-pipeline (e.g. stuck at `extracting`). This complements
+  `tainted` (unsupported/stopped): `failed` = a real error after retries.
+  `fail_job` now reports whether the job died so the runner can act.
 
 - **Unsupported file types no longer hang as "extracting"** (Band 6.7). A
   source whose mime has no extractor previously returned a hard error,
