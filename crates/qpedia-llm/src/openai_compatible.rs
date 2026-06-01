@@ -3,8 +3,9 @@
 //! Used for on-prem / air-gapped deployments.
 
 use crate::openrouter::{openai_sse_to_tokens, OpenAIRequest, OpenAIResponse};
-use crate::{CompleteReq, CompleteResp, LlmError, LlmProvider, Token};
+use crate::{CompleteReq, CompleteResp, LlmError, LlmProvider, Token, VisionReq};
 use async_trait::async_trait;
+use base64::Engine;
 use futures::stream::BoxStream;
 use std::time::Duration;
 use tracing::debug;
@@ -66,6 +67,48 @@ impl LlmProvider for OpenAICompatible {
             "openai complete"
         );
         Ok(resp)
+    }
+
+    async fn vision(&self, req: VisionReq) -> Result<String, LlmError> {
+        // Chat-completions multimodal shape: a user message whose content is a
+        // [text, image_url] array. The image rides inline as a base64 data URL.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&req.image_bytes);
+        let data_url = format!("data:{};base64,{}", req.image_mime, b64);
+        let body = serde_json::json!({
+            "model": req.model,
+            "max_tokens": req.max_tokens,
+            "temperature": 0.0,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": req.prompt },
+                    { "type": "image_url", "image_url": { "url": data_url, "detail": "auto" } }
+                ]
+            }]
+        });
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let mut builder = self.client.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            builder = builder.bearer_auth(key);
+        }
+        let resp = builder.send().await.map_err(|e| LlmError::Http(e.to_string()))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| LlmError::Http(e.to_string()))?;
+        if !status.is_success() {
+            if status.as_u16() == 429 {
+                return Err(LlmError::RateLimited);
+            }
+            return Err(LlmError::Provider(format!("{status}: {text}")));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| LlmError::Provider(format!("decode vision: {e}\nbody: {text}")))?;
+        let content = parsed["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| LlmError::Provider(format!("no content in vision response: {text}")))?
+            .to_string();
+        debug!(model = %req.model, chars = content.len(), "openai vision");
+        Ok(content)
     }
 
     async fn stream(&self, req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError> {

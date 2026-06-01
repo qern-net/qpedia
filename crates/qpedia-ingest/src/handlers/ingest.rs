@@ -110,14 +110,39 @@ async fn extract_phase(
         return Ok(());
     }
 
-    let extraction = ctx.extractors.extract(mime, bytes).await?;
-    ctx.blob.put_text(source_id, BlobKind::Extracted, &extraction.text).await?;
+    let extraction = ctx.extractors.extract(mime, bytes.clone()).await?;
+    let mut text = extraction.text;
+    let mut notes = extraction.notes;
+
+    // Image OCR / vision description (Band 6.1): for images, the extractor
+    // only yields metadata. If a vision model is available, ask the LLM to
+    // transcribe any text and/or describe the picture, and use that as the
+    // page content (metadata kept as a trailer). Best-effort: on any error we
+    // keep the metadata floor so the source still ingests.
+    if mime.starts_with("image/") {
+        if let (Some(llm), Some(vmodel)) = (&ctx.llm, qpedia_llm::vision_model()) {
+            match describe_image(llm.as_ref(), &vmodel, mime, &bytes).await {
+                Ok(desc) if !desc.trim().is_empty() => {
+                    info!(id = %source_id, model = %vmodel, chars = desc.len(), "image described via vision");
+                    notes.push(format!("vision: OCR/description via {vmodel}"));
+                    text = format!("{}\n\n---\n{text}", desc.trim());
+                }
+                Ok(_) => notes.push("vision: empty result; kept metadata only".into()),
+                Err(e) => {
+                    info!(id = %source_id, error = %e, "vision failed; keeping metadata only");
+                    notes.push(format!("vision failed ({e}); kept metadata only"));
+                }
+            }
+        }
+    }
+
+    ctx.blob.put_text(source_id, BlobKind::Extracted, &text).await?;
 
     let manifest = serde_json::json!({
         "language": extraction.language,
         "page_count": extraction.pages.len(),
-        "char_count": extraction.text.len(),
-        "notes": extraction.notes,
+        "char_count": text.len(),
+        "notes": notes,
     });
     ctx.blob
         .put_text(source_id, BlobKind::Manifest, &serde_json::to_string_pretty(&manifest)?)
@@ -128,11 +153,29 @@ async fn extract_phase(
         .write_audit(tenant, "qpedia-bot", "source.extracted", Some(source_id.as_str()), Some(&manifest))
         .await?;
 
-    info!(
-        id = %source_id,
-        bytes = extraction.text.len(),
-        notes = ?extraction.notes,
-        "extraction complete"
-    );
+    info!(id = %source_id, bytes = text.len(), notes = ?notes, "extraction complete");
     Ok(())
+}
+
+/// Ask a vision-capable LLM to OCR and/or describe an image, returning plain
+/// text suitable as wiki source content.
+async fn describe_image(
+    llm: &dyn qpedia_llm::LlmProvider,
+    model: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<String> {
+    const PROMPT: &str = "You are extracting an image's content for a knowledge base. \
+If the image contains text (a scan, screenshot, slide, table, or document), transcribe ALL of it faithfully, preserving structure and reading order. \
+If it is a photo, diagram, chart, map, or illustration, describe in detail what it depicts: subjects, setting, any visible text/labels, and — for charts/tables — the data and relationships. \
+If it is mixed, do both. Output only the transcription/description as plain text or markdown, with no preamble or commentary.";
+
+    let req = qpedia_llm::VisionReq {
+        model: model.to_string(),
+        prompt: PROMPT.to_string(),
+        image_mime: mime.to_string(),
+        image_bytes: bytes.to_vec(),
+        max_tokens: 4096,
+    };
+    llm.vision(req).await.map_err(|e| anyhow!("{e}"))
 }

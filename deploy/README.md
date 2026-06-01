@@ -32,7 +32,9 @@ dev-only bits. It must include at least:
 QPEDIA_DB_PASSWORD=<long-random-string>
 
 # --- LLM ---
-QPEDIA_OPENAI_API_KEY=sk-proj-...        # your real key
+OPENAI_API_KEY=sk-proj-...               # your real key
+# Image OCR/vision (Band 6.1) auto-enables with an OpenAI key and bills per
+# image. Set QPEDIA_VISION=0 to disable, or QPEDIA_VISION_MODEL=... to override.
 
 # --- auth / identity (Session/Firebase mode) ---
 QPEDIA_FIREBASE_PROJECT_ID=qernnet

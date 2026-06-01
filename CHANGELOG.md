@@ -10,6 +10,21 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Image OCR + vision description** (ROADMAP Band 6.1). Images are no
+  longer indexed by metadata alone — a vision-capable LLM now reads them:
+  text images (scans/screenshots/slides/tables) are transcribed; photos,
+  diagrams, charts and maps are described in words; mixed content gets
+  both. That text becomes the wiki page content (the format/dimensions
+  metadata stays as a trailer), so images are classified and searched by
+  what they actually contain. New one-shot `LlmProvider::vision` (OpenAI
+  chat-completions multimodal shape, base64 data URL) implemented for the
+  OpenAI-compatible provider; the image branch of `extract_phase` calls it.
+  Auto-enables for vision-capable providers (`gpt-4.1-mini` &c.);
+  `QPEDIA_VISION_MODEL` overrides the model, `QPEDIA_VISION=0` disables it,
+  and any error falls back to the Band 6.0 metadata floor. Verified live: an
+  Urdu names-list PNG was OCR'd (RTL preserved) and correctly classified as
+  Urdu/names.
+
 - **One-command server deploy via GitHub Actions** (`deploy/`,
   `.github/workflows/deploy.yml`). A manual `workflow_dispatch` deploy
   SSHes to a host, provisions it idempotently (creates the non-root

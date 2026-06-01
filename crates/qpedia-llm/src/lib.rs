@@ -21,6 +21,23 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     async fn complete(&self, req: CompleteReq) -> Result<CompleteResp, LlmError>;
     async fn stream(&self, req: CompleteReq) -> Result<BoxStream<'static, Result<Token, LlmError>>, LlmError>;
+
+    /// One-shot multimodal request: OCR/describe an image, returning plain
+    /// text. Default reports no vision support so callers fall back to a
+    /// metadata-only path. Implemented for OpenAI-compatible providers.
+    async fn vision(&self, _req: VisionReq) -> Result<String, LlmError> {
+        Err(LlmError::Provider("vision not supported by this provider".into()))
+    }
+}
+
+/// A single image + instruction for a `vision` call.
+#[derive(Debug, Clone)]
+pub struct VisionReq {
+    pub model: String,
+    pub prompt: String,
+    pub image_mime: String,
+    pub image_bytes: Vec<u8>,
+    pub max_tokens: u32,
 }
 
 /// Per-provider default model. Override with `QPEDIA_LLM_MODEL`.
@@ -133,6 +150,27 @@ pub fn current_model() -> String {
         "openai" => DEFAULT_OPENAI_MODEL.into(),
         "openrouter" => DEFAULT_OPENROUTER_MODEL.into(),
         _ => DEFAULT_ANTHROPIC_MODEL.into(),
+    }
+}
+
+/// The model to use for image OCR/description (Band 6.1), or `None` if image
+/// vision is disabled/unavailable. `QPEDIA_VISION=0` disables it;
+/// `QPEDIA_VISION_MODEL` sets an explicit model; otherwise the current model
+/// is used for vision-capable providers (OpenAI / OpenRouter — `gpt-4.1-mini`
+/// and friends are multimodal). Anthropic-direct and bare local endpoints
+/// require an explicit `QPEDIA_VISION_MODEL` to opt in.
+pub fn vision_model() -> Option<String> {
+    if let Some(v) = nonempty_env("QPEDIA_VISION") {
+        if matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "off" | "no") {
+            return None;
+        }
+    }
+    if let Some(m) = nonempty_env("QPEDIA_VISION_MODEL") {
+        return Some(m);
+    }
+    match detect_provider_kind().as_str() {
+        "openai" | "openrouter" => Some(current_model()),
+        _ => None,
     }
 }
 
