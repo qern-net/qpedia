@@ -10,6 +10,22 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **One-command server deploy via GitHub Actions** (`deploy/`,
+  `.github/workflows/deploy.yml`). A manual `workflow_dispatch` deploy
+  SSHes to a host, provisions it idempotently (creates the non-root
+  `qpedia` user matching the container's uid 10001, installs Docker), and
+  brings the stack up from **`/opt/qpedia`** as that **unprivileged** user
+  — `root` SSH is used only to provision, never to run the app. The image
+  builds on the server (one `.env` covers build args + runtime). Secrets
+  (host, password, the production `.env`) live only in GitHub Actions
+  secrets; nothing sensitive is committed. See `deploy/README.md` for the
+  required secrets and the SSH-key / reverse-proxy hardening notes.
+
+- **Postgres is no longer published on `0.0.0.0`** — the host port binds to
+  `127.0.0.1:5432` (the app reaches it over the compose network). Prevents
+  exposing the database when the stack runs on a public server; local
+  `psql` still works.
+
 - **Visual processing queue** (ROADMAP Band 3.8). The Admin tab now has a
   live **Processing queue** panel (polls every 2s): counts by job state
   (queued / running / done / dead), the **running jobs grouped by worker**

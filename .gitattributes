@@ -1,0 +1,11 @@
+# Normalize line endings. Without this, a Windows checkout can commit CRLF
+# into shell scripts, which then fail on the Linux deploy host with
+# `bash: \r: command not found`.
+* text=auto
+
+# These MUST stay LF regardless of the editing platform.
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
