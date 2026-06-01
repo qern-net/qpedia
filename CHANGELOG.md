@@ -39,6 +39,18 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Fixed
 
+- **Crashed-worker jobs are no longer orphaned in `running` forever.**
+  `claim_next_job` only ever picked `state = 'queued'`, so the 5-minute
+  lease (`locked_until`) was written but never acted on — when a worker
+  died mid-job (e.g. a container restart) its in-flight jobs stayed
+  `running` indefinitely (four such jobs sat ~37h after earlier restarts).
+  The claim query now also reclaims `running` jobs whose lease has
+  expired, and the lease was lengthened from 5 to 30 minutes so a
+  legitimately slow job (Marker OCR + agent) isn't reclaimed by another
+  worker mid-run. Idempotent handlers make a reclaimed-but-partial job
+  safe to re-run. Closes the reliability gap implicit in the multi-worker
+  runner (Band 3.2).
+
 - **Genuine processing failures surface as `failed`** (Band 3.9). When an
   ingest job exhausts its retries and goes `dead`, the source is now
   marked `failed` with a `source.failed` audit note, instead of being

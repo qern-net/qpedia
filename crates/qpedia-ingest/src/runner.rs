@@ -191,7 +191,11 @@ impl JobRunner {
             "job runner started"
         );
         loop {
-            match self.ctx.db.claim_next_job(&self.worker_id, 5 * 60_000).await {
+            // Lease length must exceed the slowest job so a legitimately
+            // long run (Marker OCR up to ~10 min + agent LLM turns + embed)
+            // isn't reclaimed by another worker mid-flight. A crashed worker's
+            // jobs become reclaimable once this lease lapses.
+            match self.ctx.db.claim_next_job(&self.worker_id, 30 * 60_000).await {
                 Ok(Some(job)) => {
                     let id = job.id.clone();
                     // Capture the ingest target up front: if the job dies

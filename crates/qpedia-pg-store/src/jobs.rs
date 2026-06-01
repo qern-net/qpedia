@@ -44,6 +44,14 @@ impl PgStore {
     pub async fn claim_next_job(&self, worker_id: &str, lease_ms: i64) -> Result<Option<Job>> {
         let now = Utc::now();
         let lease_until = now + chrono::Duration::milliseconds(lease_ms);
+        // Claim a queued job, OR reclaim one whose worker died mid-flight:
+        // a `running` job whose lease (`locked_until`) has expired. Without
+        // the second clause a crashed/restarted worker strands its in-flight
+        // jobs in `running` forever (the lease was written but never acted
+        // on). `lease_ms` must comfortably exceed the slowest job (Marker OCR
+        // + agent) so a legitimately-running job isn't reclaimed by a second
+        // worker mid-run. Handlers are idempotent, so a reclaimed job that
+        // had partially progressed re-runs safely.
         let row = sqlx::query(
             "UPDATE jobs SET \
                  state = 'running', \
@@ -53,7 +61,8 @@ impl PgStore {
                  updated_at = $3 \
              WHERE id = ( \
                  SELECT id FROM jobs \
-                 WHERE state = 'queued' AND next_run_at <= $3 \
+                 WHERE (state = 'queued' AND next_run_at <= $3) \
+                    OR (state = 'running' AND locked_until < $3) \
                  ORDER BY next_run_at ASC \
                  FOR UPDATE SKIP LOCKED LIMIT 1 \
              ) \
