@@ -86,4 +86,9 @@ done
 
 log "Status"
 sudo -u "${QPEDIA_USER}" docker compose ps
-printf '\nDeployed. App on :8080 — put a TLS reverse proxy + firewall in front (see deploy/README.md).\n'
+if grep -q '^COMPOSE_PROFILES=.*caddy' "${APP_DIR}/.env" 2>/dev/null; then
+  DOMAIN="$(sed -n 's/^QPEDIA_DOMAIN=//p' "${APP_DIR}/.env" | tr -d '\r')"
+  printf '\nDeployed. Caddy is terminating TLS for https://%s (cert provisions within ~1 min once DNS + ports 80/443 resolve).\n' "${DOMAIN:-<QPEDIA_DOMAIN unset>}"
+else
+  printf '\nDeployed. App on 127.0.0.1:8080 (no caddy profile) — front it with TLS before public use; see deploy/README.md.\n'
+fi

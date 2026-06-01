@@ -28,8 +28,13 @@ services:
       - ./data/wiki:/data/wiki
       - ./data/raw:/data/raw
       - ./data/models:/data/models
+    # Loopback only. In prod the `caddy` service is the public entry (TLS on
+    # 443) and reaches the app over the compose network; locally you hit
+    # http://localhost:8080. Docker publishes bypass the host firewall, so a
+    # `0.0.0.0:8080` mapping would expose the app even behind `ufw` — bind to
+    # 127.0.0.1 instead.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,6 +60,27 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # TLS-terminating reverse proxy. Enabled in production via the `caddy`
+  # profile (set `COMPOSE_PROFILES=caddy` in .env); not started for local dev.
+  # Caddy auto-provisions a Let's Encrypt cert for $QPEDIA_DOMAIN — this needs
+  # an A record for that host pointing at this server and ports 80+443 open.
+  caddy:
+    image: caddy:2-alpine
+    profiles: [caddy]
+    environment:
+      QPEDIA_DOMAIN: ${QPEDIA_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data     # ACME certs/keys — MUST persist (LE rate limits)
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
   marker:
     build:
       context: ./sidecar/marker
@@ -67,7 +93,9 @@ services:
     restart: unless-stopped
 
 volumes:
-  # Postgres (canonical store) and the marker model cache use named
-  # volumes — everything else is a bind mount to ./data/ above.
+  # Postgres (canonical store), Caddy certs, and the marker model cache use
+  # named volumes — everything else is a bind mount to ./data/ above.
   postgres-data:
+  caddy-data:
+  caddy-config:
   marker-cache:

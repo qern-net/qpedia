@@ -21,10 +21,19 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
   secrets; nothing sensitive is committed. See `deploy/README.md` for the
   required secrets and the SSH-key / reverse-proxy hardening notes.
 
-- **Postgres is no longer published on `0.0.0.0`** — the host port binds to
-  `127.0.0.1:5432` (the app reaches it over the compose network). Prevents
-  exposing the database when the stack runs on a public server; local
-  `psql` still works.
+- **Caddy reverse proxy with automatic HTTPS** (`deploy/Caddyfile`, the
+  `caddy` compose profile). In production Caddy fronts the app on 443 with
+  an auto-renewed Let's Encrypt cert for `$QPEDIA_DOMAIN`
+  (e.g. `qpedia.qern.net`) and redirects 80 → 443. Enabled per-host by
+  setting `COMPOSE_PROFILES=caddy` + `QPEDIA_DOMAIN=...` in `.env`; off for
+  local dev. Certs persist in a `caddy-data` volume. Requires a DNS A
+  record for the domain and ports 80/443 open.
+
+- **App and Postgres now bind to `127.0.0.1` only.** Postgres was already
+  loopback; the app moved from `0.0.0.0:8080` to `127.0.0.1:8080` so Caddy
+  is the sole public entry. Docker's published ports bypass `ufw`, so
+  binding to loopback (not firewall rules) is what actually keeps the app
+  and DB off the public internet. Local `http://localhost:8080` still works.
 
 - **Visual processing queue** (ROADMAP Band 3.8). The Admin tab now has a
   live **Processing queue** panel (polls every 2s): counts by job state

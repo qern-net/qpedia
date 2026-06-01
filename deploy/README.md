@@ -44,11 +44,23 @@ VITE_FIREBASE_AUTH_DOMAIN=...
 VITE_FIREBASE_PROJECT_ID=qernnet
 VITE_FIREBASE_APP_ID=...
 VITE_FIREBASE_SSO_PROVIDER_ID=...
+
+# --- HTTPS via Caddy (TLS-terminating reverse proxy) ---
+COMPOSE_PROFILES=caddy            # turns on the caddy service for this host
+QPEDIA_DOMAIN=qpedia.qern.net     # Caddy auto-provisions a Let's Encrypt cert
 ```
 
 `compose` reads this one file for both build-arg interpolation (`VITE_*`,
-`QPEDIA_DB_PASSWORD`) and the app container's runtime env. `QPEDIA_DB_URL` is
-set by compose to point at the `postgres` service, so don't put a host URL here.
+`QPEDIA_DB_PASSWORD`, `QPEDIA_DOMAIN`) and the app container's runtime env. It
+also reads `COMPOSE_PROFILES` from it, so adding `COMPOSE_PROFILES=caddy`
+enables the reverse proxy without changing the deploy command. `QPEDIA_DB_URL`
+is set by compose to point at the `postgres` service, so don't put a host URL
+here.
+
+**Before the first deploy with Caddy:** create a DNS **A record** for
+`qpedia.qern.net` → `62.171.156.199`. Without it, Caddy can't complete the
+Let's Encrypt challenge and HTTPS won't come up (the app is still reachable on
+the server's `127.0.0.1:8080` for debugging).
 
 ## 2. Trigger a deploy
 
@@ -65,11 +77,15 @@ The script waits for `/healthz` before declaring success.
 
 ## 4. Security — read this
 
-- **Postgres is loopback-only** (`127.0.0.1:5432`) — not exposed publicly.
-  Only **`:8080`** (the app) is published. Lock down the firewall accordingly
-  (e.g. `ufw allow 22,8080/tcp`), and restrict `:22` to known IPs if you can.
-- **No TLS yet.** Put a reverse proxy (Caddy/nginx/Traefik) in front of `:8080`
-  for HTTPS before exposing this to real users. The app speaks plain HTTP.
+- **HTTPS is terminated by Caddy** (the `caddy` profile). It serves
+  `qpedia.qern.net` on **443** with an auto-renewed Let's Encrypt cert and
+  redirects **80 → 443**. The app and Postgres bind to **`127.0.0.1` only**, so
+  the only public ports are 80 + 443. **Open exactly those** (plus SSH):
+  `ufw allow 22,80,443/tcp` — and restrict `:22` to known IPs if you can.
+  (Note: Docker's published ports bypass `ufw`, which is *why* the app/DB bind
+  to loopback rather than relying on the firewall.)
+- **Certs persist** in the `caddy-data` named volume — don't delete it, or you
+  risk hitting Let's Encrypt rate limits on re-issue.
 - **Prefer SSH keys over the root password.** To switch: add the public key to
   the server's `~/.ssh/authorized_keys`, store the private key as a
   `DEPLOY_SSH_KEY` secret, and in the workflow replace the `sshpass -e` calls

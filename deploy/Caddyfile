@@ -1,0 +1,23 @@
+# Caddy reverse proxy for Qpedia.
+#
+# $QPEDIA_DOMAIN is supplied by the compose `caddy` service from .env
+# (e.g. QPEDIA_DOMAIN=qpedia.qern.net). Caddy automatically obtains and
+# renews a Let's Encrypt certificate for it and redirects HTTP→HTTPS.
+#
+# Prerequisites: a DNS A/AAAA record for $QPEDIA_DOMAIN pointing at this
+# host, and ports 80 + 443 reachable from the internet.
+
+{$QPEDIA_DOMAIN} {
+	encode zstd gzip
+
+	# Proxy everything to the app container over the compose network.
+	reverse_proxy app:8080
+
+	# Uncomment to receive Let's Encrypt expiry/issue notices:
+	# tls media@qern.net
+
+	log {
+		output stdout
+		format console
+	}
+}
