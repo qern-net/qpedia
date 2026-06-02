@@ -10,6 +10,18 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **HTML distillation** (ROADMAP Band 6.2). HTML files now ingest as clean,
+  readable Markdown instead of raw tag soup. A new `HtmlExtractor`
+  (registered ahead of the plain-text path, which would otherwise claim
+  `text/html`) does a readability pass with `scraper` — selecting the main
+  content container (`<article>`/`<main>`/common content ids+classes) and
+  dropping nav/header/footer chrome — then converts that subtree to
+  GitHub-flavoured Markdown with pandoc (`-native_divs-native_spans`, which
+  also drops `<div>`/`<span>` wrappers and `<script>`/`<style>`). This is
+  much cleaner than raw `pandoc -f html` on the whole page. Falls back to
+  the full document when no content container is found. Container selection
+  is unit-tested; the pandoc conversion was verified.
+
 - **Image OCR + vision description** (ROADMAP Band 6.1). Images are no
   longer indexed by metadata alone — a vision-capable LLM now reads them:
   text images (scans/screenshots/slides/tables) are transcribed; photos,

@@ -141,17 +141,17 @@ job** (`no extractor for mime: …`). Each item below is one new `Extractor`
 |---|---|---|---|
 | 6.0 | **Image metadata extractor** — register `image/*` so images stop dead-lettering; index dimensions + filename + mime as searchable text. The "at least index the metadata" floor. | qpedia | ✅ |
 | 6.1 | **Image OCR + vision description** — for a text image (scan/screenshot) the LLM transcribes the text; for pictorial/mixed content it describes the image, and that becomes the page content (metadata kept as a trailer). New one-shot `LlmProvider::vision` (chat-completions multimodal shape, base64 data URL) on the OpenAI-compatible provider; the image path in `extract_phase` calls it. Auto-enables for vision-capable providers (`gpt-4.1-mini` etc.); `QPEDIA_VISION_MODEL` overrides, `QPEDIA_VISION=0` disables; best-effort fall back to 6.0 metadata on any error. Verified: an Urdu names-list PNG was OCR'd (RTL preserved) and classified by real content. | qpedia | ✅ |
-| 6.2 | **HTML distillation — file-based** — `HtmlExtractor` for `text/html`: a *readability* pass (strip nav/boilerplate/ads) → markdown, **not** raw `pandoc -f html` (which keeps the junk). Tree-based "just works" once registered (HTML files in the folder tree). | qpedia | ⚪ |
+| 6.2 | **HTML distillation — file-based** — `HtmlExtractor` for `text/html` / `application/xhtml+xml`, registered ahead of the plain-text path. A *readability* pass with `scraper` selects the main content container (`article`/`main`/common content ids+classes), dropping nav/header/footer, then pandoc converts that subtree to GFM markdown (`-native_divs-native_spans`, dropping div/span wrappers + script/style) — not raw `pandoc -f html` on the whole page. Falls back to the full document when no content container is found. Tree-based "just works" (HTML files in folders). Container selection unit-tested; pandoc args verified. | qpedia | ✅ |
 | 6.3 | **HTML — remote** — a URL source: paste a URL (or sitemap) → fetch → distill (6.2) → ingest; optional same-origin crawl to depth N. A lightweight "web connector" sibling to Band 2. | qpedia | ⚪ |
 | 6.4 | **Archive (zip) expansion** — a `.zip` source expands into a **locked folder named after the archive** (slugified, so `foo.zip` → `foo-zip`), fanning out one child Source + ingest job per entry, mirroring the internal directory structure; each child flows through the normal pipeline (nested zips expand again). Guards: zip-slip (`enclosed_name`), skip encrypted, cap entries (2000) / per-entry (200 MiB) / total uncompressed (1 GiB) against zip-bombs. Decompression runs in `spawn_blocking` (the zip reader is `!Send`). The container is marked `done` with an `archive.expanded` manifest. | qpedia | ✅ |
 | 6.5 | **Xlsx / Email** — `XlsxExtractor` (pandoc/calamine), `EmailExtractor` (mail-parser; eml/msg). Already noted in `qpedia-extract/src/lib.rs` TODO. | qpedia | ⚪ |
 | 6.6 | **Audio/video — metadata floor ✅, transcription ⚪** — `MediaExtractor` registers `audio/*` + `video/*` and indexes container format + byte size + (best-effort via `lofty`) duration and title/artist tags, so media stops dead-lettering (the 12 `.mp4` now ingest, duration captured). **Transcription** still pending: a Whisper/whisper.cpp sidecar → real speech-to-text for the page content. Sidecar, like Marker. | qpedia | 🟢 |
 | 6.7 | **Graceful unsupported-mime handling** — a source whose mime has no extractor now degrades to a terminal `tainted` state with a `source.unsupported` audit note, instead of failing the job and stranding the source at `extracting` (where it masqueraded as in-progress). Re-drivable once an extractor for its type lands. | qpedia | ✅ |
 
-**Build next in this band:** 6.2 (HTML distillation) or 6.6 transcription
-(12 `.mp4` waiting). 6.0 + 6.1 + 6.4 + 6.6-floor + 6.7 shipped: images get
-OCR/vision content, zips expand, media is indexed, unsupported types fail
-cleanly.
+**Build next in this band:** 6.3 (remote HTML / URL source) or 6.6
+transcription (12 `.mp4` waiting). 6.0 + 6.1 + 6.2 + 6.4 + 6.6-floor + 6.7
+shipped: images get OCR/vision content, HTML is distilled, zips expand,
+media is indexed, unsupported types fail cleanly.
 
 ---
 

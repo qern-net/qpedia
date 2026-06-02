@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub mod text;
 pub mod pdf;
 pub mod docx;
+pub mod html;
 pub mod image;
 pub mod media;
 pub mod marker;
@@ -16,6 +17,7 @@ pub mod marker;
 pub use text::TextExtractor;
 pub use pdf::PdfExtractor;
 pub use docx::DocxExtractor;
+pub use html::HtmlExtractor;
 pub use image::ImageExtractor;
 pub use media::MediaExtractor;
 pub use marker::MarkerExtractor;
@@ -58,6 +60,9 @@ impl ExtractorRegistry {
     /// pdfium so a broken sidecar doesn't break ingestion.
     pub fn with_default() -> Self {
         let mut reg = Self::new();
+        // HTML before Text: TextExtractor's `text/*` match would otherwise
+        // claim `text/html` and dump raw tags. HtmlExtractor distills it.
+        reg.register(Box::new(HtmlExtractor));
         reg.register(Box::new(TextExtractor));
 
         // PdfExtractor wires up Marker internally as an OCR fallback when
@@ -100,8 +105,9 @@ impl Default for ExtractorRegistry {
 }
 
 // Concrete impls planned next (DESIGN.md §5.2, ROADMAP Band 6):
-//   HtmlExtractor (readability distillation, not raw pandoc)  — 6.2
-//   ImageOcr      (Marker/surya sidecar — images + scanned PDFs) — 6.1
 //   XlsxExtractor / PptxExtractor (pandoc/calamine)            — 6.5
 //   EmailExtractor (mail-parser, eml/msg)                      — 6.5
-//   ImageExtractor (metadata floor) is registered above        — 6.0 ✅
+//   Video/audio transcription (Whisper sidecar)               — 6.6
+// Registered above: TextExtractor, HtmlExtractor (6.2 ✅, readability),
+//   PdfExtractor (+Marker OCR), DocxExtractor, ImageExtractor (6.0 ✅; vision
+//   OCR/description 6.1 lives in the ingest pipeline), MediaExtractor (6.6 floor).

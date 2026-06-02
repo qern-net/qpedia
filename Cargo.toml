@@ -50,6 +50,7 @@ hex = "0.4"
 mime_guess = "2"
 imagesize = "0.13"
 lofty = "0.22"
+scraper = "0.21"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "sync"] }
 tempfile = "3"
