@@ -42,8 +42,15 @@ jobs:
 
           KEY="$HOME/.ssh/deploy_key"
           install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
+          # tr -d '\r': a key pasted from Windows often carries CRLF, which
+          # makes OpenSSH fail with "error in libcrypto".
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > "$KEY"
           chmod 600 "$KEY"
+          grep -q "PRIVATE KEY" "$KEY" || {
+            echo "DEPLOY_SSH_KEY is not a private key (no 'PRIVATE KEY' header)."
+            echo "Paste the PRIVATE key — the full 'cat qpedia_deploy' output — not the .pub."
+            exit 1
+          }
 
           printf '%s' "$PROD_ENV_FILE" > qpedia.env
           test -s qpedia.env || { echo "secret PROD_ENV_FILE is empty"; exit 1; }
