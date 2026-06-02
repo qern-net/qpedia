@@ -10,14 +10,26 @@
 # .github/workflows/deploy.yml; safe to run by hand too.
 #
 # Inputs (env):
-#   GIT_REF   git ref (branch/tag/sha) to deploy        [default: main]
-#   ENV_SRC   path to the production .env to install     [default: /tmp/qpedia.env]
-#   REPO_URL  source repository                          [default: public qpedia]
+#   GIT_REF         git ref (branch/tag/sha) to deploy             [default: main]
+#   ENV_SRC         path to the production .env to install          [default: /tmp/qpedia.env]
+#   REPO_URL        source repository                               [default: qpedia]
+#   REPO_TOKEN_FILE path to a file holding a GitHub token, used to  [default: unset]
+#                   clone/fetch a PRIVATE repo over HTTPS. Optional
+#                   override; normally the token is read from the
+#                   QPEDIA_REPO_TOKEN key inside the .env at ENV_SRC.
+#                   Either way the token is NEVER written to
+#                   .git/config (we use an ephemeral http.extraheader
+#                   for clone/fetch only).
+#
+# .env keys consumed here (before the .env is installed):
+#   QPEDIA_REPO_TOKEN   GitHub token for the private clone/fetch. Read from
+#                       ENV_SRC; takes effect only if REPO_TOKEN_FILE is unset.
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/qern-net/qpedia.git}"
 GIT_REF="${GIT_REF:-main}"
 ENV_SRC="${ENV_SRC:-/tmp/qpedia.env}"
+REPO_TOKEN_FILE="${REPO_TOKEN_FILE:-}"
 
 QPEDIA_USER="qpedia"
 QPEDIA_UID="10001"          # MUST match `useradd -u 10001` in the Dockerfile
@@ -59,10 +71,36 @@ usermod -aG docker "${QPEDIA_USER}"
 install -d -o "${QPEDIA_USER}" -g "${QPEDIA_USER}" "${QPEDIA_HOME}" "${APP_DIR}"
 
 log "Source @ ${GIT_REF}"
-if [ ! -d "${APP_DIR}/.git" ]; then
-  sudo -u "${QPEDIA_USER}" git clone "${REPO_URL}" "${APP_DIR}"
+# Private-repo auth. The token can come from either:
+#   1. REPO_TOKEN_FILE  — a file path (read once, then shredded), or
+#   2. QPEDIA_REPO_TOKEN — a key inside the .env at ENV_SRC (the usual path;
+#      the same .env that's already been scp'd here from GitHub repo secrets).
+# Whichever supplies it, we pass it ONLY to clone/fetch via `-c
+# http.extraheader`, so it never lands in .git/config or a persisted remote.
+# Format is the documented `x-access-token:<TOKEN>` basic-auth used by GitHub.
+TOKEN=""
+if [ -n "${REPO_TOKEN_FILE}" ]; then
+  [ -f "${REPO_TOKEN_FILE}" ] || { echo "REPO_TOKEN_FILE set but ${REPO_TOKEN_FILE} not found"; exit 1; }
+  TOKEN="$(tr -d '\r\n' < "${REPO_TOKEN_FILE}")"
+  shred -u "${REPO_TOKEN_FILE}" 2>/dev/null || rm -f "${REPO_TOKEN_FILE}"
+else
+  # Pull QPEDIA_REPO_TOKEN from the .env. Take the first match, strip the
+  # key, surrounding quotes, and any CR so a Windows-edited .env still works.
+  TOKEN="$(sed -n 's/^QPEDIA_REPO_TOKEN=//p' "${ENV_SRC}" | head -n1 | tr -d '\r' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
 fi
-sudo -u "${QPEDIA_USER}" git -C "${APP_DIR}" fetch origin "${GIT_REF}"
+
+GIT_AUTH=()
+if [ -n "${TOKEN}" ]; then
+  BASIC="$(printf 'x-access-token:%s' "${TOKEN}" | base64 | tr -d '\n')"
+  GIT_AUTH=(-c "http.extraheader=Authorization: Basic ${BASIC}")
+  unset BASIC
+fi
+unset TOKEN
+
+if [ ! -d "${APP_DIR}/.git" ]; then
+  sudo -u "${QPEDIA_USER}" git "${GIT_AUTH[@]}" clone "${REPO_URL}" "${APP_DIR}"
+fi
+sudo -u "${QPEDIA_USER}" git "${GIT_AUTH[@]}" -C "${APP_DIR}" fetch origin "${GIT_REF}"
 sudo -u "${QPEDIA_USER}" git -C "${APP_DIR}" checkout -f FETCH_HEAD
 
 log "Data dirs (owned by container uid ${QPEDIA_UID})"
@@ -74,7 +112,10 @@ install -d -o "${QPEDIA_UID}" -g "${QPEDIA_UID}" \
 
 log ".env (0600, owner ${QPEDIA_USER})"
 install -o "${QPEDIA_USER}" -g "${QPEDIA_USER}" -m 600 "${ENV_SRC}" "${APP_DIR}/.env"
-shred -u "${ENV_SRC}" 2>/dev/null || rm -f "${ENV_SRC}"
+# Note: ENV_SRC is intentionally left in place (not shredded) so it can be
+# re-read or reused on subsequent runs. The installed copy at ${APP_DIR}/.env
+# is 0600 and owned by ${QPEDIA_USER}; keep ENV_SRC's location (e.g. /tmp)
+# access-restricted since it still holds the same secrets.
 
 log "Build & start the stack as ${QPEDIA_USER} (non-root, ${APP_DIR})"
 # `sudo -u` initialises the group list, so the freshly-added docker group is

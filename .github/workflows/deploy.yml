@@ -34,6 +34,10 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
           PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
           GIT_REF: ${{ github.event.inputs.ref || github.sha }}
+          # Token used on the server to clone/fetch this PRIVATE repo over
+          # HTTPS. The built-in GITHUB_TOKEN can read the repo it runs in.
+          # If you deploy a repo other than this one, replace with a PAT secret.
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           test -n "${HOST:-}"           || { echo "secret DEPLOY_HOST is not set"; exit 1; }
@@ -55,12 +59,20 @@ jobs:
           printf '%s' "$PROD_ENV_FILE" > qpedia.env
           test -s qpedia.env || { echo "secret PROD_ENV_FILE is empty"; exit 1; }
 
+          # Token file for the server-side private clone (transferred like the
+          # env file; the script shreds it after reading). Written only if set.
+          printf '%s' "${REPO_TOKEN:-}" > qpedia.token
+
           SSH_OPTS="-i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=240"
 
           echo "Copying deploy script + env to $HOST"
           scp $SSH_OPTS deploy/deploy.sh "$USER@$HOST:/tmp/qpedia-deploy.sh"
           scp $SSH_OPTS qpedia.env       "$USER@$HOST:/tmp/qpedia.env"
           rm -f qpedia.env
+          if [ -s qpedia.token ]; then
+            scp $SSH_OPTS qpedia.token "$USER@$HOST:/tmp/qpedia.token"
+          fi
+          rm -f qpedia.token
 
           echo "Running deploy on $HOST (build happens on the server)"
-          ssh $SSH_OPTS "$USER@$HOST" "GIT_REF='$GIT_REF' ENV_SRC=/tmp/qpedia.env bash /tmp/qpedia-deploy.sh"
+          ssh $SSH_OPTS "$USER@$HOST" "GIT_REF='$GIT_REF' ENV_SRC=/tmp/qpedia.env REPO_TOKEN_FILE=/tmp/qpedia.token bash /tmp/qpedia-deploy.sh"
