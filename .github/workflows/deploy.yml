@@ -1,16 +1,15 @@
 name: Deploy (Contabo)
 
-# Manual deploy by default (safer for production). To auto-deploy every push
-# to main, uncomment the `push:` block below.
+# Auto-deploys on every push to main, and can be run manually.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
         description: "Git ref to deploy (branch/tag/sha). Blank = this commit."
         required: false
         default: ""
-  # push:
-  #   branches: [main]
 
 # Never run two deploys at once.
 concurrency:
@@ -25,36 +24,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install sshpass
-        run: sudo apt-get update && sudo apt-get install -y sshpass
-
-      - name: Build & deploy over SSH
+      - name: Build & deploy over SSH (key auth)
         env:
-          # Password auth as requested. SSH keys are strongly preferred — see
-          # deploy/README.md for the (small) switch. Secrets are passed via
-          # env (not interpolated into the script) to avoid injection.
-          SSHPASS: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          # SSH **private** key (no passphrase). Public half goes in the
+          # server user's authorized_keys. Secrets pass via env (not
+          # interpolated into the script) to avoid injection.
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
           PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
           GIT_REF: ${{ github.event.inputs.ref || github.sha }}
         run: |
           set -euo pipefail
-          test -n "${HOST:-}"    || { echo "secret DEPLOY_HOST is not set"; exit 1; }
-          test -n "${USER:-}"    || { echo "secret DEPLOY_USER is not set"; exit 1; }
-          test -n "${SSHPASS:-}" || { echo "secret DEPLOY_SSH_PASSWORD is not set"; exit 1; }
+          test -n "${HOST:-}"           || { echo "secret DEPLOY_HOST is not set"; exit 1; }
+          test -n "${USER:-}"           || { echo "secret DEPLOY_USER is not set"; exit 1; }
+          test -n "${DEPLOY_SSH_KEY:-}" || { echo "secret DEPLOY_SSH_KEY is not set"; exit 1; }
+
+          KEY="$HOME/.ssh/deploy_key"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
+          chmod 600 "$KEY"
 
           printf '%s' "$PROD_ENV_FILE" > qpedia.env
           test -s qpedia.env || { echo "secret PROD_ENV_FILE is empty"; exit 1; }
 
-          SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=240"
-          SCP="sshpass -e scp $SSH_OPTS"
-          SSH="sshpass -e ssh $SSH_OPTS"
+          SSH_OPTS="-i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=240"
 
           echo "Copying deploy script + env to $HOST"
-          $SCP deploy/deploy.sh "$USER@$HOST:/tmp/qpedia-deploy.sh"
-          $SCP qpedia.env       "$USER@$HOST:/tmp/qpedia.env"
+          scp $SSH_OPTS deploy/deploy.sh "$USER@$HOST:/tmp/qpedia-deploy.sh"
+          scp $SSH_OPTS qpedia.env       "$USER@$HOST:/tmp/qpedia.env"
           rm -f qpedia.env
 
           echo "Running deploy on $HOST (build happens on the server)"
-          $SSH "$USER@$HOST" "GIT_REF='$GIT_REF' ENV_SRC=/tmp/qpedia.env bash /tmp/qpedia-deploy.sh"
+          ssh $SSH_OPTS "$USER@$HOST" "GIT_REF='$GIT_REF' ENV_SRC=/tmp/qpedia.env bash /tmp/qpedia-deploy.sh"

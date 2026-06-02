@@ -5,8 +5,9 @@ GitHub Actions builds and deploys onto a single host over SSH. The app runs
 is as `root` only to provision (create the user, install Docker), never to
 run the app.
 
-- **Workflow:** [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) — manual (`workflow_dispatch`).
+- **Workflow:** [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) — **auto-deploys on every push to `main`** (and `workflow_dispatch`).
 - **Server script:** [`deploy/deploy.sh`](deploy.sh) — idempotent provision + `docker compose up -d --build`.
+- **Auth:** SSH **key** (no password). The deploy user must be `root` or a passwordless sudoer (the script re-execs under sudo if non-root).
 - **Model:** the image is **built on the server** (mirrors `docker compose up --build`; no registry). The container already drops to a non-root user; the compose stack is also invoked by the non-root `qpedia` user.
 
 ## 1. Required GitHub secrets
@@ -16,11 +17,28 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 | Secret | Value |
 |---|---|
 | `DEPLOY_HOST` | `62.171.156.199` |
-| `DEPLOY_USER` | `root` |
-| `DEPLOY_SSH_PASSWORD` | the server's root password |
+| `DEPLOY_USER` | `root` (or a passwordless-sudo deploy user) |
+| `DEPLOY_SSH_KEY` | the **private** key (full PEM/OpenSSH text, **no passphrase**) |
 | `PROD_ENV_FILE` | the **entire** production `.env` (multi-line; see below) |
 
 > The host/user are secrets too so the public repo doesn't advertise the prod box.
+
+### Generate the deploy key
+
+On your machine (passphrase **must** be empty — CI can't type one):
+
+```sh
+ssh-keygen -t ed25519 -C "qpedia-deploy" -N "" -f qpedia_deploy
+```
+
+- Put the **public** half on the server, for `DEPLOY_USER`:
+  ```sh
+  ssh-copy-id -i qpedia_deploy.pub root@62.171.156.199
+  # or: append qpedia_deploy.pub to /root/.ssh/authorized_keys
+  ```
+- Paste the **private** half (`cat qpedia_deploy` — the whole
+  `-----BEGIN…END-----` block) into the `DEPLOY_SSH_KEY` secret, then delete
+  the local copies.
 
 ### `PROD_ENV_FILE` contents
 
@@ -66,10 +84,11 @@ the server's `127.0.0.1:8080` for debugging).
 
 ## 2. Trigger a deploy
 
-Actions tab → **Deploy (Contabo)** → **Run workflow** (optionally enter a ref;
-blank deploys the current commit). It scp's the deploy script + env, then runs
-the build on the server (first build pulls toolchains/deps — allow ~10–20 min).
-The script waits for `/healthz` before declaring success.
+**Every push to `main` deploys automatically.** You can also run it by hand:
+Actions tab → **Deploy (Contabo)** → **Run workflow** (optionally enter a ref).
+It scp's the deploy script + env over the SSH key, then runs the build on the
+server (first build pulls toolchains/deps — allow ~10–20 min). The script waits
+for `/healthz` before declaring success.
 
 ## 3. Server requirements
 
@@ -88,12 +107,11 @@ The script waits for `/healthz` before declaring success.
   to loopback rather than relying on the firewall.)
 - **Certs persist** in the `caddy-data` named volume — don't delete it, or you
   risk hitting Let's Encrypt rate limits on re-issue.
-- **Prefer SSH keys over the root password.** To switch: add the public key to
-  the server's `~/.ssh/authorized_keys`, store the private key as a
-  `DEPLOY_SSH_KEY` secret, and in the workflow replace the `sshpass -e` calls
-  with a key (`echo "$DEPLOY_SSH_KEY" > key && chmod 600 key && ssh -i key …`).
-  Password auth + `StrictHostKeyChecking=accept-new` trusts the host on first
-  connect (TOFU) — fine to start, weaker than pinned keys + `known_hosts`.
+- **SSH is key-based** (no password); the private key lives only in the
+  `DEPLOY_SSH_KEY` secret. `StrictHostKeyChecking=accept-new` trusts the host
+  on first connect (TOFU); pin it harder by adding the server's host key to a
+  `known_hosts` if you want. Consider disabling SSH password auth on the
+  server (`PasswordAuthentication no`) once key login works.
 - The `qpedia` user is in the `docker` group (needed to run compose), which is
   effectively root-equivalent on the host. For stronger isolation, run
   **rootless Docker** as `qpedia` — a larger setup, noted for later.

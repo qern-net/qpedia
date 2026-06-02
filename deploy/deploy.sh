@@ -26,8 +26,15 @@ APP_DIR="${QPEDIA_HOME}/app"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-[ "$(id -u)" -eq 0 ] || { echo "deploy.sh must run as root"; exit 1; }
-[ -f "${ENV_SRC}" ]   || { echo "missing env file at ${ENV_SRC}"; exit 1; }
+# Provisioning (users, Docker, dirs) needs root, but the deploy user may be an
+# unprivileged sudoer rather than root — re-exec under sudo if so. The script's
+# ENV_SRC / GIT_REF defaults (/tmp/qpedia.env, main) are correct for the
+# push-to-deploy path even if sudo drops the env, so this is safe either way.
+if [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null 2>&1 || { echo "deploy.sh needs root: set DEPLOY_USER=root or give the user passwordless sudo"; exit 1; }
+  exec sudo -E -- bash "$0" "$@"
+fi
+[ -f "${ENV_SRC}" ] || { echo "missing env file at ${ENV_SRC}"; exit 1; }
 
 log "Base packages (git, curl)"
 export DEBIAN_FRONTEND=noninteractive
