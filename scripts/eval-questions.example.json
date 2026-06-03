@@ -1,0 +1,23 @@
+{
+  "questions": [
+    {
+      "id": "atlas-revenue",
+      "q": "What is Project Atlas's Q4 revenue and which customers contribute most?",
+      "expect_paths": ["summaries/", "entities/"],
+      "expect_citations_min": 1
+    },
+    {
+      "id": "atlas-risks",
+      "q": "What are the named Q4 risks for Atlas?",
+      "expect_paths": [],
+      "expect_citations_min": 1
+    },
+    {
+      "id": "unknown",
+      "q": "What is the company's policy on parental leave?",
+      "expect_paths": [],
+      "expect_citations_min": 0,
+      "expect_says_unknown": true
+    }
+  ]
+}

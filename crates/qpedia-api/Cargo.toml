@@ -1,0 +1,52 @@
+[package]
+name = "qpedia-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "qpedia_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qpedia-api"
+path = "src/main.rs"
+
+[dependencies]
+qpedia-core.workspace = true
+qpedia-store.workspace = true
+qpedia-pg-store.workspace = true
+qpedia-extract.workspace = true
+qpedia-ingest.workspace = true
+qpedia-retriever.workspace = true
+qpedia-lint.workspace = true
+qpedia-llm.workspace = true
+qpedia-embed.workspace = true
+qpedia-connectors.workspace = true
+futures.workspace = true
+ulid.workspace = true
+axum.workspace = true
+openidconnect.workspace = true
+base64.workspace = true
+rand.workspace = true
+jsonwebtoken.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+reqwest.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+bytes.workspace = true
+mime_guess.workspace = true
+dotenvy.workspace = true
+async-trait.workspace = true

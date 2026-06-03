@@ -1,0 +1,29 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Runtime data volumes (bind-mounted in containers, populated on host runs).
+# v2 dropped /data/sqlite and /data/weaviate; everything else lives here.
+/data/
+
+# Smoke-test artifacts
+/test-fixtures
+
+# Local env overrides (checked-in template is .env.example)
+.env
+.env.local
+
+# IDE / agent caches
+.idea/
+.vscode/
+.claude/
+.kiro/
+*.swp
+.DS_Store
+
+# Vendored binaries fetched by scripts/fetch-pdfium.sh
+/vendor
+
+# Secrets
+*.pem
+*.key

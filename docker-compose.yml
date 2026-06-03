@@ -1,0 +1,37 @@
+# Minimal dependency stack for developing the Qpedia engine.
+#
+# This OSS repo is the Rust engine; it has no app image of its own (the
+# production image + frontend live in the deployment overlay, and the
+# managed product is Qpedia Cloud — https://qpedia.qern.net).
+#
+# What this file gives you is the one external dependency the engine needs
+# to run locally: PostgreSQL 17 with pgvector. Bring it up, then run the
+# API from source against it:
+#
+#   docker compose up -d
+#   cargo run -p qpedia-api
+#
+# Credentials match .env.example's QPEDIA_DB_URL, so the defaults "just
+# work" for `cargo run` and `cargo test`.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: qpedia_admin
+      POSTGRES_PASSWORD: ${QPEDIA_DB_PASSWORD:-qpedia-dev}
+      POSTGRES_DB: qpedia
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Loopback only: the engine connects over 127.0.0.1:5432. Publishing on
+    # 0.0.0.0 would expose the DB since Docker port maps bypass host firewalls.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qpedia_admin -d qpedia"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

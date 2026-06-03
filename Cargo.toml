@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qpedia-core",
+    "crates/qpedia-store",
+    "crates/qpedia-extract",
+    "crates/qpedia-llm",
+    "crates/qpedia-embed",
+    "crates/qpedia-ingest",
+    "crates/qpedia-retriever",
+    "crates/qpedia-lint",
+    "crates/qpedia-api",
+    "crates/qpedia-cli",
+    "crates/qpedia-connectors",
+    "crates/qpedia-pg-store",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "multipart", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "macros", "chrono", "migrate", "uuid", "json", "tls-rustls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ulid = { version = "1", features = ["serde"] }
+gix = { version = "0.66", default-features = false, features = ["blocking-network-client"] }
+pulldown-cmark = "0.12"
+futures = "0.3"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+url = "2"
+sha2 = "0.10"
+hex = "0.4"
+mime_guess = "2"
+imagesize = "0.13"
+lofty = "0.22"
+scraper = "0.21"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "sync"] }
+tempfile = "3"
+fastembed = "4"
+uuid = { version = "1", features = ["v5", "serde"] }
+async-stream = "0.3"
+openidconnect = { version = "4", features = ["reqwest", "rustls-tls"], default-features = false }
+base64 = "0.22"
+rand = "0.8"
+pgvector = { version = "=0.4.1", features = ["sqlx"] }   # pinned: 0.4.2 moved to sqlx 0.9, splits our sqlx 0.8 graph
+jsonwebtoken = "9"
+dotenvy = "0.15"
+
+# Internal
+qpedia-core = { path = "crates/qpedia-core" }
+qpedia-store = { path = "crates/qpedia-store" }
+qpedia-extract = { path = "crates/qpedia-extract" }
+qpedia-llm = { path = "crates/qpedia-llm" }
+qpedia-embed = { path = "crates/qpedia-embed" }
+qpedia-ingest = { path = "crates/qpedia-ingest" }
+qpedia-retriever = { path = "crates/qpedia-retriever" }
+qpedia-lint = { path = "crates/qpedia-lint" }
+qpedia-api = { path = "crates/qpedia-api" }
+qpedia-connectors = { path = "crates/qpedia-connectors" }
+qpedia-pg-store = { path = "crates/qpedia-pg-store" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

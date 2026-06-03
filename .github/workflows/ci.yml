@@ -1,0 +1,88 @@
+name: CI
+
+# Runs on every push to main and every PR targeting main.
+#
+# Two jobs:
+#   * `check`   — fast: `cargo check --workspace --all-targets` only.
+#                 Catches type / borrow / feature regressions.
+#   * `migrate` — slower: spins up a pgvector service container, runs
+#                 the `tests/smoke.rs` integration test in
+#                 `qpedia-pg-store`. The smoke test:
+#                   1. Applies every migration to a fresh DB.
+#                   2. Exercises every PgStore method we ship.
+#                   3. Round-trips a 384-dim vector through pgvector
+#                      and validates `hybrid_search` returns the page.
+#                 This catches schema drift the moment it lands —
+#                 anything that requires the schema to "evolve in two
+#                 steps" (add column, deploy, drop column) shows up
+#                 here as a red CI immediately, not on next prod boot.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0   # CI cache is for deps; incremental hurts here.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: cargo check --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-check
+      - run: cargo check --workspace --all-targets
+
+  migrate:
+    name: migrations + DB smoke
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: qpedia_admin
+          POSTGRES_PASSWORD: qpedia-dev
+          POSTGRES_DB: qpedia
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qpedia_admin -d qpedia"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      QPEDIA_DB_URL: postgres://qpedia_admin:qpedia-dev@localhost:5432/qpedia?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-migrate
+
+      # Belt-and-braces: GH Actions services have a built-in health check
+      # but the runner can race the first query if the listener flapped.
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U qpedia_admin -d qpedia >/dev/null 2>&1; then
+              echo "postgres up"
+              exit 0
+            fi
+            echo "waiting for postgres ($i/30)..."
+            sleep 1
+          done
+          echo "postgres did not come up"
+          exit 1
+
+      - name: Run migrations + DB smoke + workspace unit tests
+        run: cargo test --workspace --all-targets -- --nocapture

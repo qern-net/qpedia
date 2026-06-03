@@ -1,0 +1,23 @@
+[package]
+name = "qpedia-retriever"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+qpedia-core.workspace = true
+qpedia-store.workspace = true
+qpedia-pg-store.workspace = true
+qpedia-llm.workspace = true
+qpedia-embed.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+async-stream.workspace = true
