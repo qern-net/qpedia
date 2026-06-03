@@ -10,6 +10,17 @@ The private SaaS overlay `qpedia-pvt` ships its own changelog.
 
 ### Added
 
+- **Marketing landing page** at `/landing` — a full-bleed, avant-garde
+  product page (editorial serif display + mono accents, an animated
+  knowledge-graph hero, the "quern grinds documents into knowledge"
+  story, and sections for the pipeline, supported formats, the full
+  feature set, connectors, and the self-host/architecture pitch). The
+  root layout renders it without the app chrome and redirects logged-out
+  visitors from `/` to it, so the public face of `qpedia.qern.net` is the
+  landing page while signed-in users still land in the app. Self-contained
+  (inline SVG logo/graph/icons, the brand slate+sky palette); no app data
+  or auth required.
+
 - **HTML distillation** (ROADMAP Band 6.2). HTML files now ingest as clean,
   readable Markdown instead of raw tag soup. A new `HtmlExtractor`
   (registered ahead of the plain-text path, which would otherwise claim

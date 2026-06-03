@@ -2,6 +2,7 @@
   import '../app.css';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import { getMe, type Me } from '$lib/api';
   import WorkspaceSwitcher from '$lib/components/WorkspaceSwitcher.svelte';
 
@@ -9,13 +10,23 @@
   let me = $state<Me | null>(null);
   let authChecked = $state(false);
 
+  // The marketing landing page renders full-bleed, without the app chrome.
+  const bare = $derived($page.url.pathname === '/landing');
+
   onMount(async () => {
     try { me = await getMe(); }
     catch { me = null; }
     finally { authChecked = true; }
+
+    // Public front door: send logged-out visitors at the root to the landing
+    // page; signed-in users keep the app.
+    if (!me && $page.url.pathname === '/') goto('/landing');
   });
 </script>
 
+{#if bare}
+  {@render children()}
+{:else}
 <div class="app">
   <header>
     <span class="brand">QPEDIA</span>
@@ -60,6 +71,7 @@
     {@render children()}
   </main>
 </div>
+{/if}
 
 <style>
   .logout-btn {
