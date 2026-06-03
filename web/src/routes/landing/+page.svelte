@@ -64,6 +64,10 @@
     content="Qpedia grinds raw documents into a living, linked, citable wiki — then answers anything. Self-hosted, inspectable, Apache-2.0." />
   <meta property="og:title" content="Qpedia — the LLM-maintained knowledge base" />
   <meta property="og:description" content="Drop documents in. The model writes the wiki. Ask anything." />
+  <meta property="og:image" content="https://qpedia.qern.net/og-banner.png" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:image" content="https://qpedia.qern.net/og-banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
   <link
