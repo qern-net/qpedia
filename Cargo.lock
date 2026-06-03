@@ -3157,6 +3157,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "qpedia-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "qpedia-core",
+ "qpedia-embed",
+ "qpedia-pg-store",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "qpedia-cli"
 version = "0.1.0"
 dependencies = [

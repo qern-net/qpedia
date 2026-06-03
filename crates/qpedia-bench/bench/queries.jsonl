@@ -1,0 +1,10 @@
+{"id":"q1","category":"hybrid","query":"runbook to enable the payment_v2_enforce feature flag in production","qrels":{"runbooks/payment-v2-enforce-enable.md":2}}
+{"id":"q2","category":"exact","query":"ERR_PAYMENT_GATEWAY_TIMEOUT","qrels":{"runbooks/err-payment-gateway-timeout.md":2}}
+{"id":"q3","category":"hybrid","query":"rollback runbook for v3.2 deployment","qrels":{"runbooks/rollback-v3-2.md":2,"runbooks/rollback-v3-1.md":1}}
+{"id":"q4","category":"semantic","query":"what's our protocol when a region goes offline?","qrels":{"concepts/failover-runbook.md":2,"concepts/disaster-recovery.md":2}}
+{"id":"q5","category":"semantic","query":"how does our auth system handle expired tokens?","qrels":{"concepts/oauth-token-refresh.md":2,"concepts/oauth-flow-design.md":1}}
+{"id":"q6","category":"hybrid","query":"how do I turn off payment_v2_enforce","qrels":{"runbooks/payment-v2-enforce-disable.md":2}}
+{"id":"q7","category":"exact","query":"ERR_PAYMENT_GATEWAY_REJECTED","qrels":{"runbooks/err-payment-gateway-rejected.md":2}}
+{"id":"q8","category":"hybrid","query":"roll out v3.2 not roll back","qrels":{"runbooks/rollout-v3-2.md":2}}
+{"id":"q9","category":"exact","query":"ERR_PAYMENT_GATEWAY_UNAUTHORIZED","qrels":{"runbooks/err-payment-gateway-unauthorized.md":2}}
+{"id":"q10","category":"semantic","query":"service to service credential rotation","qrels":{"concepts/session-rotation.md":2}}

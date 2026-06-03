@@ -1,0 +1,26 @@
+[package]
+name = "qpedia-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Retrieval benchmark: a fixed corpus + labeled queries to measure ranking changes (RRF, reranker, tsvector). See the wiki 'Retrieval Benchmark'."
+
+[[bin]]
+name = "qpedia-bench"
+path = "src/main.rs"
+
+[dependencies]
+qpedia-core.workspace = true
+qpedia-pg-store.workspace = true
+qpedia-embed.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

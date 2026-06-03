@@ -13,6 +13,7 @@ members = [
     "crates/qpedia-cli",
     "crates/qpedia-connectors",
     "crates/qpedia-pg-store",
+    "crates/qpedia-bench",
 ]
 
 [workspace.package]

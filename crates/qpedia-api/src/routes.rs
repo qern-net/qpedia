@@ -785,7 +785,7 @@ async fn run_search(
         match s
             .ctx
             .db
-            .hybrid_search(&user.tenant, query, qv, 0.7, limit as i64)
+            .hybrid_search(&user.tenant, query, qv, limit as i64)
             .await
         {
             Ok(h) if !h.is_empty() => return Ok(("hybrid", h)),

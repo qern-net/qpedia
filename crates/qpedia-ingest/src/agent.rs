@@ -374,7 +374,7 @@ async fn execute_tool(
                         .unwrap_or_default();
                     match deps
                         .db
-                        .hybrid_search(&deps.tenant, query, qv, 0.7, limit as i64)
+                        .hybrid_search(&deps.tenant, query, qv, limit as i64)
                         .await
                     {
                         Ok(rows) if !rows.is_empty() => rows

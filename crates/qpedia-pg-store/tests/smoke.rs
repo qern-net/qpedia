@@ -363,7 +363,7 @@ async fn smoke_full_lifecycle() {
         .expect("upsert wiki_pages");
 
     let hits = db
-        .hybrid_search(&tenant, "smoke", vec_384, 0.7, 5)
+        .hybrid_search(&tenant, "smoke", vec_384, 5)
         .await
         .expect("hybrid_search");
     assert!(

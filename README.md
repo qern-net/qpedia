@@ -122,6 +122,7 @@ Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to ov
 | `QPEDIA_BIND` | `0.0.0.0:8080` | Listen address |
 | `RUST_LOG` | `qpedia=info,tower_http=info` | Log filter |
 | `QPEDIA_MARKER_URL` | — | Optional high-fidelity PDF sidecar (see below) |
+| `QPEDIA_RRF_K` | `60` | Hybrid-search rank-decay constant for Reciprocal Rank Fusion. Lower (≈20–30) sharpens precision; higher (≈80–100) favors recall/consensus. Clamped to `1..=1000`. |
 
 ---
 
@@ -371,6 +372,7 @@ If `QPEDIA_MARKER_URL` is unset, scanned/image-only PDFs return the sparse pdfiu
 | `qpedia-connectors` | External sync: Confluence Cloud (implemented), GDrive/SharePoint (stubs) |
 | `qpedia-api` | axum HTTP server, SSE chat, static SPA serving |
 | `qpedia-cli` | Admin CLI: status, lint, reembed (stubs, not yet wired) |
+| `qpedia-bench` | Retrieval benchmark harness: ingests a labeled corpus (with planted near-duplicate distractors) into a throwaway tenant and scores the real `hybrid_search` ranking path — Recall@K, MRR, nDCG@10, Exact@1 — with `baseline.json` regression gating |
 
 ---
 
@@ -385,6 +387,10 @@ cargo test --workspace
 
 # Run the API locally against a Postgres 17 + pgvector instance
 cargo run -p qpedia-api
+
+# Benchmark the hybrid-search ranking path (needs QPEDIA_DB_URL + an embedder).
+# Add --update-baseline to record the current scores as the regression baseline.
+QPEDIA_DB_URL=postgres://… cargo run -p qpedia-bench -- run
 ```
 
 The frontend (in the deployment overlay) runs its own dev server that

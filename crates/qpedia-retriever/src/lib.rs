@@ -356,7 +356,7 @@ impl Retriever {
     async fn do_search(&self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
         if let Some(emb) = &self.embedder {
             let qv = emb.embed(&[query]).await?.into_iter().next().unwrap_or_default();
-            match self.db.hybrid_search(&self.tenant, query, qv, 0.7, k as i64).await {
+            match self.db.hybrid_search(&self.tenant, query, qv, k as i64).await {
                 Ok(rows) if !rows.is_empty() => {
                     return Ok(rows
                         .into_iter()
