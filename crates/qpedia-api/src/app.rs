@@ -172,8 +172,9 @@ impl AppBuilder {
             info!("no LLM provider configured — ingest will stop at Extracted");
         }
         let embedder = Some(embedder_from_env(data_dir.join("models")));
+        let reranker = qpedia_embed::reranker_from_env(data_dir.join("models"));
 
-        let ctx = IngestContext::new(db, blob, wiki_store, extractors, llm, embedder);
+        let ctx = IngestContext::new(db, blob, wiki_store, extractors, llm, embedder, reranker);
         let auth = AuthState::from_env().await?;
 
         let bind: SocketAddr = std::env::var("QPEDIA_BIND")

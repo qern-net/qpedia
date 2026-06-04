@@ -829,6 +829,7 @@ pub(crate) async fn chat(
     let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
     let retriever = Retriever {
         embedder: s.ctx.embedder.clone(),
+        reranker: s.ctx.reranker.clone(),
         wiki,
         db: s.ctx.db.clone(),
         llm,

@@ -13,6 +13,9 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::info;
 
+mod rerank;
+pub use rerank::{reranker_from_env, FastEmbedReranker, Reranker, DEFAULT_RERANKER};
+
 #[async_trait]
 pub trait Embedder: Send + Sync {
     fn name(&self) -> &str;

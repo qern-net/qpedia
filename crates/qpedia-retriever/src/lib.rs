@@ -15,7 +15,7 @@
 use anyhow::{anyhow, Result};
 use futures::stream::{Stream, StreamExt};
 use qpedia_core::tenant::Tenant;
-use qpedia_embed::Embedder;
+use qpedia_embed::{Embedder, Reranker};
 use qpedia_llm::{
     current_model, CompleteReq, LlmProvider, Message, Role, ToolCall, ToolDef,
 };
@@ -33,6 +33,12 @@ pub const GATHER_TURNS: u32 = 6;
 pub const MAX_PAGES_LOADED: usize = 8;
 pub const MAX_CONTEXT_BYTES: usize = 30_000;
 pub const MAX_TOOL_RESULT_CHARS: usize = 6_000;
+/// How many fused candidates to pull before the cross-encoder rerank.
+/// The reranker reorders this pool, then we keep the caller's top-k. A
+/// pool larger than k is what gives reranking room to promote a page the
+/// first-stage fusion ranked lower (e.g. the right operation in a
+/// negation query). Bounded so the per-candidate forward pass stays cheap.
+pub const RERANK_POOL: usize = 30;
 
 // ---------- prompts ----------
 
@@ -108,6 +114,9 @@ pub enum ChatEvent {
 #[derive(Clone)]
 pub struct Retriever {
     pub embedder: Option<Arc<dyn Embedder>>,
+    /// Mandatory cross-encoder reranker applied to the fused candidate set
+    /// before the gather agent sees results. See `qpedia-embed::rerank`.
+    pub reranker: Arc<dyn Reranker>,
     pub wiki: WikiRepo,
     pub db: PgStore,
     pub llm: Arc<dyn LlmProvider>,
@@ -356,22 +365,72 @@ impl Retriever {
     async fn do_search(&self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
         if let Some(emb) = &self.embedder {
             let qv = emb.embed(&[query]).await?.into_iter().next().unwrap_or_default();
-            match self.db.hybrid_search(&self.tenant, query, qv, k as i64).await {
+            // Over-fetch a candidate pool so the cross-encoder rerank has
+            // room to promote a page the RRF fusion ranked lower.
+            let pool = k.max(RERANK_POOL) as i64;
+            match self.db.hybrid_search(&self.tenant, query, qv, pool).await {
                 Ok(rows) if !rows.is_empty() => {
-                    return Ok(rows
+                    let hits: Vec<SearchHit> = rows
                         .into_iter()
                         .map(|r| SearchHit {
                             path: r.path,
                             title: r.title,
                             snippet: r.snippet,
                         })
-                        .collect());
+                        .collect();
+                    return Ok(self.rerank_hits(query, hits, k).await);
                 }
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "pg hybrid search failed; falling back"),
             }
         }
-        Ok(self.wiki.search_text(query, k).await?)
+        // Filesystem fallback (no embedder / pg down): still rerank.
+        let hits = self.wiki.search_text(query, k.max(RERANK_POOL)).await?;
+        Ok(self.rerank_hits(query, hits, k).await)
+    }
+
+    /// Reorder a fused candidate set with the cross-encoder reranker and
+    /// keep the top `k`. The reranker scores each `(query, title+snippet)`
+    /// pair jointly. On any reranker error we fall back to the input order
+    /// (already RRF-fused) truncated to `k`, so retrieval never fails just
+    /// because the reranker is unavailable.
+    async fn rerank_hits(&self, query: &str, mut hits: Vec<SearchHit>, k: usize) -> Vec<SearchHit> {
+        if hits.len() <= 1 {
+            hits.truncate(k);
+            return hits;
+        }
+        // The cross-encoder sees title + snippet — enough signal to break
+        // ties on the distinguishing token without loading full pages in
+        // the hot path.
+        let docs: Vec<String> = hits
+            .iter()
+            .map(|h| format!("{}\n{}", h.title, h.snippet))
+            .collect();
+        let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+        match self.reranker.scores(query, &doc_refs).await {
+            Ok(scores) if scores.len() == hits.len() => {
+                let mut idx: Vec<usize> = (0..hits.len()).collect();
+                idx.sort_by(|&a, &b| {
+                    scores[b]
+                        .partial_cmp(&scores[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let reordered: Vec<SearchHit> =
+                    idx.into_iter().take(k).map(|i| hits[i].clone()).collect();
+                debug!(reranker = self.reranker.name(), pool = hits.len(), kept = k, "reranked");
+                reordered
+            }
+            Ok(_) => {
+                warn!("reranker returned mismatched score count; using fused order");
+                hits.truncate(k);
+                hits
+            }
+            Err(e) => {
+                warn!(error = %e, "rerank failed; using fused order");
+                hits.truncate(k);
+                hits
+            }
+        }
     }
 
     async fn user_can_read_page(&self, content: &str) -> bool {

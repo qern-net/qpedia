@@ -20,15 +20,19 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use qpedia_core::tenant::Tenant;
-use qpedia_embed::embedder_from_env;
+use qpedia_embed::{embedder_from_env, reranker_from_env, Reranker};
 use qpedia_pg_store::{PgStore, WikiPageUpsert};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Final-list cutoff used for Recall@K and the report.
 const K: i64 = 10;
+/// Candidate pool pulled from hybrid_search before reranking — matches the
+/// retriever's RERANK_POOL so the benchmark measures the same path.
+const RERANK_POOL: i64 = 30;
 /// A regression beyond this absolute drop in a headline metric fails CI.
 const REGRESSION_TOLERANCE: f64 = 0.02;
 
@@ -50,6 +54,10 @@ enum Cmd {
         /// Overwrite baseline.json with this run's scores.
         #[arg(long)]
         update_baseline: bool,
+        /// Skip the cross-encoder rerank stage (measure RRF fusion alone).
+        /// Useful for quantifying the reranker's contribution.
+        #[arg(long)]
+        no_rerank: bool,
     },
 }
 
@@ -94,6 +102,8 @@ struct Report {
 struct Config {
     rrf_k: String,
     embed_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reranker: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,11 +136,12 @@ async fn main() -> Result<()> {
         Cmd::Run {
             dir,
             update_baseline,
-        } => run(dir, update_baseline).await,
+            no_rerank,
+        } => run(dir, update_baseline, no_rerank).await,
     }
 }
 
-async fn run(dir: Option<PathBuf>, update_baseline: bool) -> Result<()> {
+async fn run(dir: Option<PathBuf>, update_baseline: bool, no_rerank: bool) -> Result<()> {
     let bench_dir = dir.unwrap_or_else(default_bench_dir);
     let corpus_dir = bench_dir.join("corpus");
     let queries_path = bench_dir.join("queries.jsonl");
@@ -143,6 +154,17 @@ async fn run(dir: Option<PathBuf>, update_baseline: bool) -> Result<()> {
     // anything; a failure here is fatal (unlike the app, which degrades).
     let embedder = embedder_from_env("./data/models");
     println!("embedder: {} ({} dims)", embedder.name(), embedder.dimensions());
+
+    // Mandatory reranker — unless --no-rerank, which measures RRF alone so
+    // the reranker's contribution can be quantified.
+    let reranker: Option<Arc<dyn Reranker>> = if no_rerank {
+        println!("reranker: DISABLED (--no-rerank: measuring RRF fusion alone)");
+        None
+    } else {
+        let r = reranker_from_env("./data/models");
+        println!("reranker: {}", r.name());
+        Some(r)
+    };
 
     let db = PgStore::connect(&url)
         .await
@@ -187,8 +209,32 @@ async fn run(dir: Option<PathBuf>, update_baseline: bool) -> Result<()> {
             .into_iter()
             .next()
             .unwrap_or_default();
-        let hits = db.hybrid_search(&tenant, &q.query, qv, K).await?;
-        let ranked: Vec<String> = hits.into_iter().map(|h| h.path).collect();
+        // Pull a pool, then (optionally) rerank it down — same shape as the
+        // retriever's gather phase.
+        let pool = if reranker.is_some() { RERANK_POOL } else { K };
+        let hits = db.hybrid_search(&tenant, &q.query, qv, pool).await?;
+
+        let ranked: Vec<String> = if let Some(rr) = &reranker {
+            let docs: Vec<String> = hits
+                .iter()
+                .map(|h| format!("{}\n{}", h.title, h.snippet))
+                .collect();
+            let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+            let scores = rr.scores(&q.query, &doc_refs).await?;
+            let mut idx: Vec<usize> = (0..hits.len()).collect();
+            idx.sort_by(|&a, &b| {
+                scores[b]
+                    .partial_cmp(&scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            idx.into_iter()
+                .take(K as usize)
+                .map(|i| hits[i].path.clone())
+                .collect()
+        } else {
+            hits.into_iter().take(K as usize).map(|h| h.path).collect()
+        };
+
         let s = score_query(q, &ranked);
         println!(
             "  [{}] {:<8} exact@1={} mrr={:.3} ndcg={:.3}  {}",
@@ -213,6 +259,7 @@ async fn run(dir: Option<PathBuf>, update_baseline: bool) -> Result<()> {
         config: Config {
             rrf_k: std::env::var("QPEDIA_RRF_K").unwrap_or_else(|_| "60".into()),
             embed_model: embedder.name().to_string(),
+            reranker: reranker.as_ref().map(|r| r.name().to_string()),
         },
         overall: overall.finish(),
         by_category: per_cat
@@ -360,7 +407,12 @@ fn check_regressions(baseline_path: &Path, current: &Metrics) -> Result<Vec<Stri
 
 fn print_report(r: &Report) {
     println!("\n── Results ──────────────────────────────────");
-    println!("config: rrf_k={} embed={}", r.config.rrf_k, r.config.embed_model);
+    println!(
+        "config: rrf_k={} embed={} reranker={}",
+        r.config.rrf_k,
+        r.config.embed_model,
+        r.config.reranker.as_deref().unwrap_or("none")
+    );
     let o = &r.overall;
     println!(
         "overall (n={}): recall@10={:.3} mrr={:.3} ndcg@10={:.3} exact@1={:.3}",

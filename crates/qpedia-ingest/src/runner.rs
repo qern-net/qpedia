@@ -10,7 +10,7 @@ use qpedia_core::{
     tenant::Tenant,
     JobId, SourceId,
 };
-use qpedia_embed::Embedder;
+use qpedia_embed::{Embedder, Reranker};
 use qpedia_extract::ExtractorRegistry;
 use qpedia_llm::LlmProvider;
 use qpedia_pg_store::PgStore;
@@ -30,6 +30,10 @@ pub struct IngestContext {
     pub extractors: Arc<ExtractorRegistry>,
     pub llm: Option<Arc<dyn LlmProvider>>,
     pub embedder: Option<Arc<dyn Embedder>>,
+    /// Cross-encoder reranker for the retrieval gather phase. Mandatory
+    /// (not `Option`) — a single instance, lazily initialized, shared
+    /// across requests. See `qpedia-embed::rerank`.
+    pub reranker: Arc<dyn Reranker>,
 }
 
 impl IngestContext {
@@ -40,8 +44,9 @@ impl IngestContext {
         extractors: Arc<ExtractorRegistry>,
         llm: Option<Arc<dyn LlmProvider>>,
         embedder: Option<Arc<dyn Embedder>>,
+        reranker: Arc<dyn Reranker>,
     ) -> Self {
-        Self { db, blob, wiki_store, extractors, llm, embedder }
+        Self { db, blob, wiki_store, extractors, llm, embedder, reranker }
     }
 }
 
