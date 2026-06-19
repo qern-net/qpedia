@@ -3,7 +3,6 @@
 Cargo.lock.bak
 
 # Runtime data volumes (bind-mounted in containers, populated on host runs).
-# v2 dropped /data/sqlite and /data/weaviate; everything else lives here.
 /data/
 
 # Smoke-test artifacts

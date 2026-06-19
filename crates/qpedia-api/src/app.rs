@@ -122,6 +122,11 @@ pub struct AppBuilder {
     extra_routers: Vec<Router<AppState>>,
     chat_rate_limiter: Arc<ChatRateLimiter>,
     spawn_workers: bool,
+    /// SDK provider guard owning the telemetry pipeline for the process
+    /// lifetime. Held here so `serve()` can perform a bounded shutdown flush.
+    /// `None` when telemetry is disabled / console-only, or for builders that
+    /// don't own the pipeline (e.g. tests using `build()`).
+    telemetry_guard: Option<crate::telemetry::TelemetryGuard>,
 }
 
 impl AppBuilder {
@@ -134,14 +139,16 @@ impl AppBuilder {
         // always win over .env entries. Missing file is fine.
         let _ = dotenvy::dotenv();
 
-        // Best-effort tracing init — overlay binaries that need a custom
-        // subscriber can install one before calling from_env.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "qpedia=info,tower_http=info".into()),
-            )
-            .try_init();
+        // Telemetry: build the pure config from the environment, then
+        // initialize the pipeline. Console logging is always installed; the
+        // OTLP layer is added only when telemetry is enabled with a usable
+        // endpoint, and any exporter init failure falls back to console-only
+        // without aborting startup (Req 2.6). Overlay binaries that
+        // pre-install a subscriber are tolerated (init_telemetry uses
+        // try_init), so this is safe to call unconditionally.
+        let telemetry_cfg = crate::telemetry::TelemetryConfig::from_env();
+        let telemetry = crate::telemetry::init_telemetry(&telemetry_cfg);
+        let telemetry_guard = telemetry.guard;
 
         let data_dir: PathBuf = std::env::var("QPEDIA_DATA_DIR")
             .unwrap_or_else(|_| "./data".into())
@@ -203,6 +210,7 @@ impl AppBuilder {
             extra_routers: Vec::new(),
             chat_rate_limiter: Arc::new(ChatRateLimiter::from_env()),
             spawn_workers: true,
+            telemetry_guard,
         })
     }
 
@@ -315,25 +323,77 @@ impl AppBuilder {
     }
 
     /// Convenience: spawn workers (unless [`without_workers`](Self::without_workers)
-    /// was called), bind, and `axum::serve`. Runs forever or until error.
-    pub async fn serve(self) -> Result<()> {
+    /// was called), bind, and `axum::serve`. Installs a graceful-shutdown
+    /// signal handler (ctrl-c / SIGTERM); after the server stops, flushes
+    /// telemetry within the bounded timeout, logging any signal types that
+    /// did not flush. Serving begins regardless of collector reachability
+    /// (Req 9.1) — startup never blocks on the collector.
+    pub async fn serve(mut self) -> Result<()> {
         let spawn_workers = self.spawn_workers;
         let bind = self.bind;
         let data_dir_display = self.ctx.wiki_store.root().display().to_string();
         let ctx_for_workers = self.ctx.clone();
+        // Take the guard out before `build()` consumes `self`.
+        let telemetry_guard = self.telemetry_guard.take();
 
         let app = self.build();
 
         if spawn_workers {
             spawn_job_runner(ctx_for_workers.clone());
-            spawn_connector_scheduler(ctx_for_workers);
+            spawn_connector_scheduler(ctx_for_workers.clone());
+            spawn_queue_depth_sampler(ctx_for_workers);
         }
 
         info!(%bind, wiki_root = %data_dir_display, "qpedia-api starting");
         let listener = tokio::net::TcpListener::bind(bind).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        // Server has stopped accepting connections — perform the bounded
+        // telemetry flush (Req 2.4 / 2.7) before the process exits.
+        if let Some(guard) = telemetry_guard {
+            let outcome = guard.shutdown().await;
+            if outcome.all_flushed() {
+                info!("telemetry: all signals flushed on shutdown");
+            } else {
+                tracing::error!(
+                    incomplete = ?outcome.incomplete_signals(),
+                    "telemetry: shutdown flush timed out for some signal types"
+                );
+            }
+        }
         Ok(())
     }
+}
+
+/// Resolve a graceful-shutdown future: completes on ctrl-c or, on Unix, on
+/// SIGTERM. Used by `serve()` so in-flight requests drain and telemetry can
+/// be flushed before exit.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("shutdown signal received; draining in-flight requests");
 }
 
 // ---------- core router (the OSS routes) ---------------------------------------
@@ -341,6 +401,7 @@ impl AppBuilder {
 fn core_router(upload_limit: usize) -> Router<AppState> {
     Router::new()
         .route("/healthz", get(routes::healthz))
+        .route("/api/v1/health", get(routes::health))
         .route("/api/v1/version", get(routes::version))
         .route("/api/v1/auth/config", get(routes::auth_config))
         .route("/api/v1/auth/me", get(routes::auth_me))
@@ -463,6 +524,28 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
             "/api/v1/workspaces/domains/:domain",
             axum::routing::delete(routes::delete_domain),
         )
+        // ---- observability (task 11.2) ----
+        // Authenticating Grafana reverse proxy. Catch-all for ALL methods at
+        // `/api/v1/observability/grafana/*path`; this is the *sole* ingress to
+        // the internal-only Grafana (the `otel-lgtm` service publishes no host
+        // ports). The handler resolves the QPEDIA `User` first (401 when
+        // absent), strips client `X-WEBAUTH-*` headers, and injects the trusted
+        // identity + mapped Grafana org role. Registered BEFORE the trailing
+        // `.layer(http_trace)` so proxy traffic is itself traced (design §9 —
+        // this route is deliberately NOT in the HTTP_Span excluded set).
+        .route(
+            "/api/v1/observability/grafana/*path",
+            axum::routing::any(crate::observability_proxy::grafana_proxy),
+        )
+        // HTTP tracing layer (task 5.4): opens an `HTTP_Span` per non-excluded
+        // request, continuing the inbound W3C trace context. Added via
+        // `Router::layer` so it wraps all routes *after* routing has matched,
+        // which is what makes `MatchedPath` available to the middleware for the
+        // `http.route` template. Excluded paths (/healthz, /metrics) take the
+        // no-span fast path inside the middleware.
+        .layer(axum::middleware::from_fn(
+            crate::telemetry::http_layer::http_trace,
+        ))
 }
 
 // ---------- background spawns --------------------------------------------------
@@ -523,4 +606,44 @@ fn spawn_connector_scheduler(ctx: IngestContext) {
         }
     });
     info!(tick_secs, stale_ms, "connector sync scheduler started");
+}
+
+/// Periodically sample the pending-job count per kind and record it as the
+/// `jobs.queue.depth` gauge (Req 5.8). Completion-time signals (`jobs.completed`,
+/// `Job_Span`) capture *throughput* and *outcome* but not the current backlog,
+/// so this sampler is the only source of live queue depth over time.
+///
+/// The sample goes through `PgStore::pending_job_counts_by_kind` (the
+/// job-visibility/queue model), per project steering, rather than a hidden
+/// side query. Interval is `QPEDIA_QUEUE_DEPTH_SAMPLE_SECS` (default 15s).
+/// Uses the process-global meter installed by the telemetry pipeline; a no-op
+/// meter when telemetry is disabled, so this is always safe to spawn.
+fn spawn_queue_depth_sampler(ctx: IngestContext) {
+    let interval_secs: u64 = std::env::var("QPEDIA_QUEUE_DEPTH_SAMPLE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(15);
+    tokio::spawn(async move {
+        let gauge = opentelemetry::global::meter("qpedia-ingest")
+            .u64_gauge("jobs.queue.depth")
+            .with_description("Current number of pending (queued) jobs, labeled by kind")
+            .build();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            tick.tick().await;
+            match ctx.db.pending_job_counts_by_kind().await {
+                Ok(counts) => {
+                    for (kind, n) in counts {
+                        gauge.record(
+                            n.max(0) as u64,
+                            &[opentelemetry::KeyValue::new("kind", kind)],
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "queue-depth sample failed"),
+            }
+        }
+    });
+    info!(interval_secs, "jobs.queue.depth sampler started");
 }

@@ -14,6 +14,9 @@ pgvector.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
+opentelemetry-semantic-conventions.workspace = true
+tracing-opentelemetry.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -23,3 +26,8 @@ ulid.workspace = true
 url.workspace = true
 bytes.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-subscriber.workspace = true

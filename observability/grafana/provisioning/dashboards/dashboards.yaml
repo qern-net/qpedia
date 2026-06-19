@@ -1,0 +1,28 @@
+# Grafana dashboard provisioning provider — bundled inside grafana/otel-lgtm.
+#
+# Provisioned read-only into the container's provisioning dir (see
+# docker-compose.yml). This single file-provider loads every dashboard JSON
+# under `options.path` into one Grafana folder ("Qpedia Observability"),
+# realizing the seven-dashboard Observability Views Catalog (design §8/§11).
+# Req 8.3, 8.4, 8.5, 8.6, 8.7, 8.8.
+#
+# `options.path` is the in-container directory the dashboard JSON files are
+# bind-mounted to (see docker-compose.yml). `foldersFromFilesStructure: false`
+# keeps all seven dashboards in the single declared `folder` regardless of
+# on-disk layout. Dashboards are editable in the UI for ad-hoc exploration but
+# the on-disk JSON remains the source of truth on the next provisioning sweep.
+apiVersion: 1
+
+providers:
+  - name: qpedia-observability
+    orgId: 1
+    folder: Qpedia Observability
+    folderUid: qpedia-observability
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /otel-lgtm/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -31,9 +31,21 @@ tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "macros", "chrono", "migrate", "uuid", "json", "tls-rustls"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "chrono", "migrate", "uuid", "json", "tls-rustls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# OpenTelemetry crate family — pinned to ONE matched release line (0.27.x).
+# These crates release in lockstep and only compile when their versions match
+# across opentelemetry / opentelemetry_sdk / opentelemetry-otlp; tracing-opentelemetry
+# 0.28.x is the release that targets opentelemetry 0.27.x. NEVER use `latest`,
+# NEVER mix release lines — a version-line mismatch is the usual cause of a build break.
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace", "metrics", "logs", "http-proto", "reqwest-rustls"] }
+opentelemetry-semantic-conventions = "0.27"
+# OTLP→tracing log bridge — same pinned 0.27 release line as the rest of the family.
+opentelemetry-appender-tracing = "0.27"
+tracing-opentelemetry = "0.28"
 thiserror = "1"
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -64,6 +76,9 @@ rand = "0.8"
 pgvector = { version = "=0.4.1", features = ["sqlx"] }   # pinned: 0.4.2 moved to sqlx 0.9, splits our sqlx 0.8 graph
 jsonwebtoken = "9"
 dotenvy = "0.15"
+
+# Dev-dependencies (shared)
+proptest = "1"
 
 # Internal
 qpedia-core = { path = "crates/qpedia-core" }

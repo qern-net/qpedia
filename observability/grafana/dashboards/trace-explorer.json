@@ -1,0 +1,84 @@
+{
+  "uid": "qpedia-trace-explorer",
+  "title": "Trace Explorer",
+  "tags": ["qpedia", "observability", "traces"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(http_server_request_duration_milliseconds_count, tenant)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(http_server_request_duration_milliseconds_count, tenant)",
+          "refId": "tenant"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Trace search (service / route / duration / status)",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceqlSearch",
+          "filters": [
+            {
+              "id": "service",
+              "tag": "service.name",
+              "operator": "=",
+              "scope": "resource",
+              "value": ["qpedia-api"],
+              "valueType": "string"
+            },
+            {
+              "id": "tenant",
+              "tag": "tenant",
+              "operator": "=~",
+              "scope": "span",
+              "value": ["$tenant"],
+              "valueType": "string"
+            }
+          ],
+          "limit": 50
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Error traces (status = error)",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "query": "{ resource.service.name = \"qpedia-api\" && status = error }",
+          "limit": 50
+        }
+      ]
+    }
+  ]
+}

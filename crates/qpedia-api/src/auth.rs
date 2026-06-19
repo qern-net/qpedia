@@ -346,8 +346,8 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let ext = AuthExtractorState::from_ref(state);
-        match &ext.auth.mode {
-            AuthMode::Dev => Ok(User::dev_admin()),
+        let user = match &ext.auth.mode {
+            AuthMode::Dev => User::dev_admin(),
             // Both real modes are session-cookie gated; OIDC and Firebase
             // differ only in how the session is *minted*, not read.
             AuthMode::Oidc(_) | AuthMode::Session => {
@@ -359,15 +359,26 @@ where
                     .await
                     .map_err(|_| AuthRejection::Unauthorized)?
                     .ok_or(AuthRejection::Unauthorized)?;
-                Ok(User {
+                User {
                     id: session.user_id,
                     email: session.email,
                     name: session.name,
                     groups: session.groups,
                     tenant: session.tenant,
-                })
+                }
             }
-        }
+        };
+
+        // Now that the request is authenticated and the tenant is resolved,
+        // record it on the active `HTTP_Span` so the HTTP-backed views are
+        // per-tenant scopable (Req 4.9). The `tenant` field is declared
+        // (Empty) on the span by the HTTP tracing layer; recording here is a
+        // no-op when no span is active (excluded paths) or telemetry is
+        // disabled. Unauthenticated requests never reach this line, so the
+        // attribute is simply left unset for them (Req 4.10).
+        tracing::Span::current().record("tenant", user.tenant.as_str());
+
+        Ok(user)
     }
 }
 

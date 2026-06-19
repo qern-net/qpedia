@@ -123,6 +123,7 @@ Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to ov
 | `RUST_LOG` | `qpedia=info,tower_http=info` | Log filter |
 | `QPEDIA_MARKER_URL` | — | Optional high-fidelity PDF sidecar (see below) |
 | `QPEDIA_RRF_K` | `60` | Hybrid-search rank-decay constant for Reciprocal Rank Fusion. Lower (≈20–30) sharpens precision; higher (≈80–100) favors recall/consensus. Clamped to `1..=1000`. |
+| `QPEDIA_QUEUE_DEPTH_SAMPLE_SECS` | `15` | How often (seconds) to sample pending-job counts and record the `jobs.queue.depth` OTel gauge. Set to 0 or omit to use the default. |
 
 ---
 

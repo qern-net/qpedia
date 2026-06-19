@@ -31,8 +31,12 @@
 pub mod app;
 pub mod auth;
 pub mod firebase;
+pub mod health;
+pub mod observability;
+pub mod observability_proxy;
 pub mod rate_limit;
 pub mod routes;
+pub mod telemetry;
 
 pub use app::{
     AppBuilder, AppState, EventSink, Extensions, NoopEventSink, NoopTenantHook, TenantHook,
