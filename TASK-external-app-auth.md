@@ -13,7 +13,25 @@ either the OSS engine or the `qpedia-pvt` overlay. So external apps can only aut
 today by carrying a session cookie obtained from a browser login — unsuitable for clean
 service-to-service. This task adds the missing machine path.
 
-## Decision: use OAuth 2 (not API-key+IP, not HMAC secret)
+## Implemented — first cut (branch `feat/external-app-auth`)
+
+A minimal, opt-in **service-token (M2M)** path is now in `crates/qpedia-api/src/m2m.rs`
+and wired into the `User` extractor (`auth.rs`):
+
+- `QPEDIA_SERVICE_TOKENS` = JSON array of `{name, token, tenant, groups[]}`.
+- Presented as `Authorization: Bearer <token>`; matched by sha256 hash (never stored/logged
+  in plaintext). The token carries **tenant + groups**, so RLS scoping and ACLs behave
+  exactly as for a user session — no cross-tenant leak. (This is why a bare API key was
+  rejected: it carries no identity.)
+- `None` unless configured, so existing deployments are unaffected.
+- The RFP app's existing `Authorization: Bearer` wiring (`QPEDIA_TOKEN`) works against this
+  as-is.
+
+**Still to do** (the OAuth 2 target below): replace static tokens with OAuth 2
+client-credentials JWTs validated against the OIDC issuer, with scope-based authorization
+and per-route scope checks. The extractor seam stays the same.
+
+## Decision (target): OAuth 2 (not API-key+IP, not HMAC secret)
 
 Three options were considered:
 
@@ -40,21 +58,4 @@ caller to assert the tenant in a header — unacceptable).
    asserted via an unauthenticated header.
 3. **Scope → authorization** mapping on `/api/v1`; reject tokens missing the required scope (403).
 4. **Defense in depth:** short-lived tokens; optionally mTLS or a network policy between the
-   two services; IP allowlist only as a *secondary* control, never the primary.
-5. Keep the existing `dev` auth bypass for local development.
-
-## Acceptance criteria
-
-- [ ] `/api/v1` accepts a client-credentials JWT from an allowlisted external client carrying the required scope.
-- [ ] On-behalf-of calls set `qpedia.tenant` from the forwarded user token; a cross-tenant denial test passes (RLS holds).
-- [ ] Missing / invalid / insufficient-scope token → 401 / 403.
-- [ ] `contracts/qpedia-openapi.yaml` (maintained by the consumer) updated: add a `clientCredentials` OAuth2 flow + scopes to `securitySchemes`.
-- [ ] Docs updated (README auth section, AGENTS/DESIGN as needed).
-
-## Implementation pointers
-
-- `crates/qpedia-api/src/auth.rs` currently handles OIDC sessions + Firebase + dev bypass —
-  add a **bearer-JWT (M2M) validation path** here.
-- Add scope checks where routes are assembled in `crates/qpedia-api/src/app.rs`.
-- Reuse the existing OIDC issuer config (`QPEDIA_OIDC_ISSUER`); add a client allowlist +
-  required-scope config.
+   two services; IP allowlist only as a *secondary* contro

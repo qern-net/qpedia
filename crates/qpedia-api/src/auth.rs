@@ -52,6 +52,9 @@ pub const SESSION_TTL_SECS: i64 = 24 * 60 * 60;
 pub struct AuthState {
     pub mode: AuthMode,
     pub firebase: Option<crate::firebase::FirebaseVerifier>,
+    /// Optional machine-to-machine (service-token) auth for external apps.
+    /// Composes with any `mode`; `None` unless `QPEDIA_SERVICE_TOKENS` is set.
+    pub service: Option<crate::m2m::ServiceTokenAuth>,
 }
 
 #[derive(Clone)]
@@ -100,6 +103,10 @@ impl AuthState {
                 crate::firebase::FirebaseVerifier::new(pid)
             });
 
+        // Optional M2M service-token auth (opt-in via QPEDIA_SERVICE_TOKENS).
+        // Composes with every mode below.
+        let service = crate::m2m::ServiceTokenAuth::from_env()?;
+
         // Validate an explicit mode up front.
         if let Some(m) = mode.as_deref() {
             if !matches!(m, "dev" | "oidc" | "firebase") {
@@ -113,7 +120,7 @@ impl AuthState {
         //    useful for exercising the login UI without enforcement).
         if mode.as_deref() == Some("dev") {
             info!("auth: dev mode (anonymous admin)");
-            return Ok(Self { mode: AuthMode::Dev, firebase });
+            return Ok(Self { mode: AuthMode::Dev, firebase, service });
         }
 
         // 2. Session/Firebase mode: requested explicitly, or implied by a
@@ -122,7 +129,7 @@ impl AuthState {
             || (issuer.is_none() && firebase.is_some())
         {
             info!("auth: session mode (Firebase login enforced)");
-            return Ok(Self { mode: AuthMode::Session, firebase });
+            return Ok(Self { mode: AuthMode::Session, firebase, service });
         }
 
         match (mode.as_deref(), issuer) {
@@ -131,7 +138,7 @@ impl AuthState {
             }
             (_, None) => {
                 info!("auth: dev mode (anonymous admin)");
-                Ok(Self { mode: AuthMode::Dev, firebase })
+                Ok(Self { mode: AuthMode::Dev, firebase, service })
             }
             (_, Some(issuer)) => {
                 let client_id = std::env::var("QPEDIA_OIDC_CLIENT_ID")
@@ -173,6 +180,7 @@ impl AuthState {
                         end_session_endpoint,
                     })),
                     firebase,
+                    service,
                 })
             }
         }
@@ -346,6 +354,17 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let ext = AuthExtractorState::from_ref(state);
+
+        // Machine-to-machine: a valid service token (Authorization: Bearer)
+        // authenticates in any mode and resolves its own tenant + groups, so
+        // RLS scoping is identical to a user session. Falls through when absent.
+        if let Some(svc) = &ext.auth.service {
+            if let Some(user) = svc.authenticate(&parts.headers) {
+                tracing::Span::current().record("tenant", user.tenant.as_str());
+                return Ok(user);
+            }
+        }
+
         let user = match &ext.auth.mode {
             AuthMode::Dev => User::dev_admin(),
             // Both real modes are session-cookie gated; OIDC and Firebase
@@ -602,34 +621,4 @@ mod tests {
 }
 
 fn extract_groups(
-    claims: &openidconnect::IdTokenClaims<openidconnect::EmptyAdditionalClaims, openidconnect::core::CoreGenderClaim>,
-    claim: &str,
-) -> Vec<String> {
-    let v = match serde_json::to_value(claims) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    if let Some(arr) = v.get(claim).and_then(|x| x.as_array()) {
-        return arr
-            .iter()
-            .filter_map(|g| g.as_str().map(|s| s.to_string()))
-            .collect();
-    }
-    if let Some(s) = v.get(claim).and_then(|x| x.as_str()) {
-        return s
-            .split(|c: char| c == ' ' || c == ',')
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_string())
-            .collect();
-    }
-    if claim != "roles" {
-        if let Some(arr) = v.get("roles").and_then(|x| x.as_array()) {
-            warn!("groups claim {claim:?} missing; falling back to 'roles'");
-            return arr
-                .iter()
-                .filter_map(|g| g.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-    }
-    Vec::new()
-}
+    claims: &openidconnect::IdTokenClaims<openidconnect::EmptyAdditionalClaims, openidconnect::core::Co
