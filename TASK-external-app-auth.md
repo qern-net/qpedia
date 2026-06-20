@@ -27,9 +27,16 @@ and wired into the `User` extractor (`auth.rs`):
 - The RFP app's existing `Authorization: Bearer` wiring (`QPEDIA_TOKEN`) works against this
   as-is.
 
-**Still to do** (the OAuth 2 target below): replace static tokens with OAuth 2
-client-credentials JWTs validated against the OIDC issuer, with scope-based authorization
-and per-route scope checks. The extractor seam stays the same.
+**OAuth 2 path — implemented (branch `feat/external-app-auth-oauth`).** `crates/qpedia-api/src/oauth.rs`
+adds `OAuthVerifier`: validates a client-credentials **access-token JWT** against the OIDC
+issuer's JWKS (RS256, mirroring `firebase.rs`), enforces a client (`azp`) allowlist and an
+optional required scope, and reads the tenant claim → drives RLS. Wired into the `User`
+extractor after the service-token path. Opt-in via `QPEDIA_M2M_AUDIENCE` (+ issuer); `None`
+otherwise. Env: `QPEDIA_M2M_OIDC_ISSUER`, `QPEDIA_M2M_AUDIENCE`, `QPEDIA_M2M_ALLOWED_CLIENTS`,
+`QPEDIA_M2M_REQUIRED_SCOPE`, `QPEDIA_M2M_TENANT_CLAIM`, `QPEDIA_M2M_JWKS_URL`.
+
+**Still to do:** per-route scope enforcement (distinct scopes for sources.write / search.read /
+chat) rather than a single required scope; rotate-friendly client registry.
 
 ## Decision (target): OAuth 2 (not API-key+IP, not HMAC secret)
 
@@ -51,11 +58,4 @@ caller to assert the tenant in a header — unacceptable).
    client in the shared IdP (same issuer both apps already use). Qpedia validates the JWT
    (`iss`, `exp`, `aud`), checks the client (`azp`) against an allowlist, and enforces
    **scopes** per route, e.g. `qpedia.sources.write`, `qpedia.search.read`, `qpedia.chat`.
-2. **User/tenant context — forward the end-user token.** For calls made on behalf of an end
-   user, forward the user's OIDC access token (both apps share the issuer), or use **RFC 8693
-   token exchange** for delegation. Qpedia resolves user + tenant from the token and sets
-   `set_config('qpedia.tenant', …, true)`; RLS enforces isolation. Never accept a tenant
-   asserted via an unauthenticated header.
-3. **Scope → authorization** mapping on `/api/v1`; reject tokens missing the required scope (403).
-4. **Defense in depth:** short-lived tokens; optionally mTLS or a network policy between the
-   two services; IP allowlist only as a *secondary* contro
+2. **User/tenant context — forward the end-user token.** For calls made on b

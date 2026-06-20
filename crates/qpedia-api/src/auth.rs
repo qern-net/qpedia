@@ -55,6 +55,9 @@ pub struct AuthState {
     /// Optional machine-to-machine (service-token) auth for external apps.
     /// Composes with any `mode`; `None` unless `QPEDIA_SERVICE_TOKENS` is set.
     pub service: Option<crate::m2m::ServiceTokenAuth>,
+    /// Optional OAuth 2 client-credentials (JWT) auth for external apps.
+    /// Composes with any `mode`; `None` unless `QPEDIA_M2M_AUDIENCE` is set.
+    pub oauth: Option<crate::oauth::OAuthVerifier>,
 }
 
 #[derive(Clone)]
@@ -103,9 +106,9 @@ impl AuthState {
                 crate::firebase::FirebaseVerifier::new(pid)
             });
 
-        // Optional M2M service-token auth (opt-in via QPEDIA_SERVICE_TOKENS).
-        // Composes with every mode below.
+        // Optional M2M auth (opt-in). Both compose with every mode below.
         let service = crate::m2m::ServiceTokenAuth::from_env()?;
+        let oauth = crate::oauth::OAuthVerifier::from_env()?;
 
         // Validate an explicit mode up front.
         if let Some(m) = mode.as_deref() {
@@ -120,7 +123,7 @@ impl AuthState {
         //    useful for exercising the login UI without enforcement).
         if mode.as_deref() == Some("dev") {
             info!("auth: dev mode (anonymous admin)");
-            return Ok(Self { mode: AuthMode::Dev, firebase, service });
+            return Ok(Self { mode: AuthMode::Dev, firebase, service, oauth });
         }
 
         // 2. Session/Firebase mode: requested explicitly, or implied by a
@@ -129,7 +132,7 @@ impl AuthState {
             || (issuer.is_none() && firebase.is_some())
         {
             info!("auth: session mode (Firebase login enforced)");
-            return Ok(Self { mode: AuthMode::Session, firebase, service });
+            return Ok(Self { mode: AuthMode::Session, firebase, service, oauth });
         }
 
         match (mode.as_deref(), issuer) {
@@ -138,7 +141,7 @@ impl AuthState {
             }
             (_, None) => {
                 info!("auth: dev mode (anonymous admin)");
-                Ok(Self { mode: AuthMode::Dev, firebase, service })
+                Ok(Self { mode: AuthMode::Dev, firebase, service, oauth })
             }
             (_, Some(issuer)) => {
                 let client_id = std::env::var("QPEDIA_OIDC_CLIENT_ID")
@@ -181,6 +184,7 @@ impl AuthState {
                     })),
                     firebase,
                     service,
+                    oauth,
                 })
             }
         }
@@ -360,6 +364,15 @@ where
         // RLS scoping is identical to a user session. Falls through when absent.
         if let Some(svc) = &ext.auth.service {
             if let Some(user) = svc.authenticate(&parts.headers) {
+                tracing::Span::current().record("tenant", user.tenant.as_str());
+                return Ok(user);
+            }
+        }
+
+        // OAuth 2 client-credentials JWT — validated against the OIDC issuer's
+        // JWKS, with client allowlist + scope/tenant claims driving authz/RLS.
+        if let Some(oauth) = &ext.auth.oauth {
+            if let Some(user) = oauth.authenticate(&parts.headers).await {
                 tracing::Span::current().record("tenant", user.tenant.as_str());
                 return Ok(user);
             }
@@ -598,27 +611,4 @@ mod tests {
     #[test]
     fn non_admin_email_unchanged() {
         let g = augment_admin_with_allow(Some("c@z.com"), vec!["staff".into()], "a@x.com");
-        assert_eq!(g, vec!["staff".to_string()]);
-    }
-
-    #[test]
-    fn empty_allowlist_no_admin() {
-        let g = augment_admin_with_allow(Some("a@x.com"), vec![], "");
-        assert!(g.is_empty());
-    }
-
-    #[test]
-    fn admin_not_duplicated() {
-        let g = augment_admin_with_allow(Some("a@x.com"), vec!["admin".into()], "a@x.com");
-        assert_eq!(g.iter().filter(|x| *x == "admin").count(), 1);
-    }
-
-    #[test]
-    fn no_email_no_admin() {
-        let g = augment_admin_with_allow(None, vec![], "a@x.com");
-        assert!(g.is_empty());
-    }
-}
-
-fn extract_groups(
-    claims: &openidconnect::IdTokenClaims<openidconnect::EmptyAdditionalClaims, openidconnect::core::Co
+    

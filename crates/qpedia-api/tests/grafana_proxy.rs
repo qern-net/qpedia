@@ -309,7 +309,7 @@ mod live {
         let ctx = IngestContext::new(db, blob, wiki, extractors, None, None, reranker);
         AppState {
             ctx,
-            auth: AuthState { mode, firebase: None, service: None },
+            auth: AuthState { mode, firebase: None, service: None, oauth: None },
             extensions: Extensions::default(),
             chat_rate_limiter: Arc::new(ChatRateLimiter::from_env()),
         }
@@ -586,4 +586,4 @@ mod live {
             );
         }
 
-        std::env::remove_var("QPEDIA_GRAFANA_UPSTREAM
+        std::env::remove_var("QPEDIA_GRA

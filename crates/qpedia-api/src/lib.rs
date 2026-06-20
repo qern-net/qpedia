@@ -33,6 +33,7 @@ pub mod auth;
 pub mod firebase;
 pub mod health;
 pub mod m2m;
+pub mod oauth;
 pub mod observability;
 pub mod observability_proxy;
 pub mod rate_limit;
@@ -45,5 +46,4 @@ pub use app::{
 pub use auth::{
     mint_session, AuthExtractorState, AuthMode, AuthState, User,
 };
-pub use rate_limit::ChatRateLimiter;
-pub use route
+pub use rate_limit::ChatRateLimiter
