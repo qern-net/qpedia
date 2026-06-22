@@ -1,0 +1,57 @@
+name: feature-landing-check
+
+# Enforces Tier-1 of FEATURE-LANDING.md: code changes must move the record.
+# Intentionally narrow (two rules) to stay low-friction.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  record-in-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute changed files vs base
+        id: diff
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          files="$(git diff --name-only "$base"...HEAD)"
+          echo "$files"
+          {
+            echo "files<<EOF"
+            echo "$files"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Rule 1 — crates/** change requires a CHANGELOG [Unreleased] edit
+        run: |
+          files='${{ steps.diff.outputs.files }}'
+          if echo "$files" | grep -qE '^crates/'; then
+            if ! echo "$files" | grep -qx 'CHANGELOG.md'; then
+              echo "::error::Code under crates/ changed but CHANGELOG.md was not updated. Add a bullet under '## [Unreleased]' (see FEATURE-LANDING.md)."
+              exit 1
+            fi
+            # Best-effort: ensure the [Unreleased] section itself moved.
+            base="${{ github.event.pull_request.base.sha }}"
+            if ! git diff "$base"...HEAD -- CHANGELOG.md | grep -qiE '^\+' ; then
+              echo "::error::CHANGELOG.md changed but no lines were added under it."
+              exit 1
+            fi
+          fi
+
+      - name: Rule 2 — models.rs change requires APPROVED-MODELS.md edit
+        run: |
+          files='${{ steps.diff.outputs.files }}'
+          if echo "$files" | grep -qx 'crates/qpedia-llm/src/models.rs'; then
+            if ! echo "$files" | grep -qx 'APPROVED-MODELS.md'; then
+              echo "::error::The model registry (models.rs) changed but APPROVED-MODELS.md was not. Update both in the same PR (see FEATURE-LANDING.md)."
+              exit 1
+            fi
+          fi
+
+      - name: OK
+        run: echo "Feature-landing records are in sync."

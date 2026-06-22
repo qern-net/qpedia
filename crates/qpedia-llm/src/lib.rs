@@ -9,10 +9,14 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 pub mod anthropic;
+pub mod models;
 pub mod openai_compatible;
 pub mod openrouter;
 
 pub use anthropic::AnthropicDirect;
+pub use models::{
+    all_models, approved_models, default_model, is_approved, ApprovedModel, Provider, Status,
+};
 pub use openai_compatible::OpenAICompatible;
 pub use openrouter::OpenRouter;
 
@@ -42,7 +46,7 @@ pub struct VisionReq {
 
 /// Per-provider default model. Override with `QPEDIA_LLM_MODEL`.
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4.1-mini";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-haiku-4-5";
 
 /// Build an LLM provider from env. Returns Ok(None) if no provider can be
@@ -115,6 +119,68 @@ pub fn provider_from_env() -> Result<Option<Arc<dyn LlmProvider>>> {
     Ok(provider)
 }
 
+/// An explicit, per-tenant LLM configuration (resolved from the `llm_config`
+/// table). Any field left `None` falls back to the deployment env, so a tenant
+/// can override just the model, just the credentials, or both — and a tenant
+/// with no row behaves exactly like `provider_from_env`.
+#[derive(Debug, Clone, Default)]
+pub struct LlmConfig {
+    pub provider: String,         // anthropic | openai | openrouter | openai-compatible
+    pub model: Option<String>,    // approved model id; None ⇒ per-provider default
+    pub api_key: Option<String>,  // decrypted BYO key; None ⇒ deployment env key
+    pub base_url: Option<String>, // openai-compatible / proxy override
+}
+
+/// Build a provider from an explicit [`LlmConfig`] rather than the process
+/// environment. Mirrors [`provider_from_env`] construction so behaviour is
+/// identical; used by per-request/per-tenant resolution. Returns `Ok(None)`
+/// when the chosen provider has no usable credential (BYOL not configured).
+pub fn provider_from_config(cfg: &LlmConfig) -> Result<Option<Arc<dyn LlmProvider>>> {
+    let model = cfg.model.clone().filter(|s| !s.trim().is_empty());
+    let provider: Option<Arc<dyn LlmProvider>> = match cfg.provider.as_str() {
+        "anthropic" => match cfg.api_key.clone().or_else(|| nonempty_env("ANTHROPIC_API_KEY")) {
+            // Anthropic carries the model per-request (CompleteReq.model); the
+            // caller sets the resolved model there. Provider holds creds only.
+            Some(key) => {
+                let base = cfg.base_url.clone().unwrap_or_else(anthropic_base_url);
+                Some(Arc::new(AnthropicDirect::with_base_url(key, base)) as Arc<dyn LlmProvider>)
+            }
+            None => None,
+        },
+        "openai" => match cfg.api_key.clone().or_else(|| nonempty_env("OPENAI_API_KEY")) {
+            Some(key) => {
+                let base = cfg
+                    .base_url
+                    .clone()
+                    .or_else(|| nonempty_env("OPENAI_BASE_URL"))
+                    .unwrap_or_else(|| "https://api.openai.com/v1".into());
+                let model = model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.into());
+                Some(Arc::new(OpenAICompatible::new(base, Some(key), model)) as Arc<dyn LlmProvider>)
+            }
+            None => None,
+        },
+        "openrouter" => match cfg.api_key.clone().or_else(|| nonempty_env("OPENROUTER_API_KEY")) {
+            Some(key) => {
+                let model = model.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.into());
+                Some(Arc::new(OpenRouter::new(key, model)) as Arc<dyn LlmProvider>)
+            }
+            None => None,
+        },
+        "openai-compatible" | "vllm" | "ollama" => {
+            let base = cfg
+                .base_url
+                .clone()
+                .or_else(|| nonempty_env("QPEDIA_LLM_BASE_URL"))
+                .ok_or_else(|| anyhow!("base_url required for openai-compatible provider"))?;
+            let api_key = cfg.api_key.clone().or_else(|| nonempty_env("QPEDIA_LLM_API_KEY"));
+            let model = model.unwrap_or_else(|| "default".into());
+            Some(Arc::new(OpenAICompatible::new(base, api_key, model)) as Arc<dyn LlmProvider>)
+        }
+        other => return Err(anyhow!("unknown provider: {other}")),
+    };
+    Ok(provider)
+}
+
 fn detect_provider_kind() -> String {
     if let Some(v) = nonempty_env("QPEDIA_LLM_PROVIDER") {
         return v.trim().to_lowercase();
@@ -156,7 +222,7 @@ pub fn current_model() -> String {
 /// The model to use for image OCR/description (Band 6.1), or `None` if image
 /// vision is disabled/unavailable. `QPEDIA_VISION=0` disables it;
 /// `QPEDIA_VISION_MODEL` sets an explicit model; otherwise the current model
-/// is used for vision-capable providers (OpenAI / OpenRouter — `gpt-4.1-mini`
+/// is used for vision-capable providers (OpenAI / OpenRouter — `gpt-5.4-mini`
 /// and friends are multimodal). Anthropic-direct and bare local endpoints
 /// require an explicit `QPEDIA_VISION_MODEL` to opt in.
 pub fn vision_model() -> Option<String> {

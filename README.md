@@ -10,7 +10,7 @@ Upload a PDF, Word doc, or HTML page. Qpedia extracts the text, classifies it, r
 >
 > This repository is the open-source **engine** behind it (Apache-2.0). Self-host it, or let us run it for you.
 
-**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
+**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Platform integration & SDK](INTEGRATION.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
 
 ---
 
@@ -36,6 +36,28 @@ Two containers. That's it.
 ```
 
 Volumes: bind-mounts `./data/wiki`, `./data/raw`, `./data/models`; named volume `postgres-data` for the database. Optional third container: the Marker high-fidelity PDF sidecar (off by default; opt in with `--profile marker`).
+
+---
+
+## Qpedia as a foundational layer
+
+Qpedia is not only an end-user product — it is the **foundational knowledge layer that other AI applications build on**. It owns the hard, amortizable parts of a retrieval system (ingestion, extraction, classification, the LLM-authored wiki, embeddings, hybrid search, and RAG chat) so an application on top doesn't have to reimplement any of it.
+
+External applications integrate over the stable **`/api/v1` HTTP boundary** — never by reaching into Qpedia's database. The contract is versioned in this repo at [`contracts/qpedia-openapi.yaml`](contracts/qpedia-openapi.yaml) (OpenAPI 3.1); it is the canonical, sanctioned surface every consumer codes against. The platform pattern is:
+
+- **API boundary, not schema coupling.** Consumers call `/api/v1` (ingest → search → chat). They run their own Postgres *schema* in the same instance (e.g. the RFP app owns `rfp`) but never read Qpedia's tables via cross-schema SQL.
+- **Tenancy lines up.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and Postgres RLS enforces isolation end-to-end.
+- **Machine-to-machine auth.** External calls authenticate via a service-token or OAuth 2 client-credentials JWT that carries tenant + groups, so RLS scoping is identical to a user session — see [`TASK-external-app-auth.md`](TASK-external-app-auth.md).
+- **Graceful degradation.** A consumer that loses its Qpedia connection keeps operating on its own data and re-syncs later; Qpedia is an additive layer, not a hard runtime dependency.
+
+Applications building on this layer today:
+
+| App | What it adds on top of Qpedia |
+|---|---|
+| **qpedia-rfp** (`qproc`) | RFP/tender aggregation & response assembly — the first external application; ingests opportunities into Qpedia and reads them back via search/chat. |
+| **qcodia** | The same "distilled, linked knowledge layer" idea applied to source code (symbol graph + code wiki) for whole-repo PR review and spec/codegen governance. Its hub is an in-process Qpedia overlay (reusing the wiki + summary embeddings); its resident forge adapters call `/api/v1` externally. |
+
+> Building a new application on Qpedia? Start with the **[platform integration & SDK guide](INTEGRATION.md)**, then the contract at `contracts/qpedia-openapi.yaml` and the platform notes in [`DESIGN.md`](DESIGN.md).
 
 ---
 
@@ -74,6 +96,15 @@ All config is via environment variables, loaded from `.env` by Docker Compose.
 
 ### LLM Provider
 
+**Qpedia is BYOL — bring your own LLM.** Qpedia does not ship or resell
+inference: you supply a provider key (or an OpenAI-compatible / on-prem
+endpoint) and Qpedia calls *your* account. With no provider configured,
+ingestion stops at `Extracted` (no wiki distillation). A metered, Qern-managed
+LLM option is planned for the hosted tier but BYOL stays first-class on every
+plan — see [`TASK-managed-llm-billing.md`](TASK-managed-llm-billing.md). The
+validated/supported models (cloud + open-weight), reviewed each quarter, are in
+[`APPROVED-MODELS.md`](APPROVED-MODELS.md).
+
 Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to override.
 
 | Variable | Purpose |
@@ -81,7 +112,7 @@ Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to ov
 | `QPEDIA_LLM_PROVIDER` | `anthropic` \| `openai` \| `openrouter` \| `openai-compatible` |
 | `QPEDIA_LLM_MODEL` | Override the per-provider default model |
 | `ANTHROPIC_API_KEY` | Anthropic direct (default: `claude-haiku-4-5`) |
-| `OPENAI_API_KEY` | OpenAI direct (default: `gpt-4.1-mini`) |
+| `OPENAI_API_KEY` | OpenAI direct (default: `gpt-5.4-mini`) |
 | `OPENROUTER_API_KEY` | OpenRouter (default: `anthropic/claude-haiku-4-5`) |
 | `QPEDIA_LLM_BASE_URL` | Base URL for OpenAI-compatible endpoint (vLLM, Ollama, LM Studio) |
 | `QPEDIA_LLM_API_KEY` | API key for OpenAI-compatible endpoint |

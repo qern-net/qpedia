@@ -4,6 +4,23 @@ All notable changes to **qpedia** (the OSS engine). Format: [Keep a
 Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Per-tenant LLM configuration (BYO model + BYO credentials).** New
+  RLS-isolated `llm_config` table (migration 0008) with the BYO API key
+  encrypted at rest (pgcrypto, `QPEDIA_SECRET_KEY`); `PgStore::{get,resolve,
+  set,clear}_llm_config`. A machine-readable approved-models registry
+  (`qpedia-llm::models`) and `provider_from_config` for per-tenant provider
+  resolution. API, runtime resolution, and UI specified in
+  [`LLM-CONFIG.md`](LLM-CONFIG.md). Fully additive — no row ⇒ deployment
+  provider (BYOL at deploy level unchanged).
+
+### Changed
+- **Default OpenAI model re-pinned** to `gpt-5.4-mini` (was `gpt-4.1-mini`),
+  tracking the Q2 2026 approved-models list. BYOL is unaffected — set
+  `QPEDIA_LLM_MODEL` to override. See [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
+
 ## [1.2.0] — 2026-06-02
 
 The consolidated public release of the engine: Postgres + pgvector
