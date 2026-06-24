@@ -5,12 +5,12 @@ An LLM-powered knowledge base that turns uploaded documents into a searchable, l
 Upload a PDF, Word doc, or HTML page. Qpedia extracts the text, classifies it, runs an agentic loop to write or update wiki pages, and makes the knowledge available through hybrid search and a chat interface.
 
 > ### ☁️ Don't want to run it yourself?
-> **[Qpedia Cloud → qpedia.qern.net](https://qpedia.qern.net)** is the fully managed, hosted version by [Qern](https://qern.net).
-> Connect your Google Drive, SharePoint, or Confluence and get a living, AI-maintained wiki in minutes — no servers, no Postgres to babysit, enterprise SSO and premium connectors included. Free to start. See [pricing](https://qpedia.qern.net/pricing).
+> **[Qpedia Cloud → qpedia.cloud](https://qpedia.cloud)** is the fully managed, hosted version.
+> Connect your Google Drive, SharePoint, or Confluence and get a living, AI-maintained wiki in minutes — no servers, no Postgres to babysit, enterprise SSO and premium connectors included. Free to start. See [pricing](https://qpedia.cloud/pricing).
 >
 > This repository is the open-source **engine** behind it (Apache-2.0). Self-host it, or let us run it for you.
 
-**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Platform integration & SDK](INTEGRATION.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
+**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Platform integration & SDK](docs/INTEGRATION.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
 
 ---
 
@@ -47,7 +47,7 @@ External applications integrate over the stable **`/api/v1` HTTP boundary** — 
 
 - **API boundary, not schema coupling.** Consumers call `/api/v1` (ingest → search → chat). They run their own Postgres *schema* in the same instance (e.g. the RFP app owns `rfp`) but never read Qpedia's tables via cross-schema SQL.
 - **Tenancy lines up.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and Postgres RLS enforces isolation end-to-end.
-- **Machine-to-machine auth.** External calls authenticate via a service-token or OAuth 2 client-credentials JWT that carries tenant + groups, so RLS scoping is identical to a user session — see [`TASK-external-app-auth.md`](TASK-external-app-auth.md).
+- **Machine-to-machine auth.** External calls authenticate via a service-token or OAuth 2 client-credentials JWT that carries tenant + groups, so RLS scoping is identical to a user session — see [`TASK-external-app-auth.md`](docs/TASK-external-app-auth.md).
 - **Graceful degradation.** A consumer that loses its Qpedia connection keeps operating on its own data and re-syncs later; Qpedia is an additive layer, not a hard runtime dependency.
 
 Applications building on this layer today:
@@ -57,7 +57,7 @@ Applications building on this layer today:
 | **qpedia-rfp** (`qproc`) | RFP/tender aggregation & response assembly — the first external application; ingests opportunities into Qpedia and reads them back via search/chat. |
 | **qcodia** | The same "distilled, linked knowledge layer" idea applied to source code (symbol graph + code wiki) for whole-repo PR review and spec/codegen governance. Its hub is an in-process Qpedia overlay (reusing the wiki + summary embeddings); its resident forge adapters call `/api/v1` externally. |
 
-> Building a new application on Qpedia? Start with the **[platform integration & SDK guide](INTEGRATION.md)**, then the contract at `contracts/qpedia-openapi.yaml` and the platform notes in [`DESIGN.md`](DESIGN.md).
+> Building a new application on Qpedia? Start with the **[platform integration & SDK guide](docs/INTEGRATION.md)**, then the contract at `contracts/qpedia-openapi.yaml` and the platform notes in [`DESIGN.md`](DESIGN.md).
 
 ---
 
@@ -66,7 +66,7 @@ Applications building on this layer today:
 This repository is the **engine** — the Rust workspace. Production
 container images, `docker-compose.yml`, and the SvelteKit frontend are
 maintained in the deployment overlay; for a one-command hosted instance
-use **[Qpedia Cloud](https://qpedia.qern.net)**.
+use **[Qpedia Cloud](https://qpedia.cloud)**.
 
 To run the engine from source you need a recent Rust toolchain and a
 PostgreSQL 17 instance with the `pgvector` extension.
@@ -99,9 +99,9 @@ All config is via environment variables, loaded from `.env` by Docker Compose.
 **Qpedia is BYOL — bring your own LLM.** Qpedia does not ship or resell
 inference: you supply a provider key (or an OpenAI-compatible / on-prem
 endpoint) and Qpedia calls *your* account. With no provider configured,
-ingestion stops at `Extracted` (no wiki distillation). A metered, Qern-managed
+ingestion stops at `Extracted` (no wiki distillation). A metered, Cloud-managed
 LLM option is planned for the hosted tier but BYOL stays first-class on every
-plan — see [`TASK-managed-llm-billing.md`](TASK-managed-llm-billing.md). The
+plan — see [`TASK-managed-llm-billing.md`](docs/TASK-managed-llm-billing.md). The
 validated/supported models (cloud + open-weight), reviewed each quarter, are in
 [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
 

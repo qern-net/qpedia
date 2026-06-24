@@ -1,10 +1,10 @@
 # Qpedia — platform integration & SDK guide
 
 > How an application builds **on top of** Qpedia. Companion to the
-> foundational-layer section in [`README.md`](README.md#qpedia-as-a-foundational-layer),
-> the architecture in [`DESIGN.md`](DESIGN.md), the machine-auth design in
+> foundational-layer section in [`README.md`](../README.md#qpedia-as-a-foundational-layer),
+> the architecture in [`DESIGN.md`](../DESIGN.md), the machine-auth design in
 > [`TASK-external-app-auth.md`](TASK-external-app-auth.md), and the canonical
-> contract in [`contracts/qpedia-openapi.yaml`](contracts/qpedia-openapi.yaml).
+> contract in [`contracts/qpedia-openapi.yaml`](../contracts/qpedia-openapi.yaml).
 
 ## 1. The foundational role
 
@@ -32,7 +32,7 @@ Three properties make it a platform rather than just an app:
   but BYOL stays first-class (see
   [`TASK-managed-llm-billing.md`](TASK-managed-llm-billing.md)). The
   validated/supported models, refreshed quarterly, are in
-  [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
+  [`APPROVED-MODELS.md`](../APPROVED-MODELS.md).
 
 ## 2. Two ways to build on Qpedia
 

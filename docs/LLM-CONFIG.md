@@ -3,7 +3,7 @@
 > How the BYOL design (model selection + per-tenant BYO credentials) is wired
 > through persistence → API → runtime resolution → UI. Status: **persistence +
 > registry landed; API, resolution, and UI specified here for implementation.**
-> Companions: [`APPROVED-MODELS.md`](APPROVED-MODELS.md),
+> Companions: [`APPROVED-MODELS.md`](../APPROVED-MODELS.md),
 > [`TASK-managed-llm-billing.md`](TASK-managed-llm-billing.md).
 
 ## Placement: AI code in OSS, gated by pvt

@@ -23,13 +23,13 @@ This doc + the PR template + the CI check are the "hooks" that prevent it.
       no `APPROVED-MODELS.md` edit.*
 - [ ] **Feature lists** — update the capability list in `README.md` (and the
       foundational-layer section if it's platform-facing) and the consumer/
-      integration notes in `INTEGRATION.md` when the external surface changes.
+      integration notes in `docs/INTEGRATION.md` when the external surface changes.
 - [ ] **Contract** — if `/api/v1` changed, update
       `contracts/qpedia-openapi.yaml` in the same PR (it is the SDK source).
 - [ ] **Config docs** — new env vars land in `.env.example` and the README
       config tables.
 - [ ] **Migrations & steering** — new tenant-scoped tables follow
-      `TASK-steering-compliance.md` (Postgres + FORCE RLS, BIGINT PK +
+      `docs/TASK-steering-compliance.md` (Postgres + FORCE RLS, BIGINT PK +
       `external_id UUID`).
 
 ## Tier 2 — outward propagation (tracked; automatable)

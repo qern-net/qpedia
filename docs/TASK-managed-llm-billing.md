@@ -45,7 +45,7 @@ BYOL.
 - [ ] **Pricing** — define the metered LLM SKU in `qpedia-pvt/docs/PRICING.md`;
       surface BYOL-vs-managed choice in the UI.
 - [ ] **Serve only approved models** — the managed tier offers exactly the
-      models in [`APPROVED-MODELS.md`](APPROVED-MODELS.md) (quarterly list); a
+      models in [`APPROVED-MODELS.md`](../APPROVED-MODELS.md) (quarterly list); a
       model dropped from that list is withdrawn from the managed SKU.
 - [ ] **Docs** — flip this section to "shipped"; update README + `INTEGRATION.md`.
 

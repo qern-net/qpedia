@@ -8,6 +8,9 @@ Cargo.lock.bak
 # Smoke-test artifacts
 /test-fixtures
 
+# Stray run/test logs
+*.log
+
 # Local env overrides (checked-in template is .env.example)
 .env
 .env.local
