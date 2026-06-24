@@ -611,4 +611,57 @@ mod tests {
     #[test]
     fn non_admin_email_unchanged() {
         let g = augment_admin_with_allow(Some("c@z.com"), vec!["staff".into()], "a@x.com");
-    
+        assert_eq!(g, vec!["staff".to_string()]);
+    }
+
+    #[test]
+    fn empty_allowlist_no_admin() {
+        let g = augment_admin_with_allow(Some("a@x.com"), vec![], "");
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn admin_not_duplicated() {
+        let g = augment_admin_with_allow(Some("a@x.com"), vec!["admin".into()], "a@x.com");
+        assert_eq!(g.iter().filter(|x| *x == "admin").count(), 1);
+    }
+
+    #[test]
+    fn no_email_no_admin() {
+        let g = augment_admin_with_allow(None, vec![], "a@x.com");
+        assert!(g.is_empty());
+    }
+}
+
+fn extract_groups(
+    claims: &openidconnect::IdTokenClaims<openidconnect::EmptyAdditionalClaims, openidconnect::core::CoreGenderClaim>,
+    claim: &str,
+) -> Vec<String> {
+    let v = match serde_json::to_value(claims) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    if let Some(arr) = v.get(claim).and_then(|x| x.as_array()) {
+        return arr
+            .iter()
+            .filter_map(|g| g.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(s) = v.get(claim).and_then(|x| x.as_str()) {
+        return s
+            .split(|c: char| c == ' ' || c == ',')
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect();
+    }
+    if claim != "roles" {
+        if let Some(arr) = v.get("roles").and_then(|x| x.as_array()) {
+            warn!("groups claim {claim:?} missing; falling back to 'roles'");
+            return arr
+                .iter()
+                .filter_map(|g| g.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+    }
+    Vec::new()
+}

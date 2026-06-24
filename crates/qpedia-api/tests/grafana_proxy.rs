@@ -586,4 +586,6 @@ mod live {
             );
         }
 
-        std::env::remove_var("QPEDIA_GRA
+        std::env::remove_var("QPEDIA_GRAFANA_UPSTREAM");
+    }
+}

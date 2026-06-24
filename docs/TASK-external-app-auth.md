@@ -58,4 +58,28 @@ caller to assert the tenant in a header — unacceptable).
    client in the shared IdP (same issuer both apps already use). Qpedia validates the JWT
    (`iss`, `exp`, `aud`), checks the client (`azp`) against an allowlist, and enforces
    **scopes** per route, e.g. `qpedia.sources.write`, `qpedia.search.read`, `qpedia.chat`.
-2. **User/tenant context — forward the end-user token.** For calls made on b
+2. **User/tenant context — forward the end-user token.** For calls made on behalf of an end
+   user, forward the user's OIDC access token (both apps share the issuer), or use **RFC 8693
+   token exchange** for delegation. Qpedia resolves user + tenant from the token and sets
+   `set_config('qpedia.tenant', …, true)`; RLS enforces isolation. Never accept a tenant
+   asserted via an unauthenticated header.
+3. **Scope → authorization** mapping on `/api/v1`; reject tokens missing the required scope (403).
+4. **Defense in depth:** short-lived tokens; optionally mTLS or a network policy between the
+   two services; IP allowlist only as a *secondary* control, never the primary.
+5. Keep the existing `dev` auth bypass for local development.
+
+## Acceptance criteria
+
+- [ ] `/api/v1` accepts a client-credentials JWT from an allowlisted external client carrying the required scope.
+- [ ] On-behalf-of calls set `qpedia.tenant` from the forwarded user token; a cross-tenant denial test passes (RLS holds).
+- [ ] Missing / invalid / insufficient-scope token → 401 / 403.
+- [ ] `contracts/qpedia-openapi.yaml` (maintained by the consumer) updated: add a `clientCredentials` OAuth2 flow + scopes to `securitySchemes`.
+- [ ] Docs updated (README auth section, AGENTS/DESIGN as needed).
+
+## Implementation pointers
+
+- `crates/qpedia-api/src/auth.rs` currently handles OIDC sessions + Firebase + dev bypass —
+  add a **bearer-JWT (M2M) validation path** here.
+- Add scope checks where routes are assembled in `crates/qpedia-api/src/app.rs`.
+- Reuse the existing OIDC issuer config (`QPEDIA_OIDC_ISSUER`); add a client allowlist +
+  required-scope config.
