@@ -17,6 +17,7 @@ pub enum Provider {
     Anthropic,
     Openai,
     Openrouter,
+    Gemini,
     OpenaiCompatible,
 }
 
@@ -26,6 +27,7 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::Openai => "openai",
             Provider::Openrouter => "openrouter",
+            Provider::Gemini => "gemini",
             Provider::OpenaiCompatible => "openai-compatible",
         }
     }
@@ -35,6 +37,7 @@ impl Provider {
             "anthropic" => Some(Provider::Anthropic),
             "openai" => Some(Provider::Openai),
             "openrouter" => Some(Provider::Openrouter),
+            "gemini" => Some(Provider::Gemini),
             "openai-compatible" => Some(Provider::OpenaiCompatible),
             _ => None,
         }
@@ -78,9 +81,9 @@ pub const APPROVED_MODELS: &[ApprovedModel] = &[
     ApprovedModel { id: "gpt-5.4-mini",      provider: Provider::Openai,     role: "Cost-efficient default",     status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gpt-5.4-nano",      provider: Provider::Openai,     role: "High-volume / low-latency",  status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gpt-5.5-pro",       provider: Provider::Openai,     role: "Premium reasoning",          status: Status::Trial,    license: None, open_weight: false },
-    ApprovedModel { id: "google/gemini-3-pro",         provider: Provider::Openrouter, role: "Heavy reasoning, long ctx", status: Status::Approved, license: None, open_weight: false },
-    ApprovedModel { id: "google/gemini-3.5-flash",     provider: Provider::Openrouter, role: "Fast default-class",        status: Status::Approved, license: None, open_weight: false },
-    ApprovedModel { id: "google/gemini-3.1-flash-lite", provider: Provider::Openrouter, role: "High-volume / low-cost",   status: Status::Trial,    license: None, open_weight: false },
+    ApprovedModel { id: "gemini-3-pro",          provider: Provider::Gemini, role: "Heavy reasoning, long ctx", status: Status::Approved, license: None, open_weight: false },
+    ApprovedModel { id: "gemini-3.5-flash",      provider: Provider::Gemini, role: "Fast default-class",        status: Status::Approved, license: None, open_weight: false },
+    ApprovedModel { id: "gemini-3.1-flash-lite", provider: Provider::Gemini, role: "High-volume / low-cost",    status: Status::Trial,    license: None, open_weight: false },
     // ---- open-weight (run via openai-compatible) ----
     ApprovedModel { id: "qwen-3.5",        provider: Provider::OpenaiCompatible, role: "General distill + chat",   status: Status::Approved, license: Some("Apache-2.0"), open_weight: true },
     ApprovedModel { id: "deepseek-v4",     provider: Provider::OpenaiCompatible, role: "Heavy reasoning",          status: Status::Approved, license: Some("MIT"),        open_weight: true },
@@ -119,6 +122,7 @@ pub fn default_model(provider: Provider) -> &'static str {
         Provider::Anthropic => "claude-haiku-4-5",
         Provider::Openai => "gpt-5.4-mini",
         Provider::Openrouter => "anthropic/claude-haiku-4-5",
+        Provider::Gemini => "gemini-3.5-flash",
         Provider::OpenaiCompatible => "default",
     }
 }
@@ -131,7 +135,7 @@ mod tests {
     fn approved_hosted_models_validate() {
         assert!(is_approved(Provider::Anthropic, "claude-sonnet-4-6"));
         assert!(is_approved(Provider::Openai, "gpt-5.5"));
-        assert!(is_approved(Provider::Openrouter, "google/gemini-3-pro"));
+        assert!(is_approved(Provider::Gemini, "gemini-3-pro"));
     }
 
     #[test]
@@ -170,6 +174,7 @@ mod tests {
             Provider::Anthropic,
             Provider::Openai,
             Provider::Openrouter,
+            Provider::Gemini,
             Provider::OpenaiCompatible,
         ] {
             assert_eq!(Provider::parse(p.as_str()), Some(p));

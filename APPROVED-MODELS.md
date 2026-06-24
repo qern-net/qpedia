@@ -4,7 +4,7 @@
 > cloud-provided and open-weight / self-hosted deployments. Reviewed **every
 > quarter**; every change is recorded in the [changelog](#changelog) and stamped
 > to the qpedia release that carried it. Companion to BYOL policy
-> ([`TASK-managed-llm-billing.md`](TASK-managed-llm-billing.md)) and the LLM
+> ([`TASK-managed-llm-billing.md`](docs/TASK-managed-llm-billing.md)) and the LLM
 > config in [`README.md`](README.md#llm-provider).
 
 > **Code mirror:** this list has a machine-readable twin in
@@ -66,14 +66,15 @@ Legend: ✅ approved · 🧪 trial (under evaluation, not yet supported) · ⛔ 
 | OpenAI | `gpt-5.4-mini` | Cost-efficient default-class | ✅ |
 | OpenAI | `gpt-5.4-nano` | High-volume, low-latency | ✅ |
 | OpenAI | `gpt-5.5-pro` | Premium reasoning | 🧪 |
-| Google (via OpenRouter) | `google/gemini-3-pro` | Heavy reasoning, long context | ✅ |
-| Google (via OpenRouter) | `google/gemini-3.5-flash` | Fast default-class | ✅ |
-| Google (via OpenRouter) | `google/gemini-3.1-flash-lite` | High-volume, low-cost | 🧪 |
+| Gemini (native) | `gemini-3-pro` | Heavy reasoning, long context | ✅ |
+| Gemini (native) | `gemini-3.5-flash` | Fast default-class | ✅ |
+| Gemini (native) | `gemini-3.1-flash-lite` | High-volume, low-cost | 🧪 |
 
-> Qpedia has native `anthropic` / `openai` / `openrouter` providers; **Gemini is
-> reached via OpenRouter** (or any OpenAI-compatible proxy) until a native Google
-> provider lands. OpenRouter itself is approved as an **aggregator** — the
-> approval applies to the underlying model, not every model it can route to.
+> Qpedia has native `anthropic` / `openai` / `openrouter` / `gemini` providers.
+> **Gemini is native** — set `QPEDIA_LLM_PROVIDER=gemini` + `GEMINI_API_KEY`; it
+> uses Gemini's OpenAI-compatible endpoint (no OpenRouter hop). OpenRouter
+> remains approved as an **aggregator** — the approval applies to the underlying
+> model, not every model it can route to.
 
 ## Approved — open-weight / self-hosted
 
@@ -100,7 +101,8 @@ on-prem). License matters here because you are redistributing/operating weights.
 
 The engine auto-detects a provider and picks a per-provider default. As of the
 Q2 2026 list these **should** be: `anthropic → claude-haiku-4-5`,
-`openai → gpt-5.4-mini`, `openrouter → anthropic/claude-haiku-4-5`. Defaults are
+`openai → gpt-5.4-mini`, `openrouter → anthropic/claude-haiku-4-5`,
+`gemini → gemini-3.5-flash`. Defaults are
 re-pinned to this document at each quarterly review (see TODO).
 
 ## Claude partnership
@@ -118,6 +120,9 @@ the list change. `Added` / `Dropped` / `Changed` are relative to the approved
 set. Newest on top.
 
 ### [Unreleased] — Q3 2026 review (target: Jul 2026)
+- **Added (engine):** native **Gemini** provider (`QPEDIA_LLM_PROVIDER=gemini`,
+  via Gemini's OpenAI-compatible endpoint). Gemini models moved off OpenRouter
+  routing (`google/gemini-*`) to the native provider ids (`gemini-*`).
 - **Changed (engine):** per-provider default re-pinned `openai → gpt-5.4-mini`
   (was `gpt-4.1-mini`) to match the Defaults section; `.env.example`, README,
   and the engine constant updated. `anthropic` / `openrouter` defaults unchanged.

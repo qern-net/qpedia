@@ -7,13 +7,17 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 ## [Unreleased]
 
 ### Added
+- **Native Google Gemini provider.** `QPEDIA_LLM_PROVIDER=gemini` + `GEMINI_API_KEY`
+  talks directly to Google via Gemini's OpenAI-compatible endpoint (no OpenRouter
+  hop), reusing the existing transport. Approved models moved from `google/gemini-*`
+  (OpenRouter) to native `gemini-*`. See [`docs/TASK-gemini-provider.md`](docs/TASK-gemini-provider.md).
 - **Per-tenant LLM configuration (BYO model + BYO credentials).** New
   RLS-isolated `llm_config` table (migration 0008) with the BYO API key
   encrypted at rest (pgcrypto, `QPEDIA_SECRET_KEY`); `PgStore::{get,resolve,
   set,clear}_llm_config`. A machine-readable approved-models registry
   (`qpedia-llm::models`) and `provider_from_config` for per-tenant provider
   resolution. API, runtime resolution, and UI specified in
-  [`LLM-CONFIG.md`](LLM-CONFIG.md). Fully additive — no row ⇒ deployment
+  [`LLM-CONFIG.md`](docs/LLM-CONFIG.md). Fully additive — no row ⇒ deployment
   provider (BYOL at deploy level unchanged).
 
 ### Changed

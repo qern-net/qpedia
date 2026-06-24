@@ -48,6 +48,9 @@ pub struct VisionReq {
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-haiku-4-5";
+const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-flash";
+/// Gemini's OpenAI-compatible endpoint — native Google, not via OpenRouter.
+const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /// Build an LLM provider from env. Returns Ok(None) if no provider can be
 /// configured (e.g. no API key). Returns Err if the configuration is malformed.
@@ -104,6 +107,21 @@ pub fn provider_from_env() -> Result<Option<Arc<dyn LlmProvider>>> {
                 None
             }
         },
+        "gemini" => match nonempty_env("GEMINI_API_KEY") {
+            // Native Google via the Gemini OpenAI-compatible endpoint
+            // (https://ai.google.dev/gemini-api/docs/openai). Reuses the proven
+            // OpenAICompatible transport — no OpenRouter hop, no new HTTP code.
+            Some(key) => {
+                let base = nonempty_env("GEMINI_BASE_URL").unwrap_or_else(|| GEMINI_BASE_URL.into());
+                let model = model_override.unwrap_or_else(|| DEFAULT_GEMINI_MODEL.into());
+                info!(provider = "gemini", base = %base, model = %model, "LLM configured");
+                Some(Arc::new(OpenAICompatible::new(base, Some(key), model)) as Arc<dyn LlmProvider>)
+            }
+            None => {
+                warn!("provider=gemini but GEMINI_API_KEY missing — LLM disabled");
+                None
+            }
+        },
         "openai-compatible" | "vllm" | "ollama" => {
             let base = nonempty_env("QPEDIA_LLM_BASE_URL").ok_or_else(|| {
                 anyhow!("QPEDIA_LLM_BASE_URL required for openai-compatible provider")
@@ -125,7 +143,7 @@ pub fn provider_from_env() -> Result<Option<Arc<dyn LlmProvider>>> {
 /// with no row behaves exactly like `provider_from_env`.
 #[derive(Debug, Clone, Default)]
 pub struct LlmConfig {
-    pub provider: String,         // anthropic | openai | openrouter | openai-compatible
+    pub provider: String,         // anthropic | openai | openrouter | gemini | openai-compatible
     pub model: Option<String>,    // approved model id; None ⇒ per-provider default
     pub api_key: Option<String>,  // decrypted BYO key; None ⇒ deployment env key
     pub base_url: Option<String>, // openai-compatible / proxy override
@@ -166,6 +184,18 @@ pub fn provider_from_config(cfg: &LlmConfig) -> Result<Option<Arc<dyn LlmProvide
             }
             None => None,
         },
+        "gemini" => match cfg.api_key.clone().or_else(|| nonempty_env("GEMINI_API_KEY")) {
+            Some(key) => {
+                let base = cfg
+                    .base_url
+                    .clone()
+                    .or_else(|| nonempty_env("GEMINI_BASE_URL"))
+                    .unwrap_or_else(|| GEMINI_BASE_URL.into());
+                let model = model.unwrap_or_else(|| DEFAULT_GEMINI_MODEL.into());
+                Some(Arc::new(OpenAICompatible::new(base, Some(key), model)) as Arc<dyn LlmProvider>)
+            }
+            None => None,
+        },
         "openai-compatible" | "vllm" | "ollama" => {
             let base = cfg
                 .base_url
@@ -188,6 +218,7 @@ fn detect_provider_kind() -> String {
     if nonempty_env("ANTHROPIC_API_KEY").is_some()  { return "anthropic".into(); }
     if nonempty_env("OPENAI_API_KEY").is_some()     { return "openai".into(); }
     if nonempty_env("OPENROUTER_API_KEY").is_some() { return "openrouter".into(); }
+    if nonempty_env("GEMINI_API_KEY").is_some()     { return "gemini".into(); }
     if nonempty_env("QPEDIA_LLM_BASE_URL").is_some() { return "openai-compatible".into(); }
     "anthropic".into()  // emit the helpful "missing key" warning
 }
@@ -215,6 +246,7 @@ pub fn current_model() -> String {
     match detect_provider_kind().as_str() {
         "openai" => DEFAULT_OPENAI_MODEL.into(),
         "openrouter" => DEFAULT_OPENROUTER_MODEL.into(),
+        "gemini" => DEFAULT_GEMINI_MODEL.into(),
         _ => DEFAULT_ANTHROPIC_MODEL.into(),
     }
 }
@@ -235,7 +267,7 @@ pub fn vision_model() -> Option<String> {
         return Some(m);
     }
     match detect_provider_kind().as_str() {
-        "openai" | "openrouter" => Some(current_model()),
+        "openai" | "openrouter" | "gemini" => Some(current_model()),
         _ => None,
     }
 }

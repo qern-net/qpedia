@@ -19,11 +19,27 @@ the [project wiki](https://github.com/qern-net/qpedia/wiki) for guides._
 - File-explorer folder/upload UX and chat-over-wiki UX, equally weighted.
 - Fits in **two containers**: `app` + `postgres` (pgvector). Marker is an optional third.
 - All heavy lifting hidden from users.
+- **Be a platform foundation** — a stable `/api/v1` that other AI applications build on, so they reuse Qpedia's ingestion / embeddings / wiki / RAG instead of reimplementing them.
 
 **Non-Goals (still)**
 - Real-time collaborative editing of wiki pages.
 - Federated search across external corpora.
 - Mobile app.
+- Bespoke per-consumer endpoints — the external surface stays the small, versioned `/api/v1` in `contracts/qpedia-openapi.yaml`; application-specific logic lives in the consuming app, not the engine.
+
+---
+
+## 0.5 Qpedia as a platform foundation
+
+Qpedia is consumed in two ways: directly by end users, and as the **foundational knowledge layer beneath other AI applications** (qpedia-rfp, qcodia). The second mode is a first-class design constraint, not an afterthought, and it has a deliberate shape:
+
+- **One integration surface.** External apps reach Qpedia only through the versioned `/api/v1` HTTP contract ([`contracts/qpedia-openapi.yaml`](contracts/qpedia-openapi.yaml)) — ingest, hybrid search, RAG chat. The Rust handlers are the source of truth; the contract is kept in lockstep and a change to either is a coordinated PR.
+- **Shared instance, isolated schemas.** A consumer may run its own Postgres schema in the same instance (e.g. `rfp`) for its own structured data, but **never** reads Qpedia's tables via cross-schema SQL. The only path to Qpedia's knowledge is the API. This keeps the engine free to evolve its schema without breaking consumers.
+- **Tenant = workspace, RLS end-to-end.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and every call sets `qpedia.tenant` so Postgres RLS enforces isolation regardless of which app originated the request.
+- **Machine identity carries tenant.** External apps authenticate M2M (service token or OAuth 2 client-credentials JWT) and the token carries tenant + groups — so an external call is scoped by RLS identically to a user session. This is why a bare API key was rejected: it carries no identity. See [`TASK-external-app-auth.md`](docs/TASK-external-app-auth.md).
+- **Additive, degradable dependency.** A consumer that can't reach Qpedia keeps serving its own data and re-syncs later. Qpedia is a layer apps lean on, never a hard runtime coupling.
+
+The payoff: the expensive, reusable retrieval machinery is built and operated once, and each new application on top is thin.
 
 ---
 
