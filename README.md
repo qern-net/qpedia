@@ -47,7 +47,7 @@ External applications integrate over the stable **`/api/v1` HTTP boundary** — 
 
 - **API boundary, not schema coupling.** Consumers call `/api/v1` (ingest → search → chat). They run their own Postgres *schema* in the same instance (e.g. the RFP app owns `rfp`) but never read Qpedia's tables via cross-schema SQL.
 - **Tenancy lines up.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and Postgres RLS enforces isolation end-to-end.
-- **Machine-to-machine auth.** External calls authenticate via a service-token or OAuth 2 client-credentials JWT that carries tenant + groups, so RLS scoping is identical to a user session — see [`TASK-external-app-auth.md`](docs/TASK-external-app-auth.md).
+- **Machine-to-machine auth.** External calls authenticate via a service-token or OAuth 2 client-credentials JWT that carries tenant + groups, so RLS scoping is identical to a user session.
 - **Graceful degradation.** A consumer that loses its Qpedia connection keeps operating on its own data and re-syncs later; Qpedia is an additive layer, not a hard runtime dependency.
 
 Applications building on this layer today:
@@ -101,7 +101,7 @@ inference: you supply a provider key (or an OpenAI-compatible / on-prem
 endpoint) and Qpedia calls *your* account. With no provider configured,
 ingestion stops at `Extracted` (no wiki distillation). A metered, Cloud-managed
 LLM option is planned for the hosted tier but BYOL stays first-class on every
-plan — see [`TASK-managed-llm-billing.md`](docs/TASK-managed-llm-billing.md). The
+plan. The
 validated/supported models (cloud + open-weight), reviewed each quarter, are in
 [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
 

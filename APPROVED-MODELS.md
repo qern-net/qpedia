@@ -3,8 +3,7 @@
 > The curated set of LLMs Qpedia is **validated and supported against**, for both
 > cloud-provided and open-weight / self-hosted deployments. Reviewed **every
 > quarter**; every change is recorded in the [changelog](#changelog) and stamped
-> to the qpedia release that carried it. Companion to BYOL policy
-> ([`TASK-managed-llm-billing.md`](docs/TASK-managed-llm-billing.md)) and the LLM
+> to the qpedia release that carried it. Companion to the LLM
 > config in [`README.md`](README.md#llm-provider).
 
 > **Code mirror:** this list has a machine-readable twin in

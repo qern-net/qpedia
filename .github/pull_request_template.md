@@ -13,7 +13,7 @@ See [`FEATURE-LANDING.md`](../FEATURE-LANDING.md). CI enforces the starred items
 - [ ] **Feature lists** updated (`README.md`, and `docs/INTEGRATION.md` if the external surface changed).
 - [ ] **`/api/v1` changed?** Updated `contracts/qpedia-openapi.yaml`.
 - [ ] **New env vars?** Added to `.env.example` + README config tables.
-- [ ] **New tenant-scoped table?** Follows `docs/TASK-steering-compliance.md` (FORCE RLS, BIGINT PK + `external_id UUID`).
+- [ ] **New tenant-scoped table?** Follows the steering rules (FORCE RLS, BIGINT PK + `external_id UUID`).
 - [ ] Tests added/updated; `cargo test` green.
 
 ## Tier 2 (outward — at release)

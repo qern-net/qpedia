@@ -2,8 +2,7 @@
 
 > How an application builds **on top of** Qpedia. Companion to the
 > foundational-layer section in [`README.md`](../README.md#qpedia-as-a-foundational-layer),
-> the architecture in [`DESIGN.md`](../DESIGN.md), the machine-auth design in
-> [`TASK-external-app-auth.md`](TASK-external-app-auth.md), and the canonical
+> the architecture in [`DESIGN.md`](../DESIGN.md), and the canonical
 > contract in [`contracts/qpedia-openapi.yaml`](../contracts/qpedia-openapi.yaml).
 
 ## 1. The foundational role
@@ -29,8 +28,7 @@ Three properties make it a platform rather than just an app:
   (provider key or OpenAI-compatible / on-prem endpoint); it does not ship or
   resell inference. A consumer never supplies an LLM to Qpedia — the engine
   owner does. A metered, Qern-managed LLM option is planned for the hosted tier,
-  but BYOL stays first-class (see
-  [`TASK-managed-llm-billing.md`](TASK-managed-llm-billing.md)). The
+  but BYOL stays first-class. The
   validated/supported models, refreshed quarterly, are in
   [`APPROVED-MODELS.md`](../APPROVED-MODELS.md).
 
@@ -67,8 +65,7 @@ Overlay handlers take `State<AppState>` and pull their own service from
 and `state.auth` directly. Because the overlay shares the RLS-aware pool, a
 new overlay-owned table inherits the tenant-isolation guarantees as long as it
 follows the steering rules (PostgreSQL, `FORCE ROW LEVEL SECURITY`, `BIGINT`
-PK + `external_id UUID` where externally referenced — see each repo's
-`TASK-steering-compliance.md`). This is the only mode that can reuse the
+PK + `external_id UUID` where externally referenced). This is the only mode that can reuse the
 git-backed **wiki** (`WikiRepoStore`) and **summary embeddings** without going
 over the wire.
 

@@ -28,9 +28,8 @@ This doc + the PR template + the CI check are the "hooks" that prevent it.
       `contracts/qpedia-openapi.yaml` in the same PR (it is the SDK source).
 - [ ] **Config docs** — new env vars land in `.env.example` and the README
       config tables.
-- [ ] **Migrations & steering** — new tenant-scoped tables follow
-      `docs/TASK-steering-compliance.md` (Postgres + FORCE RLS, BIGINT PK +
-      `external_id UUID`).
+- [ ] **Migrations & steering** — new tenant-scoped tables follow the steering
+      rules (Postgres + FORCE RLS, BIGINT PK + `external_id UUID`).
 
 ## Tier 2 — outward propagation (tracked; automatable)
 

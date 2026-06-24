@@ -16,8 +16,7 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
   encrypted at rest (pgcrypto, `QPEDIA_SECRET_KEY`); `PgStore::{get,resolve,
   set,clear}_llm_config`. A machine-readable approved-models registry
   (`qpedia-llm::models`) and `provider_from_config` for per-tenant provider
-  resolution. API, runtime resolution, and UI specified in
-  [`LLM-CONFIG.md`](docs/LLM-CONFIG.md). Fully additive — no row ⇒ deployment
+  resolution. Fully additive — no row ⇒ deployment
   provider (BYOL at deploy level unchanged).
 
 ### Changed
