@@ -75,6 +75,33 @@ pub struct AuthState {
 /// A returned [`User`] must carry a resolved `tenant` and `groups` exactly
 /// like a session-derived user, so RLS/ACL scoping is identical regardless
 /// of which path authenticated the request.
+///
+/// # Caching
+///
+/// `authenticate` runs on the hot path — once per request, before the
+/// session lookup — so an implementation that verifies a credential on
+/// every call will add that cost to every request. Verifying a JWT the
+/// naive way means fetching the issuer JWKS and (for opaque tokens) a
+/// round-trip to an introspection endpoint; doing that per request is a
+/// latency and rate-limit hazard. Implementations should cache:
+///
+/// - **Signing keys / JWKS** — fetch once and refresh on a TTL (respect the
+///   `Cache-Control`/`max-age` from the JWKS endpoint; re-fetch on an
+///   unknown `kid`). This is the single biggest win and is safe to share
+///   process-wide.
+/// - **Verification results** — key a short-TTL cache on a hash of the raw
+///   bearer token (never the plaintext) → the resolved `User`. A TTL of a
+///   few minutes, bounded well under the token's own expiry, keeps the fast
+///   path to a map lookup while still honouring revocation within the TTL.
+///   Bound the cache size (e.g. an LRU) so a spray of distinct tokens can't
+///   grow it without limit.
+/// - **Negative results** — briefly cache "not for me / invalid" so a stream
+///   of unauthenticated or malformed requests can't hammer the verifier.
+///
+/// Keep entries keyed and scoped per credential; never let one tenant's
+/// cached identity satisfy another's token. The engine intentionally holds
+/// the provider behind an `Arc`, so a single cache instance is shared across
+/// all requests — build it once in the constructor, not per call.
 #[axum::async_trait]
 pub trait ExternalAuthProvider: Send + Sync {
     async fn authenticate(&self, headers: &HeaderMap) -> Option<User>;

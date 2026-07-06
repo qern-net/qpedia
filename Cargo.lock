@@ -3567,7 +3567,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-api"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3615,7 +3615,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-bench"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-cli"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-connectors"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3666,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-core"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-embed"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3692,7 +3692,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-extract"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-ingest"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-lint"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3768,7 +3768,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-llm"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3788,7 +3788,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-pg-store"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3816,7 +3816,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-retriever"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-store"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",

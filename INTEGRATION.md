@@ -1,9 +1,9 @@
 # Qpedia — platform integration & SDK guide
 
 > How an application builds **on top of** Qpedia. Companion to the
-> foundational-layer section in [`README.md`](../README.md#qpedia-as-a-foundational-layer),
-> the architecture in [`DESIGN.md`](../DESIGN.md), and the canonical
-> contract in [`contracts/qpedia-openapi.yaml`](../contracts/qpedia-openapi.yaml).
+> foundational-layer section in [`README.md`](README.md#qpedia-as-a-foundational-layer),
+> the architecture in [`DESIGN.md`](DESIGN.md), and the canonical
+> contract in [`qpedia-openapi.yaml`](qpedia-openapi.yaml).
 
 ## 1. The foundational role
 
@@ -16,7 +16,7 @@ Qpedia as the knowledge layer underneath.
 Three properties make it a platform rather than just an app:
 
 - **A versioned contract, not schema coupling.** Consumers integrate over the
-  `/api/v1` HTTP boundary, defined once in `contracts/qpedia-openapi.yaml`
+  `/api/v1` HTTP boundary, defined once in `qpedia-openapi.yaml`
   (OpenAPI 3.1). They never read Qpedia's Postgres tables directly.
 - **Tenancy that lines up end-to-end.** Each consumer tenant maps to a Qpedia
   workspace; both sides share the OIDC issuer, and Postgres RLS enforces
@@ -30,7 +30,7 @@ Three properties make it a platform rather than just an app:
   owner does. A metered, Qern-managed LLM option is planned for the hosted tier,
   but BYOL stays first-class. The
   validated/supported models, refreshed quarterly, are in
-  [`APPROVED-MODELS.md`](../APPROVED-MODELS.md).
+  [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
 
 ## 2. Two ways to build on Qpedia
 
@@ -79,7 +79,7 @@ chat, authenticated per §4. It runs its own database (its own Postgres
 
 ## 3. The contract is the source of truth for the SDK
 
-`contracts/qpedia-openapi.yaml` is the canonical, versioned description of the
+`qpedia-openapi.yaml` is the canonical, versioned description of the
 external surface. **Generate clients from it; do not hand-write HTTP calls.**
 
 - **TypeScript:** `openapi-typescript` for types, or `openapi-generator` /
@@ -157,10 +157,10 @@ overlay-tunable via `upload_limit_bytes`).
    add its `azp` to `QPEDIA_M2M_ALLOWED_CLIENTS` and grant the scopes it needs.
 2. **Map tenancy:** each consumer tenant ↔ a Qpedia workspace; confirm both
    sides resolve the same tenant claim.
-3. **Generate the SDK** from `contracts/qpedia-openapi.yaml` at a pinned version.
+3. **Generate the SDK** from `qpedia-openapi.yaml` at a pinned version.
 4. **Wire graceful degradation:** the consumer must keep working (degraded)
    when Qpedia is unreachable, and re-sync on recovery.
-5. **Add yourself** to the consumer table in `README.md`.
+5. **Add yourself** to the consumers table in §8 below.
 
 ## 7. Worked example (Mode B, curl)
 

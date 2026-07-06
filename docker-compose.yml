@@ -16,12 +16,9 @@
 # Credentials match .env.example's QPEDIA_DB_URL, so the defaults "just
 # work" for `cargo run` and `cargo test`.
 #
-# Telemetry (OpenTelemetry traces/metrics/logs) is exported directly to a
-# shared OTLP collector — Grafana Cloud, or a self-run collector — never a
-# container in this compose file. Set OTEL_EXPORTER_OTLP_ENDPOINT (and
-# OTEL_EXPORTER_OTLP_HEADERS for Basic Auth, e.g. Grafana Cloud's OTLP
-# gateway) in .env; unset means telemetry stays console-only. See
-# .env.example.
+# Telemetry: the engine exports OTLP to a collector you configure (Grafana
+# Cloud or self-run) — never a container here. Set OTEL_EXPORTER_OTLP_*
+# in .env; unset stays console-only. See .env.example.
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -43,23 +40,14 @@ services:
     restart: unless-stopped
 
   # The qpedia-api app image lives in the deployment overlay, not this OSS
-  # repo (see header). The overlay's `app` service inherits the wiring below;
-  # it is documented here so the contract is visible:
+  # repo (see header). The overlay's `app` service wires it up roughly as:
   #
   #   app:
   #     # ...build/image...
-  #     depends_on:
-  #       postgres:
-  #         condition: service_healthy
+  #     depends_on: { postgres: { condition: service_healthy } }
   #     environment:
-  #       # A shared OTLP collector — Grafana Cloud's OTLP gateway, or a
-  #       # self-run collector. Never a container in this compose file.
   #       OTEL_EXPORTER_OTLP_ENDPOINT: https://otlp-gateway-<zone>.grafana.net/otlp
   #       OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Basic <base64(instance_id:api_token)>"
-  #
-  # Unset OTEL_EXPORTER_OTLP_ENDPOINT (host-side `cargo run` or this compose
-  # stack alone) and the engine stays console-only — no exporter is built,
-  # nothing tries to dial a collector that isn't there.
 
 volumes:
   postgres-data:

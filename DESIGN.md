@@ -25,7 +25,7 @@ the [project wiki](https://github.com/qern-net/qpedia/wiki) for guides._
 - Real-time collaborative editing of wiki pages.
 - Federated search across external corpora.
 - Mobile app.
-- Bespoke per-consumer endpoints — the external surface stays the small, versioned `/api/v1` in `contracts/qpedia-openapi.yaml`; application-specific logic lives in the consuming app, not the engine.
+- Bespoke per-consumer endpoints — the external surface stays the small, versioned `/api/v1` in `qpedia-openapi.yaml`; application-specific logic lives in the consuming app, not the engine.
 
 ---
 
@@ -33,7 +33,7 @@ the [project wiki](https://github.com/qern-net/qpedia/wiki) for guides._
 
 Qpedia is consumed in two ways: directly by end users, and as the **foundational knowledge layer beneath other AI applications** (qpedia-rfp, qcodia). The second mode is a first-class design constraint, not an afterthought, and it has a deliberate shape:
 
-- **One integration surface.** External apps reach Qpedia only through the versioned `/api/v1` HTTP contract ([`contracts/qpedia-openapi.yaml`](contracts/qpedia-openapi.yaml)) — ingest, hybrid search, RAG chat. The Rust handlers are the source of truth; the contract is kept in lockstep and a change to either is a coordinated PR.
+- **One integration surface.** External apps reach Qpedia only through the versioned `/api/v1` HTTP contract ([`qpedia-openapi.yaml`](qpedia-openapi.yaml)) — ingest, hybrid search, RAG chat. The Rust handlers are the source of truth; the contract is kept in lockstep and a change to either is a coordinated PR.
 - **Shared instance, isolated schemas.** A consumer may run its own Postgres schema in the same instance (e.g. `rfp`) for its own structured data, but **never** reads Qpedia's tables via cross-schema SQL. The only path to Qpedia's knowledge is the API. This keeps the engine free to evolve its schema without breaking consumers.
 - **Tenant = workspace, RLS end-to-end.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and every call sets `qpedia.tenant` so Postgres RLS enforces isolation regardless of which app originated the request.
 - **Machine identity carries tenant.** External apps authenticate M2M via an `ExternalAuthProvider` the deployment overlay registers (`AppBuilder::with_auth_provider`) — a service token, an OAuth 2 client-credentials JWT, or whatever scheme that deployment needs. The engine itself ships no concrete scheme; it only requires that whatever the overlay returns carries tenant + groups, so an external call is scoped by RLS identically to a user session. This is why a bare API key was rejected: it carries no identity.
@@ -605,7 +605,7 @@ QPEDIA_FIREBASE_PROJECT_ID=qpedia-acme         # enable Firebase login (optional
 # QPEDIA_OIDC_ISSUER=https://...
 # QPEDIA_OIDC_CLIENT_ID=...
 QPEDIA_WIKI_AUTHOR_NAME=qpedia-bot
-QPEDIA_WIKI_AUTHOR_EMAIL=bot@qpedia.local
+QPEDIA_WIKI_AUTHOR_EMAIL=bot@qpedia.cloud
 ```
 
 ### 13.3 On-prem variant

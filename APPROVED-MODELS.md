@@ -135,7 +135,7 @@ Keep-a-Changelog style; each entry is stamped to the qpedia release that shipped
 the list change. `Added` / `Dropped` / `Changed` are relative to the approved
 set. Newest on top.
 
-### [Unreleased] — Q3 2026 review (Jul 2026)
+### [1.3.0] — 2026-07-05 — Q3 2026 review (Jul 2026)
 - **Added (engine):** native **Gemini** provider (`QPEDIA_LLM_PROVIDER=gemini`,
   via Gemini's OpenAI-compatible endpoint). Gemini models moved off OpenRouter
   routing (`google/gemini-*`) to the native provider ids (`gemini-*`).

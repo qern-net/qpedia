@@ -10,7 +10,7 @@ Upload a PDF, Word doc, or HTML page. Qpedia extracts the text, classifies it, r
 >
 > This repository is the open-source **engine** behind it (Apache-2.0). Self-host it, or let us run it for you.
 
-**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Platform integration & SDK](docs/INTEGRATION.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
+**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Platform integration & SDK](INTEGRATION.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
 
 ---
 
@@ -43,21 +43,16 @@ Volumes: bind-mounts `./data/wiki`, `./data/raw`, `./data/models`; named volume 
 
 Qpedia is not only an end-user product — it is the **foundational knowledge layer that other AI applications build on**. It owns the hard, amortizable parts of a retrieval system (ingestion, extraction, classification, the LLM-authored wiki, embeddings, hybrid search, and RAG chat) so an application on top doesn't have to reimplement any of it.
 
-External applications integrate over the stable **`/api/v1` HTTP boundary** — never by reaching into Qpedia's database. The contract is versioned in this repo at [`contracts/qpedia-openapi.yaml`](contracts/qpedia-openapi.yaml) (OpenAPI 3.1); it is the canonical, sanctioned surface every consumer codes against. The platform pattern is:
+**Integration is a first-class capability.** As of v1.3.0, building on Qpedia is a supported, stable path: a versioned `/api/v1` contract ([`qpedia-openapi.yaml`](qpedia-openapi.yaml), frozen across the 1.x line) plus the [`ExternalAuthProvider`](crates/qpedia-api/src/auth.rs) extension point for machine-to-machine auth. An external app authenticates non-interactively and is tenant-scoped by RLS exactly like a user session — no schema coupling, no forking.
+
+External applications integrate over the stable **`/api/v1` HTTP boundary** — never by reaching into Qpedia's database. The contract is versioned in this repo at [`qpedia-openapi.yaml`](qpedia-openapi.yaml) (OpenAPI 3.1); it is the canonical, sanctioned surface every consumer codes against. The platform pattern is:
 
 - **API boundary, not schema coupling.** Consumers call `/api/v1` (ingest → search → chat). They run their own Postgres *schema* in the same instance (e.g. the RFP app owns `rfp`) but never read Qpedia's tables via cross-schema SQL.
 - **Tenancy lines up.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and Postgres RLS enforces isolation end-to-end.
 - **Machine-to-machine auth.** External calls authenticate via an [`ExternalAuthProvider`](crates/qpedia-api/src/auth.rs) registered by the deployment overlay. The provider returns a `User` with tenant + groups, so RLS scoping is identical to a user session. The OSS engine ships no concrete implementation; overlays supply the scheme their consumers need (service tokens, OAuth 2 client-credentials JWTs, etc.).
 - **Graceful degradation.** A consumer that loses its Qpedia connection keeps operating on its own data and re-syncs later; Qpedia is an additive layer, not a hard runtime dependency.
 
-Applications building on this layer today:
-
-| App | What it adds on top of Qpedia |
-|---|---|
-| **qpedia-rfp** (`qproc`) | RFP/tender aggregation & response assembly — the first external application; ingests opportunities into Qpedia and reads them back via search/chat. |
-| **qcodia** | The same "distilled, linked knowledge layer" idea applied to source code (symbol graph + code wiki) for whole-repo PR review and spec/codegen governance. Its hub is an in-process Qpedia overlay (reusing the wiki + summary embeddings); its resident forge adapters call `/api/v1` externally. |
-
-> Building a new application on Qpedia? Start with the **[platform integration & SDK guide](docs/INTEGRATION.md)**, then the contract at `contracts/qpedia-openapi.yaml` and the platform notes in [`DESIGN.md`](DESIGN.md).
+> Building a new application on Qpedia? Start with the **[platform integration & SDK guide](INTEGRATION.md)**, then the contract at `qpedia-openapi.yaml` and the platform notes in [`DESIGN.md`](DESIGN.md).
 
 ---
 
@@ -79,14 +74,11 @@ docker compose up -d        # starts Postgres 17 + pgvector (the only dependency
 cargo run -p qpedia-api
 ```
 
-The API comes up on the address in `QPEDIA_BIND` (default
-`0.0.0.0:8080`). In dev mode (no Firebase configured) every request is the
-`dev:admin` user — no login required. With no SPA build present the server
-runs API-only; point `QPEDIA_WEB_DIR` at a built frontend to serve a UI.
-
-The bundled `docker-compose.yml` brings up **only** Postgres — this repo is
-the engine, with no app image of its own. The production image, frontend,
-and full multi-container stack live in the deployment overlay.
+The bundled `docker-compose.yml` brings up **only** Postgres. The API comes
+up on the address in `QPEDIA_BIND` (default `0.0.0.0:8080`). In dev mode (no
+Firebase configured) every request is the `dev:admin` user — no login
+required. With no SPA build present the server runs API-only; point
+`QPEDIA_WEB_DIR` at a built frontend to serve a UI.
 
 ---
 
@@ -109,11 +101,12 @@ Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to ov
 
 | Variable | Purpose |
 |---|---|
-| `QPEDIA_LLM_PROVIDER` | `anthropic` \| `openai` \| `openrouter` \| `openai-compatible` |
+| `QPEDIA_LLM_PROVIDER` | `anthropic` \| `openai` \| `openrouter` \| `gemini` \| `openai-compatible` |
 | `QPEDIA_LLM_MODEL` | Override the per-provider default model |
 | `ANTHROPIC_API_KEY` | Anthropic direct (default: `claude-haiku-4-5`) |
 | `OPENAI_API_KEY` | OpenAI direct (default: `gpt-5.4-mini`) |
 | `OPENROUTER_API_KEY` | OpenRouter (default: `anthropic/claude-haiku-4-5`) |
+| `GEMINI_API_KEY` | Google Gemini, native via its OpenAI-compatible endpoint (default: `gemini-3.5-flash`) |
 | `QPEDIA_LLM_BASE_URL` | Base URL for OpenAI-compatible endpoint (vLLM, Ollama, LM Studio) |
 | `QPEDIA_LLM_API_KEY` | API key for OpenAI-compatible endpoint |
 

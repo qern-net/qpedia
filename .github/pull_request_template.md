@@ -10,8 +10,8 @@ See [`FEATURE-LANDING.md`](../FEATURE-LANDING.md). CI enforces the starred items
 
 - [ ] ⭐ **CHANGELOG.md** updated under `## [Unreleased]` (required for any `crates/**` change).
 - [ ] ⭐ **Models touched?** Updated **both** `APPROVED-MODELS.md` and `crates/qpedia-llm/src/models.rs`.
-- [ ] **Feature lists** updated (`README.md`, and `docs/INTEGRATION.md` if the external surface changed).
-- [ ] **`/api/v1` changed?** Updated `contracts/qpedia-openapi.yaml`.
+- [ ] **Feature lists** updated (`README.md`, and `INTEGRATION.md` if the external surface changed).
+- [ ] **`/api/v1` changed?** Updated `qpedia-openapi.yaml`.
 - [ ] **New env vars?** Added to `.env.example` + README config tables.
 - [ ] **New tenant-scoped table?** Follows the steering rules (FORCE RLS, BIGINT PK + `external_id UUID`).
 - [ ] Tests added/updated; `cargo test` green.
