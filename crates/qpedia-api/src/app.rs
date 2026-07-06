@@ -238,6 +238,17 @@ impl AppBuilder {
         self
     }
 
+    /// Register an [`ExternalAuthProvider`] for machine-to-machine auth
+    /// (e.g. a service-token or OAuth 2 client-credentials scheme). Checked
+    /// on every request before the session-cookie path; see trait docs.
+    pub fn with_auth_provider<P: crate::auth::ExternalAuthProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        self.auth.external = Some(Arc::new(provider));
+        self
+    }
+
     /// Register an [`EventSink`]. Delegates to
     /// [`PgStore::register_event_sink`], so every `db.write_audit(...)`
     /// caller (including background-job handlers) fires the sink after
@@ -523,19 +534,6 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
         .route(
             "/api/v1/workspaces/domains/:domain",
             axum::routing::delete(routes::delete_domain),
-        )
-        // ---- observability (task 11.2) ----
-        // Authenticating Grafana reverse proxy. Catch-all for ALL methods at
-        // `/api/v1/observability/grafana/*path`; this is the *sole* ingress to
-        // the internal-only Grafana (the `otel-lgtm` service publishes no host
-        // ports). The handler resolves the QPEDIA `User` first (401 when
-        // absent), strips client `X-WEBAUTH-*` headers, and injects the trusted
-        // identity + mapped Grafana org role. Registered BEFORE the trailing
-        // `.layer(http_trace)` so proxy traffic is itself traced (design §9 —
-        // this route is deliberately NOT in the HTTP_Span excluded set).
-        .route(
-            "/api/v1/observability/grafana/*path",
-            axum::routing::any(crate::observability_proxy::grafana_proxy),
         )
         // HTTP tracing layer (task 5.4): opens an `HTTP_Span` per non-excluded
         // request, continuing the inbound W3C trace context. Added via

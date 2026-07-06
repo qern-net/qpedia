@@ -32,10 +32,6 @@ pub mod app;
 pub mod auth;
 pub mod firebase;
 pub mod health;
-pub mod m2m;
-pub mod oauth;
-pub mod observability;
-pub mod observability_proxy;
 pub mod rate_limit;
 pub mod routes;
 pub mod telemetry;
@@ -44,7 +40,8 @@ pub use app::{
     AppBuilder, AppState, EventSink, Extensions, NoopEventSink, NoopTenantHook, TenantHook,
 };
 pub use auth::{
-    mint_session, AuthExtractorState, AuthMode, AuthState, User,
+    hash_token, is_superadmin_user, mint_session, read_bearer, AuthExtractorState, AuthMode,
+    AuthState, ExternalAuthProvider, User,
 };
 pub use rate_limit::ChatRateLimiter;
 pub use routes::ApiError;

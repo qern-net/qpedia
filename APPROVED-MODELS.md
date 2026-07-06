@@ -59,13 +59,13 @@ Legend: ✅ approved · 🧪 trial (under evaluation, not yet supported) · ⛔ 
 | Provider | Model (API id) | Tier / role | Status |
 |---|---|---|---|
 | Anthropic | `claude-opus-4-8` | Heavy distillation / hardest sources | ✅ |
-| Anthropic | `claude-sonnet-4-6` | Production sweet spot (distill + chat) | ✅ |
+| Anthropic | `claude-sonnet-5` | Production sweet spot (distill + chat) | ✅ |
 | Anthropic | `claude-haiku-4-5` | Fast / cheap; **engine default** | ✅ |
 | OpenAI | `gpt-5.5` | Heavy reasoning / coding-grade distillation | ✅ |
 | OpenAI | `gpt-5.4-mini` | Cost-efficient default-class | ✅ |
 | OpenAI | `gpt-5.4-nano` | High-volume, low-latency | ✅ |
-| OpenAI | `gpt-5.5-pro` | Premium reasoning | 🧪 |
-| Gemini (native) | `gemini-3-pro` | Heavy reasoning, long context | ✅ |
+| OpenAI | `gpt-5.5-pro` | Premium reasoning | ✅ |
+| Gemini (native) | `gemini-3.1-pro` | Heavy reasoning, long context | ✅ |
 | Gemini (native) | `gemini-3.5-flash` | Fast default-class | ✅ |
 | Gemini (native) | `gemini-3.1-flash-lite` | High-volume, low-cost | 🧪 |
 
@@ -83,26 +83,38 @@ on-prem). License matters here because you are redistributing/operating weights.
 | Model | Approx. size / context | License | Tier / role | Status |
 |---|---|---|---|---|
 | Qwen 3.5 (e.g. 397B-A17B) | MoE / long ctx | Apache-2.0 | General distill + chat, multilingual | ✅ |
+| Qwen 3.6-27B | dense 27B / long ctx | Apache-2.0 | Efficient dense, coding-strong | 🧪 |
 | DeepSeek V4 | large / long ctx | MIT | Heavy reasoning distillation | ✅ |
 | Llama 4 Maverick | MoE / long ctx | Llama Community* | General-purpose, high MMLU | ✅ |
 | Llama 4 Scout | up to ~10M ctx | Llama Community* | Very-long-context sources | ✅ |
 | Mistral Small 4 | ~24B / 256K | Apache-2.0 | Single-GPU self-host default | ✅ |
 | Mistral Large 3 | large / long ctx | Apache-2.0 | Multilingual, heavier tier | ✅ |
-| GLM-5.1 (Z.ai) | large / long ctx | MIT | Agentic / structured-output | 🧪 |
-| Gemma 4 | small–mid | Gemma terms* | Lightweight on-prem | 🧪 |
+| GLM-5.2 (Z.ai) | 753B / 1M ctx | MIT | Agentic / structured-output, frontier-class | ✅ |
+| Gemma 4 | E2B–31B | Apache-2.0 | Lightweight on-prem | ✅ |
+| MiniMax M3 | MoE / 1M ctx | MiniMax Community† | Long-context multimodal coding | 🧪 |
+| Kimi K2.6 (Moonshot) | 1T-A32B / 256K ctx | Modified MIT‡ | Agentic / multi-agent orchestration | 🧪 |
 
-> \* Llama Community and Gemma licenses are permissive for most commercial use
-> but **not** OSI-standard Apache/MIT — review their terms before
-> redistribution. Apache-2.0 / MIT entries are the safe default for resale or
-> air-gapped shipping.
+> \* Llama Community license is permissive for most commercial use but **not**
+> OSI-standard Apache/MIT — review terms before redistribution. Gemma 4 moved
+> to Apache-2.0 this review (previously the restrictive Gemma terms), so it no
+> longer needs this caveat.
+> † MiniMax Community license: unrestricted personal/research use, but
+> commercial use requires MiniMax's authorization — **not** approved-tier
+> permissive; trial only, do not ship in the managed tier.
+> ‡ Modified MIT: functions as standard MIT below 100M MAU / $20M monthly
+> revenue; above that, must display "Kimi K2" in the product UI. Apache-2.0 /
+> MIT (unmodified) entries remain the safe default for resale or air-gapped
+> shipping.
 
 ## Defaults (engine constants)
 
 The engine auto-detects a provider and picks a per-provider default. As of the
-Q2 2026 list these **should** be: `anthropic → claude-haiku-4-5`,
+Q3 2026 review these **remain unchanged**: `anthropic → claude-haiku-4-5`,
 `openai → gpt-5.4-mini`, `openrouter → anthropic/claude-haiku-4-5`,
-`gemini → gemini-3.5-flash`. Defaults are
-re-pinned to this document at each quarterly review (see TODO).
+`gemini → gemini-3.5-flash`. (Claude Sonnet moved 4-6 → 5 and Gemini's heavy
+tier moved 3-pro → 3.1-pro this review, but neither is a *default*, so no
+engine constant changed.) Defaults are re-pinned to this document at each
+quarterly review (see TODO).
 
 ## Claude partnership
 
@@ -110,7 +122,12 @@ A partnership application has been submitted to **Anthropic** (applied
 2026-Q2). If accepted, it may enable preferred Claude pricing and/or a
 sanctioned managed-Claude path for the metered LLM tier, and would make the
 Anthropic models the reference target for the managed offering. **Status:
-applied — pending.** Update this section and the changelog when it resolves.
+applied — pending** (unchanged this review; no confirmation of our specific
+application found). Note for whoever owns this: Anthropic opened the **Claude
+Partner Network** as free/open enrollment in 2026 (distinct from the paid
+startup-credits tiers) — worth checking whether our application should be
+re-routed through that program. Update this section and the changelog when it
+resolves.
 
 ## Changelog
 
@@ -118,15 +135,37 @@ Keep-a-Changelog style; each entry is stamped to the qpedia release that shipped
 the list change. `Added` / `Dropped` / `Changed` are relative to the approved
 set. Newest on top.
 
-### [Unreleased] — Q3 2026 review (target: Jul 2026)
+### [Unreleased] — Q3 2026 review (Jul 2026)
 - **Added (engine):** native **Gemini** provider (`QPEDIA_LLM_PROVIDER=gemini`,
   via Gemini's OpenAI-compatible endpoint). Gemini models moved off OpenRouter
   routing (`google/gemini-*`) to the native provider ids (`gemini-*`).
 - **Changed (engine):** per-provider default re-pinned `openai → gpt-5.4-mini`
   (was `gpt-4.1-mini`) to match the Defaults section; `.env.example`, README,
   and the engine constant updated. `anthropic` / `openrouter` defaults unchanged.
-- _Pending the Q3 review. Candidates to promote from 🧪: `gpt-5.5-pro`, `GLM-5.1`.
-  Watch: MiniMax M3, Kimi K2.6 (frontier open-weight, June 2026)._
+- **Added — cloud:** `claude-sonnet-5` (Anthropic, released 2026-06-30, new
+  Free/Pro default upstream, edges out Opus 4.8 on knowledge work per
+  Anthropic); `gemini-3.1-pro` (Google, supersedes `gemini-3-pro` at the same
+  price — doubled ARC-AGI-2 score, fixed the ~21K-token output truncation).
+  Promoted 🧪→✅: `gpt-5.5-pro` (Premium reasoning; stable in eval since its
+  Apr 2026 GA).
+- **Dropped:** `claude-sonnet-4-6` (⛔ superseded by `claude-sonnet-5`);
+  `gemini-3-pro` (⛔ superseded by `gemini-3.1-pro`).
+- **Added — open-weight:** `GLM-5.2` (Z.ai, MIT, 753B/1M ctx) added ✅ directly,
+  superseding and dropping the `GLM-5.1` 🧪 trial (5.2 shipped stronger and
+  cheaper before 5.1 cleared evaluation). `Gemma 4` promoted 🧪→✅ **and** its
+  license corrected `Gemma terms*` → **Apache-2.0** (Google moved Gemma 4 to a
+  fully permissive license — no more MAU cap / AUP enforcement). New 🧪 trials:
+  `Qwen 3.6-27B` (Apache-2.0, dense, beats the Qwen 3.5 flagship on coding),
+  `MiniMax M3` (MiniMax Community license — restricted, trial-only, not
+  approval-eligible until license changes), `Kimi K2.6` (Modified MIT —
+  effectively permissive below 100M MAU / $20M mo. revenue).
+- **Held back (not added):** Claude **Fable 5** — GA and benchmarks are
+  strong, but Anthropic suspended access under a US export-control directive
+  as of 2026-06-12 ("temporary," per Anthropic); revisit once access is
+  restored. Claude **Mythos 5** — limited availability only (Project
+  Glasswing), not broadly reachable. OpenAI **GPT-5.6 (Sol/Terra/Luna)** —
+  announced 2026-06-26 but limited-preview/partner-only access; no general
+  API yet. All three are **watch items for Q4 2026**, not table entries.
 
 ### [1.2.0] — 2026-06-02 — Q2 2026 (initial approved list)
 Initial curated set established.
@@ -150,10 +189,17 @@ the GPT-5.4/5.5 line.
 - [x] Re-pin engine per-provider default model constants to the "Defaults"
       section above. _(Done: `openai → gpt-5.4-mini`; `DEFAULT_OPENAI_MODEL` in
       `qpedia-llm/src/lib.rs`, `.env.example`, README. CHANGELOG [Unreleased].)_
-- [ ] Add a native Google/Gemini provider, or keep routing via OpenRouter.
+- [x] Add a native Google/Gemini provider, or keep routing via OpenRouter.
+      _(Done: native `gemini` provider, see engine change above.)_
 - [ ] Resolve the Anthropic partnership; reflect any managed-Claude terms here.
+      Check whether the Claude Partner Network's open enrollment (2026)
+      supersedes our pending application.
+- [ ] Q4 2026: revisit Claude Fable 5 (export-control hold), GPT-5.6
+      Sol/Terra/Luna (limited preview → GA?), and whether Qwen 3.6-27B,
+      MiniMax M3, or Kimi K2.6 clear the bar for ✅ (MiniMax M3 needs a
+      license change first).
 - [ ] Each quarter: move 🧪 → ✅ or ⛔, append the net change under the next
       qpedia version, bump defaults.
 
-> Model availability/names verified against vendor docs as of June 2026; treat
+> Model availability/names verified against vendor docs as of July 2026; treat
 > each quarterly review as the point of re-verification.

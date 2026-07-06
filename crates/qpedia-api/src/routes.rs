@@ -169,7 +169,7 @@ pub(crate) async fn auth_me(user: User) -> Json<Value> {
         "tenant": user.tenant.as_str(),
         "tenant_kind": kind,
         "is_admin": user.is_admin(),
-        "is_superadmin": crate::observability::is_superadmin_user(&user),
+        "is_superadmin": crate::auth::is_superadmin_user(&user),
     }))
 }
 

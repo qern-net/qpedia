@@ -47,7 +47,7 @@ External applications integrate over the stable **`/api/v1` HTTP boundary** — 
 
 - **API boundary, not schema coupling.** Consumers call `/api/v1` (ingest → search → chat). They run their own Postgres *schema* in the same instance (e.g. the RFP app owns `rfp`) but never read Qpedia's tables via cross-schema SQL.
 - **Tenancy lines up.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and Postgres RLS enforces isolation end-to-end.
-- **Machine-to-machine auth.** External calls authenticate via a service-token or OAuth 2 client-credentials JWT that carries tenant + groups, so RLS scoping is identical to a user session.
+- **Machine-to-machine auth.** External calls authenticate via an [`ExternalAuthProvider`](crates/qpedia-api/src/auth.rs) registered by the deployment overlay. The provider returns a `User` with tenant + groups, so RLS scoping is identical to a user session. The OSS engine ships no concrete implementation; overlays supply the scheme their consumers need (service tokens, OAuth 2 client-credentials JWTs, etc.).
 - **Graceful degradation.** A consumer that loses its Qpedia connection keeps operating on its own data and re-syncs later; Qpedia is an additive layer, not a hard runtime dependency.
 
 Applications building on this layer today:

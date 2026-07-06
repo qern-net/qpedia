@@ -59,6 +59,5 @@ async-trait.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-serde_yaml.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tower.workspace = true

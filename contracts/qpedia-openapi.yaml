@@ -34,7 +34,7 @@ servers:
 
 security:
   - sessionCookie: []     # current working auth
-  - bearerAuth: []        # planned (M2M) — not yet accepted by the engine
+  - bearerAuth: []        # M2M — accepted only when the deployment overlay registers an ExternalAuthProvider; the bare engine has no built-in scheme
 
 tags:
   - name: Health
@@ -290,13 +290,15 @@ components:
       bearerFormat: JWT
       description: |
         Machine-to-machine path so external apps need not carry a session cookie.
-        **Implemented (opt-in)** — see `TASK-external-app-auth.md`: a service-token (M2M)
-        path (`QPEDIA_SERVICE_TOKENS`) and an OAuth 2 client-credentials JWT verifier
-        (`QPEDIA_M2M_*`, validated against the shared OIDC issuer's JWKS) both wire into
-        the `User` extractor and carry tenant + groups so RLS scoping is identical to a
-        user session. Per-route scope enforcement (distinct `sources.write` / `search.read`
-        / `chat` scopes) is still in progress. In the engine's `dev` auth mode every request
-        is `dev:admin` and auth may be omitted.
+        The engine defines an `ExternalAuthProvider` extension point
+        (`AppBuilder::with_auth_provider`) but ships no concrete scheme itself —
+        the deployment overlay supplies one. On the qpedia.cloud-hosted instance
+        this is a service-token path and an OAuth 2 client-credentials JWT
+        verifier (validated against the shared OIDC issuer's JWKS), both
+        carrying tenant + groups so RLS scoping is identical to a user session.
+        Per-route scope enforcement (distinct `sources.write` / `search.read`
+        / `chat` scopes) is still in progress. In the engine's `dev` auth mode
+        every request is `dev:admin` and auth may be omitted.
 
   parameters:
     SourceId:

@@ -70,29 +70,32 @@ pub struct ApprovedModel {
     pub open_weight: bool,
 }
 
-/// The Q2 2026 approved list. Mirrors `APPROVED-MODELS.md`. Newest review wins;
+/// The Q3 2026 approved list. Mirrors `APPROVED-MODELS.md`. Newest review wins;
 /// bump together with the doc's changelog.
 pub const APPROVED_MODELS: &[ApprovedModel] = &[
     // ---- cloud ----
     ApprovedModel { id: "claude-opus-4-8",   provider: Provider::Anthropic,  role: "Heavy distillation",        status: Status::Approved, license: None, open_weight: false },
-    ApprovedModel { id: "claude-sonnet-4-6", provider: Provider::Anthropic,  role: "Production sweet spot",      status: Status::Approved, license: None, open_weight: false },
+    ApprovedModel { id: "claude-sonnet-5",   provider: Provider::Anthropic,  role: "Production sweet spot",      status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "claude-haiku-4-5",  provider: Provider::Anthropic,  role: "Fast / cheap (default)",     status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gpt-5.5",           provider: Provider::Openai,     role: "Heavy reasoning",            status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gpt-5.4-mini",      provider: Provider::Openai,     role: "Cost-efficient default",     status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gpt-5.4-nano",      provider: Provider::Openai,     role: "High-volume / low-latency",  status: Status::Approved, license: None, open_weight: false },
-    ApprovedModel { id: "gpt-5.5-pro",       provider: Provider::Openai,     role: "Premium reasoning",          status: Status::Trial,    license: None, open_weight: false },
-    ApprovedModel { id: "gemini-3-pro",          provider: Provider::Gemini, role: "Heavy reasoning, long ctx", status: Status::Approved, license: None, open_weight: false },
+    ApprovedModel { id: "gpt-5.5-pro",       provider: Provider::Openai,     role: "Premium reasoning",          status: Status::Approved, license: None, open_weight: false },
+    ApprovedModel { id: "gemini-3.1-pro",        provider: Provider::Gemini, role: "Heavy reasoning, long ctx", status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gemini-3.5-flash",      provider: Provider::Gemini, role: "Fast default-class",        status: Status::Approved, license: None, open_weight: false },
     ApprovedModel { id: "gemini-3.1-flash-lite", provider: Provider::Gemini, role: "High-volume / low-cost",    status: Status::Trial,    license: None, open_weight: false },
     // ---- open-weight (run via openai-compatible) ----
     ApprovedModel { id: "qwen-3.5",        provider: Provider::OpenaiCompatible, role: "General distill + chat",   status: Status::Approved, license: Some("Apache-2.0"), open_weight: true },
+    ApprovedModel { id: "qwen-3.6-27b",    provider: Provider::OpenaiCompatible, role: "Efficient dense, coding",  status: Status::Trial,    license: Some("Apache-2.0"), open_weight: true },
     ApprovedModel { id: "deepseek-v4",     provider: Provider::OpenaiCompatible, role: "Heavy reasoning",          status: Status::Approved, license: Some("MIT"),        open_weight: true },
     ApprovedModel { id: "llama-4-maverick", provider: Provider::OpenaiCompatible, role: "General-purpose",         status: Status::Approved, license: Some("Llama Community"), open_weight: true },
     ApprovedModel { id: "llama-4-scout",   provider: Provider::OpenaiCompatible, role: "Very-long-context",        status: Status::Approved, license: Some("Llama Community"), open_weight: true },
     ApprovedModel { id: "mistral-small-4", provider: Provider::OpenaiCompatible, role: "Single-GPU self-host",     status: Status::Approved, license: Some("Apache-2.0"), open_weight: true },
     ApprovedModel { id: "mistral-large-3", provider: Provider::OpenaiCompatible, role: "Multilingual, heavier",    status: Status::Approved, license: Some("Apache-2.0"), open_weight: true },
-    ApprovedModel { id: "glm-5.1",         provider: Provider::OpenaiCompatible, role: "Agentic / structured",     status: Status::Trial,    license: Some("MIT"),        open_weight: true },
-    ApprovedModel { id: "gemma-4",         provider: Provider::OpenaiCompatible, role: "Lightweight on-prem",      status: Status::Trial,    license: Some("Gemma terms"), open_weight: true },
+    ApprovedModel { id: "glm-5.2",         provider: Provider::OpenaiCompatible, role: "Agentic / structured, frontier", status: Status::Approved, license: Some("MIT"),        open_weight: true },
+    ApprovedModel { id: "gemma-4",         provider: Provider::OpenaiCompatible, role: "Lightweight on-prem",      status: Status::Approved, license: Some("Apache-2.0"), open_weight: true },
+    ApprovedModel { id: "minimax-m3",      provider: Provider::OpenaiCompatible, role: "Long-context multimodal coding", status: Status::Trial, license: Some("MiniMax Community"), open_weight: true },
+    ApprovedModel { id: "kimi-k2.6",       provider: Provider::OpenaiCompatible, role: "Agentic / multi-agent",    status: Status::Trial,    license: Some("Modified MIT"), open_weight: true },
 ];
 
 /// All entries (any status). The API filters to `Approved` for tenant-facing use.
@@ -133,25 +136,28 @@ mod tests {
 
     #[test]
     fn approved_hosted_models_validate() {
-        assert!(is_approved(Provider::Anthropic, "claude-sonnet-4-6"));
+        assert!(is_approved(Provider::Anthropic, "claude-sonnet-5"));
         assert!(is_approved(Provider::Openai, "gpt-5.5"));
-        assert!(is_approved(Provider::Gemini, "gemini-3-pro"));
+        assert!(is_approved(Provider::Gemini, "gemini-3.1-pro"));
     }
 
     #[test]
     fn wrong_provider_or_dropped_model_is_rejected() {
         // right id, wrong provider
-        assert!(!is_approved(Provider::Openai, "claude-sonnet-4-6"));
+        assert!(!is_approved(Provider::Openai, "claude-sonnet-5"));
         // a dropped legacy default
         assert!(!is_approved(Provider::Openai, "gpt-4.1-mini"));
+        // superseded in the Q3 2026 review
+        assert!(!is_approved(Provider::Anthropic, "claude-sonnet-4-6"));
+        assert!(!is_approved(Provider::Gemini, "gemini-3-pro"));
         // unknown id
         assert!(!is_approved(Provider::Anthropic, "claude-nonexistent"));
     }
 
     #[test]
     fn trial_models_are_not_offered_as_approved() {
-        // gpt-5.5-pro is Trial in the Q2 2026 list
-        assert!(!is_approved(Provider::Openai, "gpt-5.5-pro"));
+        // gemini-3.1-flash-lite is Trial in the Q3 2026 list
+        assert!(!is_approved(Provider::Gemini, "gemini-3.1-flash-lite"));
         assert!(approved_models().all(|m| m.status == Status::Approved));
     }
 

@@ -4,22 +4,24 @@
 # production image + frontend live in the deployment overlay, and the
 # managed product is Qpedia Cloud — https://qpedia.qern.net).
 #
-# What this file gives you are the external dependencies the engine needs
-# to run locally:
+# What this file gives you is the one external dependency the engine
+# needs to run locally:
 #   * PostgreSQL 17 with pgvector  — jobs, sources, sessions, ACLs, hybrid index
-#   * grafana/otel-lgtm            — all-in-one OTLP backend (Loki + Tempo +
-#                                    Prometheus/Mimir + Grafana) for telemetry
 #
-# Bring them up, then run the API from source against them:
+# Bring it up, then run the API from source against it:
 #
 #   docker compose up -d
 #   cargo run -p qpedia-api
 #
 # Credentials match .env.example's QPEDIA_DB_URL, so the defaults "just
-# work" for `cargo run` and `cargo test`. For a host-side `cargo run`, the
-# engine exports OTLP to the collector at OTEL_EXPORTER_OTLP_ENDPOINT
-# (default http://otel-lgtm:4317 inside compose; see .env.example for the
-# host value).
+# work" for `cargo run` and `cargo test`.
+#
+# Telemetry (OpenTelemetry traces/metrics/logs) is exported directly to a
+# shared OTLP collector — Grafana Cloud, or a self-run collector — never a
+# container in this compose file. Set OTEL_EXPORTER_OTLP_ENDPOINT (and
+# OTEL_EXPORTER_OTLP_HEADERS for Basic Auth, e.g. Grafana Cloud's OTLP
+# gateway) in .env; unset means telemetry stays console-only. See
+# .env.example.
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -40,86 +42,24 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # All-in-one OpenTelemetry backend: one OTLP ingest endpoint fronting
-  # Loki (logs), Tempo (traces), Prometheus/Mimir (metrics), and Grafana (UI).
-  #
-  # INTERNAL-ONLY: this service publishes NO host ports. The OTLP ports
-  # (4317 gRPC / 4318 HTTP) and Grafana (3000) are reachable only by sibling
-  # services on the compose network via `expose:`. There is deliberately no
-  # `127.0.0.1:3000:3000` Grafana binding and no host exposure of 4317/4318 —
-  # the ONLY ingress to Grafana is the qpedia-api authenticating reverse
-  # proxy, which is what makes Grafana's auth-proxy header-trust safe.
-  otel-lgtm:
-    image: grafana/otel-lgtm:0.28.0
-    expose:
-      - "4317"  # OTLP gRPC ingest (internal network only)
-      - "4318"  # OTLP HTTP ingest (internal network only)
-      - "3000"  # Grafana UI (internal network only; reached via qpedia-api proxy)
-    environment:
-      # Grafana auth-proxy: the QPEDIA session is the ONLY identity source.
-      # qpedia-api authenticates the user, then injects the X-WEBAUTH-USER /
-      # X-WEBAUTH-ROLE headers Grafana trusts here. This header-trust is safe
-      # ONLY because the internal-only network means nothing but the qpedia-api
-      # reverse proxy can ever reach port 3000 (see the INTERNAL-ONLY note above).
-      GF_AUTH_PROXY_ENABLED: "true"
-      GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER          # injected QPEDIA identity
-      GF_AUTH_PROXY_HEADER_PROPERTY: username
-      GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
-      GF_AUTH_PROXY_HEADERS: Role:X-WEBAUTH-ROLE         # injected Grafana org role
-      GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN: "false"
-      # Grafana's own login is not usable: identity comes only from the proxy.
-      GF_AUTH_DISABLE_LOGIN_FORM: "true"
-      GF_AUTH_BASIC_ENABLED: "false"
-      # Served under the qpedia-api proxy sub-path so embedding/links resolve.
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/api/v1/observability/grafana/"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      # Allow the frontend to embed Grafana panels in an iframe.
-      GF_SECURITY_ALLOW_EMBEDDING: "true"
-    volumes:
-      # Persists Grafana/Loki/Tempo/Prometheus data across container restarts
-      # so telemetry queryable before a restart stays queryable after it.
-      - otel-data:/data
-      # Grafana data-source provisioning (read-only): provisions the bundled
-      # Loki/Tempo/Prometheus backends with trace<->logs correlation on
-      # trace_id. One file per source so a failed source surfaces an error
-      # without removing the others. Mounted over Grafana's provisioning dir.
-      - ./observability/grafana/provisioning/datasources:/otel-lgtm/grafana/conf/provisioning/datasources:ro
-      # Grafana dashboard provisioning (read-only): the file-provider config
-      # loads the seven-dashboard Observability Views Catalog into a single
-      # "Qpedia Observability" folder. The provider YAML points at the
-      # dashboards dir mounted just below. Req 8.3-8.8.
-      - ./observability/grafana/provisioning/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards:ro
-      # The dashboard JSON files referenced by the provider's options.path.
-      - ./observability/grafana/dashboards:/otel-lgtm/grafana/dashboards:ro
-    healthcheck:
-      # Healthy once the OTLP gRPC ingest port is accepting connections.
-      # 30s start_period + 5 retries * 10s interval bounds the startup-failure
-      # window to ~80s before the container is marked unhealthy.
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/4317' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      start_period: 30s
-      retries: 5
-    restart: unless-stopped
-
   # The qpedia-api app image lives in the deployment overlay, not this OSS
   # repo (see header). The overlay's `app` service inherits the wiring below;
-  # it is documented here so the contract is visible alongside the collector:
+  # it is documented here so the contract is visible:
   #
   #   app:
   #     # ...build/image...
   #     depends_on:
   #       postgres:
   #         condition: service_healthy
-  #       otel-lgtm:
-  #         condition: service_healthy   # start only after the stack is healthy
   #     environment:
-  #       # OTLP gRPC endpoint on the internal compose network.
-  #       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4317
+  #       # A shared OTLP collector — Grafana Cloud's OTLP gateway, or a
+  #       # self-run collector. Never a container in this compose file.
+  #       OTEL_EXPORTER_OTLP_ENDPOINT: https://otlp-gateway-<zone>.grafana.net/otlp
+  #       OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Basic <base64(instance_id:api_token)>"
   #
-  # For a host-side `cargo run -p qpedia-api`, set OTEL_EXPORTER_OTLP_ENDPOINT
-  # in .env to the collector's host-reachable address instead.
+  # Unset OTEL_EXPORTER_OTLP_ENDPOINT (host-side `cargo run` or this compose
+  # stack alone) and the engine stays console-only — no exporter is built,
+  # nothing tries to dial a collector that isn't there.
 
 volumes:
   postgres-data:
-  otel-data:

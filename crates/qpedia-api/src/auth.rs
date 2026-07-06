@@ -52,12 +52,32 @@ pub const SESSION_TTL_SECS: i64 = 24 * 60 * 60;
 pub struct AuthState {
     pub mode: AuthMode,
     pub firebase: Option<crate::firebase::FirebaseVerifier>,
-    /// Optional machine-to-machine (service-token) auth for external apps.
-    /// Composes with any `mode`; `None` unless `QPEDIA_SERVICE_TOKENS` is set.
-    pub service: Option<crate::m2m::ServiceTokenAuth>,
-    /// Optional OAuth 2 client-credentials (JWT) auth for external apps.
-    /// Composes with any `mode`; `None` unless `QPEDIA_M2M_AUDIENCE` is set.
-    pub oauth: Option<crate::oauth::OAuthVerifier>,
+    /// Optional external (machine-to-machine) auth provider. Composes with
+    /// any `mode` — checked before the session-cookie path on every request.
+    /// `None` unless an overlay registers one via
+    /// [`crate::AppBuilder::with_auth_provider`]. The bare OSS engine ships
+    /// no concrete implementation; see [`ExternalAuthProvider`] docs.
+    pub external: Option<Arc<dyn ExternalAuthProvider>>,
+}
+
+/// Extension point for machine-to-machine authentication.
+///
+/// The engine's built-in auth is session-cookie based (human login via OIDC
+/// or Firebase). External applications calling `/api/v1` directly need a
+/// non-interactive credential (a static service token, an OAuth 2
+/// client-credentials JWT, etc.) — but the *shape* of that credential is a
+/// deployment concern, not an engine concern. An overlay (e.g. `qpedia-pvt`)
+/// implements this trait for whatever scheme its external consumers need and
+/// registers it with [`crate::AppBuilder::with_auth_provider`]; the `User`
+/// extractor calls it on every request, before falling back to the session
+/// path. Returning `None` falls through to the normal auth flow.
+///
+/// A returned [`User`] must carry a resolved `tenant` and `groups` exactly
+/// like a session-derived user, so RLS/ACL scoping is identical regardless
+/// of which path authenticated the request.
+#[axum::async_trait]
+pub trait ExternalAuthProvider: Send + Sync {
+    async fn authenticate(&self, headers: &HeaderMap) -> Option<User>;
 }
 
 #[derive(Clone)]
@@ -106,9 +126,10 @@ impl AuthState {
                 crate::firebase::FirebaseVerifier::new(pid)
             });
 
-        // Optional M2M auth (opt-in). Both compose with every mode below.
-        let service = crate::m2m::ServiceTokenAuth::from_env()?;
-        let oauth = crate::oauth::OAuthVerifier::from_env()?;
+        // External (M2M) auth is registered later via
+        // `AppBuilder::with_auth_provider`, not built from env here — the
+        // engine has no built-in scheme, only the extension point.
+        let external = None;
 
         // Validate an explicit mode up front.
         if let Some(m) = mode.as_deref() {
@@ -123,7 +144,7 @@ impl AuthState {
         //    useful for exercising the login UI without enforcement).
         if mode.as_deref() == Some("dev") {
             info!("auth: dev mode (anonymous admin)");
-            return Ok(Self { mode: AuthMode::Dev, firebase, service, oauth });
+            return Ok(Self { mode: AuthMode::Dev, firebase, external });
         }
 
         // 2. Session/Firebase mode: requested explicitly, or implied by a
@@ -132,7 +153,7 @@ impl AuthState {
             || (issuer.is_none() && firebase.is_some())
         {
             info!("auth: session mode (Firebase login enforced)");
-            return Ok(Self { mode: AuthMode::Session, firebase, service, oauth });
+            return Ok(Self { mode: AuthMode::Session, firebase, external });
         }
 
         match (mode.as_deref(), issuer) {
@@ -141,7 +162,7 @@ impl AuthState {
             }
             (_, None) => {
                 info!("auth: dev mode (anonymous admin)");
-                Ok(Self { mode: AuthMode::Dev, firebase, service, oauth })
+                Ok(Self { mode: AuthMode::Dev, firebase, external })
             }
             (_, Some(issuer)) => {
                 let client_id = std::env::var("QPEDIA_OIDC_CLIENT_ID")
@@ -183,8 +204,7 @@ impl AuthState {
                         end_session_endpoint,
                     })),
                     firebase,
-                    service,
-                    oauth,
+                    external,
                 })
             }
         }
@@ -279,6 +299,24 @@ pub fn clear_session_cookie() -> HeaderValue {
     .expect("valid cookie")
 }
 
+/// Extract a bearer token from the `Authorization` header (scheme is
+/// case-insensitive). Shared helper for [`ExternalAuthProvider`] impls.
+pub fn read_bearer(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let rest = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))?;
+    let token = rest.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 pub fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
@@ -304,6 +342,16 @@ pub fn random_token(bytes: usize) -> String {
 pub fn augment_admin_by_email(email: Option<&str>, groups: Vec<String>) -> Vec<String> {
     let allow = std::env::var("QPEDIA_ADMIN_EMAILS").unwrap_or_default();
     augment_admin_with_allow(email, groups, &allow)
+}
+
+/// Whether `user`'s verified email is in the `QPEDIA_ADMIN_EMAILS` platform
+/// operator allowlist (independent of their session `groups`). Used to
+/// surface a platform-operator flag on `/api/v1/auth/me`. Total; never
+/// panics.
+pub fn is_superadmin_user(user: &User) -> bool {
+    augment_admin_by_email(user.email.as_deref(), Vec::new())
+        .iter()
+        .any(|g| g == "admin")
 }
 
 /// Pure core of [`augment_admin_by_email`] — the allowlist is passed in so
@@ -359,20 +407,13 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let ext = AuthExtractorState::from_ref(state);
 
-        // Machine-to-machine: a valid service token (Authorization: Bearer)
-        // authenticates in any mode and resolves its own tenant + groups, so
-        // RLS scoping is identical to a user session. Falls through when absent.
-        if let Some(svc) = &ext.auth.service {
-            if let Some(user) = svc.authenticate(&parts.headers) {
-                tracing::Span::current().record("tenant", user.tenant.as_str());
-                return Ok(user);
-            }
-        }
-
-        // OAuth 2 client-credentials JWT — validated against the OIDC issuer's
-        // JWKS, with client allowlist + scope/tenant claims driving authz/RLS.
-        if let Some(oauth) = &ext.auth.oauth {
-            if let Some(user) = oauth.authenticate(&parts.headers).await {
+        // Machine-to-machine: an overlay-registered `ExternalAuthProvider`
+        // (see `AppBuilder::with_auth_provider`) authenticates in any mode
+        // and resolves its own tenant + groups, so RLS scoping is identical
+        // to a user session. Falls through to the session path when absent
+        // or when the provider itself returns `None`.
+        if let Some(provider) = &ext.auth.external {
+            if let Some(user) = provider.authenticate(&parts.headers).await {
                 tracing::Span::current().record("tenant", user.tenant.as_str());
                 return Ok(user);
             }

@@ -4,10 +4,13 @@
 //! drive the OpenTelemetry pipeline. The parsing surface is intentionally
 //! **pure**: [`TelemetryConfig::from_vars`] takes an injected variable lookup
 //! closure and performs no process-environment or other I/O, so it is fully
-//! unit- and property-testable. The exporter wiring (in a later task) consumes
-//! the resolved config.
+//! unit- and property-testable.
 //!
-//! See the `otel-lgtm-observability` design doc, §2 (`qpedia-telemetry`).
+//! The engine ships no bundled collector or dashboard — it only exports OTLP
+//! (traces, metrics, logs) to whatever endpoint the deployment configures via
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` for auth,
+//! e.g. Grafana Cloud's OTLP gateway Basic Auth). Unset means console-only;
+//! there is no default collector address.
 
 /// Pure HTTP instrumentation predicates (design §3): the excluded-path
 /// predicate and the HTTP-status → span-status classifier.
@@ -41,8 +44,6 @@ const MAX_EXPORT_DELAY: Duration = Duration::from_secs(5);
 /// 60-second default window for the dropped-record warning throttle (Req 9.5).
 const DROP_WARNING_WINDOW: Duration = Duration::from_secs(60);
 
-/// Documented default OTLP collector endpoint (the compose service address).
-const DEFAULT_ENDPOINT: &str = "http://otel-lgtm:4317";
 /// Documented default `RUST_LOG`-style filter applied when `RUST_LOG` is
 /// unset or fails to parse.
 const DEFAULT_LOG_FILTER: &str = "info";
@@ -69,11 +70,16 @@ pub struct TelemetryConfig {
     /// Whether telemetry export is enabled. Unset or any value outside the
     /// disabled set means enabled.
     pub enabled: bool,
-    /// Resolved OTLP endpoint. `None` => skip exporter (invalid endpoint, or
-    /// telemetry disabled), handled by caller policy.
+    /// Resolved OTLP endpoint. `None` => skip exporter (unset, invalid, or
+    /// telemetry disabled), handled by caller policy. There is no built-in
+    /// default: the engine never assumes a collector is present. Point this
+    /// at a shared OTLP endpoint (Grafana Cloud's OTLP gateway, or a
+    /// self-run collector) via `OTEL_EXPORTER_OTLP_ENDPOINT`.
     pub endpoint: Option<Url>,
-    /// `false` => the configured endpoint was invalid; the caller records a
-    /// startup warning and falls back to console-only.
+    /// `false` => the configured endpoint was invalid (set but unparseable /
+    /// out of length bounds); the caller records a startup warning and falls
+    /// back to console-only. `true` for both a valid endpoint and the unset
+    /// case (unset is not an error — it just means "no exporter").
     pub endpoint_valid: bool,
     /// `service.name` resource attribute (`"qpedia-api"`).
     pub service_name: String,
@@ -556,15 +562,25 @@ pub fn init_telemetry(cfg: &TelemetryConfig) -> TelemetryInit {
             }
         }
     } else {
-        // Disabled, or no usable endpoint: console-only (Req 2.8 / 3.8).
+        // Disabled, endpoint unset, or endpoint invalid: console-only
+        // (Req 2.8 / 3.8). Distinguish "not configured" (expected, no
+        // collector wired up) from "misconfigured" (an OTEL_EXPORTER_OTLP_ENDPOINT
+        // was set but didn't parse) so a normal no-telemetry deployment
+        // doesn't log a spurious warning.
         let _ = tracing_subscriber::registry()
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer())
             .try_init();
         if !cfg.enabled {
             tracing::info!("telemetry: export disabled; console logging only");
+        } else if !cfg.endpoint_valid {
+            tracing::warn!(
+                "telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set but invalid; console logging only"
+            );
         } else {
-            tracing::warn!("telemetry: no usable OTLP endpoint; console logging only");
+            tracing::info!(
+                "telemetry: no OTLP endpoint configured (set OTEL_EXPORTER_OTLP_ENDPOINT to enable); console logging only"
+            );
         }
         TelemetryInit {
             layer_installed: false,
@@ -650,18 +666,16 @@ fn parse_enabled(raw: Option<String>) -> bool {
 
 /// Endpoint resolution: returns `(endpoint, endpoint_valid)`.
 ///
-/// - Unset → documented default endpoint, `endpoint_valid = true`.
+/// - Unset → no endpoint (`None`), `endpoint_valid = true` (unset is not an
+///   error — there is no built-in default collector; the engine assumes
+///   nothing is listening unless told otherwise).
 /// - Set + valid absolute URL within the accepted length range → use it,
 ///   `endpoint_valid = true`.
 /// - Set + invalid (bad URL, or length out of range) → `None`,
 ///   `endpoint_valid = false`.
 fn resolve_endpoint(raw: Option<String>) -> (Option<Url>, bool) {
     match raw {
-        None => {
-            // The documented default is a known-good absolute URL.
-            let default = Url::parse(DEFAULT_ENDPOINT).expect("default endpoint is a valid URL");
-            (Some(default), true)
-        }
+        None => (None, true),
         Some(value) => {
             if !ENDPOINT_LEN.contains(&value.len()) {
                 return (None, false);
@@ -837,12 +851,9 @@ mod tests {
 
             match &raw {
                 None => {
-                    // Unset → documented compose default, valid.
+                    // Unset → no endpoint, but not an error (no built-in default).
                     prop_assert!(cfg.endpoint_valid);
-                    prop_assert_eq!(
-                        cfg.endpoint.as_ref().map(|u| u.as_str().to_string()),
-                        Some(Url::parse(DEFAULT_ENDPOINT).unwrap().as_str().to_string())
-                    );
+                    prop_assert!(cfg.endpoint.is_none());
                 }
                 Some(value) => {
                     // Validity flag is consistent with: within length bound AND
@@ -924,14 +935,12 @@ mod tests {
     // Validates: Requirement 3.2
     // -----------------------------------------------------------------
     #[test]
-    fn unit_endpoint_defaults_to_compose_address_when_unset() {
-        // OTEL_EXPORTER_OTLP_ENDPOINT unset → documented compose default.
+    fn unit_endpoint_unset_means_no_exporter_not_a_default() {
+        // OTEL_EXPORTER_OTLP_ENDPOINT unset → no endpoint, and not an error:
+        // the engine has no built-in collector address.
         let cfg = TelemetryConfig::from_vars(&single_var(VAR_OTLP_ENDPOINT, None));
         assert!(cfg.endpoint_valid);
-        assert_eq!(
-            cfg.endpoint.as_ref().map(Url::as_str),
-            Some("http://otel-lgtm:4317/")
-        );
+        assert!(cfg.endpoint.is_none());
     }
 
     // -----------------------------------------------------------------

@@ -6,6 +6,8 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-07-05
+
 ### Added
 - **Native Google Gemini provider.** `QPEDIA_LLM_PROVIDER=gemini` + `GEMINI_API_KEY`
   talks directly to Google via Gemini's OpenAI-compatible endpoint (no OpenRouter
@@ -18,11 +20,52 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
   (`qpedia-llm::models`) and `provider_from_config` for per-tenant provider
   resolution. Fully additive — no row ⇒ deployment
   provider (BYOL at deploy level unchanged).
+- **`ExternalAuthProvider` extension point.** A new trait
+  (`qpedia_api::auth::ExternalAuthProvider`) plus `AppBuilder::with_auth_provider`
+  let a deployment overlay register a machine-to-machine auth scheme (service
+  tokens, OAuth 2 client-credentials JWTs, etc.); the `User` extractor checks
+  it before falling back to the session-cookie path. The engine ships no
+  concrete scheme — see `docs/INTEGRATION.md` §4. (Concrete M2M
+  implementations, including the ones qpedia.cloud runs, live in the
+  `qpedia-pvt` overlay, not here — see `OPEN-CORE.md` §2.)
 
 ### Changed
 - **Default OpenAI model re-pinned** to `gpt-5.4-mini` (was `gpt-4.1-mini`),
   tracking the Q2 2026 approved-models list. BYOL is unaffected — set
   `QPEDIA_LLM_MODEL` to override. See [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
+- **Q3 2026 approved-models review.** Added `claude-sonnet-5` (drops
+  `claude-sonnet-4-6`), `gemini-3.1-pro` (drops `gemini-3-pro`); promoted
+  `gpt-5.5-pro` and `GLM-5.2`/`Gemma 4` (open-weight) to ✅; new 🧪 trials
+  `Qwen 3.6-27B`, `MiniMax M3`, `Kimi K2.6`. No per-provider default changed.
+  See [`APPROVED-MODELS.md`](APPROVED-MODELS.md#changelog) for the full diff.
+
+### Removed
+- **Bundled Grafana/otel-lgtm observability stack.** The `otel-lgtm` compose
+  service (Loki + Tempo + Prometheus/Mimir + Grafana), the authenticating
+  Grafana reverse proxy (`/api/v1/observability/grafana/*`), the seven-
+  dashboard provisioning catalog, and the `/observability` view-resolver
+  module are all removed. That design depended on privately owning and
+  network-isolating the Grafana instance (header-trust auth proxy); it
+  doesn't carry over to a shared observability backend. The engine now only
+  *exports* OTLP (traces/metrics/logs) to a deployment-configured endpoint —
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (+ `OTEL_EXPORTER_OTLP_HEADERS` for auth,
+  e.g. Grafana Cloud's OTLP gateway Basic Auth) — same as before, minus the
+  bundled backend. Unset now means console-only rather than defaulting to
+  the (now nonexistent) `otel-lgtm:4317` address. Dashboards/alerting are a
+  deployment concern against whatever OTLP backend you point at.
+
+### Security
+- **Dependency refresh (`cargo update`).** Pulls `quinn-proto` to `>=0.11.16`
+  (fixes [RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185),
+  remote memory exhaustion) and `anyhow` to `1.0.103` (fixes
+  [RUSTSEC-2026-0190](https://rustsec.org/advisories/RUSTSEC-2026-0190),
+  `Error::downcast_mut` unsoundness), and prunes dead `quinn`/`wit-bindgen`
+  lockfile entries. The remaining `cargo audit` finding —
+  [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (`rsa`
+  Marvin timing side-channel, via `openidconnect`) — is **not exploitable
+  here**: `rsa` is used only for RS256 ID-token *verification* (public-key
+  operations), never private-key decrypt/sign, and no fixed upstream release
+  exists.
 
 ## [1.2.0] — 2026-06-02
 

@@ -104,8 +104,7 @@ bare API-key path: a credential that carries no tenant cannot set the
 | Credential | For | How |
 |---|---|---|
 | Session cookie (`qpedia_session`) | Browser users | Minted by OIDC/Firebase login; opaque, sha256-hashed at rest. |
-| **Service token (M2M)** | Simple service-to-service | `Authorization: Bearer <token>`; configured in `QPEDIA_SERVICE_TOKENS` as `{name, token, tenant, groups[]}`, matched by sha256 hash. Opt-in; `None` unless set. |
-| **OAuth 2 client-credentials** | Production external apps | A client-credentials **access-token JWT** validated against the OIDC issuer's JWKS (RS256), with an `azp` client allowlist and required scope. Opt-in via `QPEDIA_M2M_AUDIENCE` (+ issuer). |
+| **External auth (M2M)** | Service-to-service | Any non-interactive credential (service token, OAuth 2 client-credentials JWT, etc.). The concrete scheme is supplied by the deployment overlay via the `ExternalAuthProvider` trait; the OSS engine itself ships no implementation. The provider must return a `User` with resolved tenant + groups so RLS scoping is identical to a session. |
 
 **On-behalf-of a user.** For calls a consumer makes for a specific end user,
 forward the user's OIDC access token (both apps share the issuer) or use
@@ -122,9 +121,10 @@ scope is rejected with `403`:
 | `qpedia.search.read` | Hybrid search + wiki read. |
 | `qpedia.chat` | RAG chat (SSE). |
 
-OAuth 2 env knobs (all opt-in): `QPEDIA_M2M_OIDC_ISSUER`,
-`QPEDIA_M2M_AUDIENCE`, `QPEDIA_M2M_ALLOWED_CLIENTS`,
-`QPEDIA_M2M_REQUIRED_SCOPE`, `QPEDIA_M2M_TENANT_CLAIM`, `QPEDIA_M2M_JWKS_URL`.
+OAuth 2 env knobs are now overlay-specific (e.g. `qpedia-pvt` defines
+`QPEDIA_M2M_OIDC_ISSUER`, `QPEDIA_M2M_AUDIENCE`, etc.). The OSS engine has no
+M2M-specific env vars — overlays register their provider via
+`AppBuilder::with_auth_provider()`.
 Defense in depth: short-lived tokens; optional mTLS / network policy between
 services; IP allowlists only as a *secondary* control, never primary.
 
