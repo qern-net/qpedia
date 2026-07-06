@@ -2,7 +2,7 @@
 //! tenants; the claimed job carries its tenant_id, which the handler
 //! uses to scope every subsequent query.
 
-use crate::PgStore;
+use crate::{with_db_span, DbSystem, PgStore};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use qpedia_core::{
@@ -15,67 +15,73 @@ use sqlx::Row;
 
 impl PgStore {
     pub async fn enqueue(&self, tenant: &Tenant, job: &Job) -> Result<()> {
-        let mut tx = self.begin_for(tenant).await?;
-        sqlx::query(
-            "INSERT INTO jobs \
-             (tenant_id, kind, payload, state, attempt, max_attempts, next_run_at, last_error, created_at, updated_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-        )
-        .bind(tenant.as_str())
-        .bind(kind_str(&job.kind))
-        .bind(&job.payload)
-        .bind(state_str(&job.state))
-        .bind(job.attempt as i32)
-        .bind(job.max_attempts as i32)
-        .bind(job.next_run_at)
-        .bind(job.last_error.as_deref())
-        .bind(job.created_at)
-        .bind(job.updated_at)
-        .execute(&mut *tx)
+        with_db_span(DbSystem::Postgresql, "enqueue_job", async move {
+            let mut tx = self.begin_for(tenant).await?;
+            sqlx::query(
+                "INSERT INTO jobs \
+                 (tenant_id, kind, payload, state, attempt, max_attempts, next_run_at, last_error, created_at, updated_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            )
+            .bind(tenant.as_str())
+            .bind(kind_str(&job.kind))
+            .bind(&job.payload)
+            .bind(state_str(&job.state))
+            .bind(job.attempt as i32)
+            .bind(job.max_attempts as i32)
+            .bind(job.next_run_at)
+            .bind(job.last_error.as_deref())
+            .bind(job.created_at)
+            .bind(job.updated_at)
+            .execute(&mut *tx)
+            .await
+            .context("enqueue job")?;
+            tx.commit().await?;
+            Ok(())
+        })
         .await
-        .context("enqueue job")?;
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Claim the next due job across all tenants. Uses the admin pool so
     /// workers see every tenant's queue. The returned job carries
     /// tenant_id, which the handler uses to scope its work.
     pub async fn claim_next_job(&self, worker_id: &str, lease_ms: i64) -> Result<Option<Job>> {
-        let now = Utc::now();
-        let lease_until = now + chrono::Duration::milliseconds(lease_ms);
-        // Claim a queued job, OR reclaim one whose worker died mid-flight:
-        // a `running` job whose lease (`locked_until`) has expired. Without
-        // the second clause a crashed/restarted worker strands its in-flight
-        // jobs in `running` forever (the lease was written but never acted
-        // on). `lease_ms` must comfortably exceed the slowest job (Marker OCR
-        // + agent) so a legitimately-running job isn't reclaimed by a second
-        // worker mid-run. Handlers are idempotent, so a reclaimed job that
-        // had partially progressed re-runs safely.
-        let row = sqlx::query(
-            "UPDATE jobs SET \
-                 state = 'running', \
-                 locked_by = $1, \
-                 locked_until = $2, \
-                 attempt = attempt + 1, \
-                 updated_at = $3 \
-             WHERE id = ( \
-                 SELECT id FROM jobs \
-                 WHERE (state = 'queued' AND next_run_at <= $3) \
-                    OR (state = 'running' AND locked_until < $3) \
-                 ORDER BY next_run_at ASC \
-                 FOR UPDATE SKIP LOCKED LIMIT 1 \
-             ) \
-             RETURNING id, tenant_id, kind, payload, state, attempt, max_attempts, \
-                       next_run_at, locked_by, locked_until, last_error, created_at, updated_at",
-        )
-        .bind(worker_id)
-        .bind(lease_until)
-        .bind(now)
-        .fetch_optional(self.pool())
+        with_db_span(DbSystem::Postgresql, "claim_next_job", async move {
+            let now = Utc::now();
+            let lease_until = now + chrono::Duration::milliseconds(lease_ms);
+            // Claim a queued job, OR reclaim one whose worker died mid-flight:
+            // a `running` job whose lease (`locked_until`) has expired. Without
+            // the second clause a crashed/restarted worker strands its in-flight
+            // jobs in `running` forever (the lease was written but never acted
+            // on). `lease_ms` must comfortably exceed the slowest job (Marker OCR
+            // + agent) so a legitimately-running job isn't reclaimed by a second
+            // worker mid-run. Handlers are idempotent, so a reclaimed job that
+            // had partially progressed re-runs safely.
+            let row = sqlx::query(
+                "UPDATE jobs SET \
+                     state = 'running', \
+                     locked_by = $1, \
+                     locked_until = $2, \
+                     attempt = attempt + 1, \
+                     updated_at = $3 \
+                 WHERE id = ( \
+                     SELECT id FROM jobs \
+                     WHERE (state = 'queued' AND next_run_at <= $3) \
+                        OR (state = 'running' AND locked_until < $3) \
+                     ORDER BY next_run_at ASC \
+                     FOR UPDATE SKIP LOCKED LIMIT 1 \
+                 ) \
+                 RETURNING id, tenant_id, kind, payload, state, attempt, max_attempts, \
+                           next_run_at, locked_by, locked_until, last_error, created_at, updated_at",
+            )
+            .bind(worker_id)
+            .bind(lease_until)
+            .bind(now)
+            .fetch_optional(self.pool())
+            .await
+            .context("claim_next_job")?;
+            row.map(row_to_job).transpose()
+        })
         .await
-        .context("claim_next_job")?;
-        row.map(row_to_job).transpose()
     }
 
     pub async fn complete_job(&self, id: &JobId) -> Result<()> {
@@ -133,6 +139,29 @@ impl PgStore {
             .context("fail_job dead")?;
             Ok(true)
         }
+    }
+
+    /// Count currently-pending (`queued`) jobs grouped by kind, across all
+    /// tenants (admin pool, like [`claim_next_job`](Self::claim_next_job)).
+    ///
+    /// Drives the `jobs.queue.depth` gauge (Req 5.8): completion-time signals
+    /// (`jobs.completed`, `Job_Span`) cannot express *current* depth, so this
+    /// is sampled periodically by the queue-depth sampler. Routed through
+    /// [`with_db_span`] so the sample is itself an inspectable datastore op.
+    pub async fn pending_job_counts_by_kind(&self) -> Result<Vec<(String, i64)>> {
+        with_db_span(DbSystem::Postgresql, "pending_job_counts_by_kind", async move {
+            let rows = sqlx::query(
+                "SELECT kind, count(*)::bigint AS n FROM jobs WHERE state = 'queued' GROUP BY kind",
+            )
+            .fetch_all(self.pool())
+            .await
+            .context("pending_job_counts_by_kind")?;
+            Ok(rows
+                .iter()
+                .map(|r| (r.get::<String, _>("kind"), r.get::<i64, _>("n")))
+                .collect())
+        })
+        .await
     }
 
     /// Snapshot of the job queue for the tenant: counts by state, the

@@ -6,7 +6,17 @@ use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
 use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
 use qpedia_store::blob::{BlobKind, BlobStorage};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
+
+/// Whether a single pipeline step advanced the source (so the loop should
+/// re-evaluate) or reached a point where this job tick is finished.
+enum Step {
+    /// The step did work; re-read status and continue while it keeps advancing.
+    Continue,
+    /// Terminal for this tick (Done, Tainted, unsupported, no-LLM, or a no-op
+    /// status) — return `Ok(())` immediately.
+    Stop,
+}
 
 pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
     loop {
@@ -19,49 +29,21 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
         info!(id = %source_id, tenant = %src.tenant, status = ?src.status, "ingest tick");
 
-        match src.status {
-            SourceStatus::Pending | SourceStatus::Extracting | SourceStatus::Failed => {
-                if super::archive::is_archive_mime(&src.mime) {
-                    // A zip isn't a document — expand it into child sources.
-                    super::archive::expand(ctx, tenant, source_id, &src).await?;
-                } else {
-                    extract_phase(ctx, tenant, source_id, &src.mime, &src.filename).await?;
-                }
-            }
-            SourceStatus::Extracted | SourceStatus::Classifying => {
-                if ctx.llm.is_some() {
-                    classify::run(ctx, tenant, source_id).await?;
-                } else {
-                    info!(id = %source_id, "no LLM configured — marking Tainted at Extracted");
-                    ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
-                    ctx.db.write_audit(tenant, "qpedia-bot", "source.tainted", Some(source_id.as_str()),
-                        Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "extracted"}))).await?;
-                    return Ok(());
-                }
-            }
-            SourceStatus::Classified | SourceStatus::AgentDistilling => {
-                if ctx.llm.is_some() {
-                    distill::run(ctx, tenant, source_id).await?;
-                } else {
-                    info!(id = %source_id, "no LLM configured — marking Tainted at Classified");
-                    ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
-                    ctx.db.write_audit(tenant, "qpedia-bot", "source.tainted", Some(source_id.as_str()),
-                        Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "classified"}))).await?;
-                    return Ok(());
-                }
-            }
-            SourceStatus::Committed | SourceStatus::Embedding => {
-                embed::run(ctx, tenant, source_id).await?;
-            }
-            SourceStatus::Done => {
-                info!(id = %source_id, "ingest reached terminus (Done)");
-                return Ok(());
-            }
-            other => {
-                warn!(id = %source_id, status = ?other, "ingest no-op for status");
-                return Ok(());
-            }
-        }
+        // One span per source-status transition, as a child of the active
+        // `Job_Span` (Req 5.4). It records the originating status now and the
+        // resulting status once the step completes; `otel.name` gives the OTel
+        // span a stable, status-derived name.
+        let span = tracing::info_span!(
+            "Pipeline_Stage",
+            otel.name = %format!("stage {before:?}"),
+            "source.id" = %source_id,
+            "source.status.from" = ?before,
+            "source.status.to" = tracing::field::Empty,
+        );
+
+        let step = step_once(ctx, tenant, source_id, &src)
+            .instrument(span.clone())
+            .await?;
 
         let after = ctx
             .db
@@ -69,10 +51,73 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
             .await?
             .map(|s| s.status)
             .unwrap_or(before);
-        if std::mem::discriminant(&after) == std::mem::discriminant(&before) {
-            return Ok(());
+        span.record("source.status.to", tracing::field::debug(after));
+
+        match step {
+            Step::Stop => return Ok(()),
+            Step::Continue => {
+                if std::mem::discriminant(&after) == std::mem::discriminant(&before) {
+                    return Ok(());
+                }
+            }
         }
     }
+}
+
+/// Execute exactly one pipeline step for `src`'s current status. Returns
+/// [`Step::Stop`] for terminal/no-op statuses (Done, Tainted-on-no-LLM,
+/// unsupported type, unknown status) and [`Step::Continue`] when it performed
+/// work that may advance the source to the next status.
+async fn step_once(
+    ctx: &IngestContext,
+    tenant: &Tenant,
+    source_id: &SourceId,
+    src: &qpedia_core::source::Source,
+) -> Result<Step> {
+    match src.status {
+        SourceStatus::Pending | SourceStatus::Extracting | SourceStatus::Failed => {
+            if super::archive::is_archive_mime(&src.mime) {
+                // A zip isn't a document — expand it into child sources.
+                super::archive::expand(ctx, tenant, source_id, src).await?;
+            } else {
+                extract_phase(ctx, tenant, source_id, &src.mime, &src.filename).await?;
+            }
+        }
+        SourceStatus::Extracted | SourceStatus::Classifying => {
+            if ctx.llm.is_some() {
+                classify::run(ctx, tenant, source_id).await?;
+            } else {
+                info!(id = %source_id, "no LLM configured — marking Tainted at Extracted");
+                ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
+                ctx.db.write_audit(tenant, "qpedia-bot", "source.tainted", Some(source_id.as_str()),
+                    Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "extracted"}))).await?;
+                return Ok(Step::Stop);
+            }
+        }
+        SourceStatus::Classified | SourceStatus::AgentDistilling => {
+            if ctx.llm.is_some() {
+                distill::run(ctx, tenant, source_id).await?;
+            } else {
+                info!(id = %source_id, "no LLM configured — marking Tainted at Classified");
+                ctx.db.update_status(tenant, source_id, SourceStatus::Tainted).await?;
+                ctx.db.write_audit(tenant, "qpedia-bot", "source.tainted", Some(source_id.as_str()),
+                    Some(&serde_json::json!({"reason": "no LLM configured", "stopped_at": "classified"}))).await?;
+                return Ok(Step::Stop);
+            }
+        }
+        SourceStatus::Committed | SourceStatus::Embedding => {
+            embed::run(ctx, tenant, source_id).await?;
+        }
+        SourceStatus::Done => {
+            info!(id = %source_id, "ingest reached terminus (Done)");
+            return Ok(Step::Stop);
+        }
+        other => {
+            warn!(id = %source_id, status = ?other, "ingest no-op for status");
+            return Ok(Step::Stop);
+        }
+    }
+    Ok(Step::Continue)
 }
 
 async fn extract_phase(

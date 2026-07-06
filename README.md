@@ -5,12 +5,12 @@ An LLM-powered knowledge base that turns uploaded documents into a searchable, l
 Upload a PDF, Word doc, or HTML page. Qpedia extracts the text, classifies it, runs an agentic loop to write or update wiki pages, and makes the knowledge available through hybrid search and a chat interface.
 
 > ### ☁️ Don't want to run it yourself?
-> **[Qpedia Cloud → qpedia.qern.net](https://qpedia.qern.net)** is the fully managed, hosted version by [Qern](https://qern.net).
-> Connect your Google Drive, SharePoint, or Confluence and get a living, AI-maintained wiki in minutes — no servers, no Postgres to babysit, enterprise SSO and premium connectors included. Free to start. See [pricing](https://qpedia.qern.net/pricing).
+> **[Qpedia Cloud → qpedia.cloud](https://qpedia.cloud)** is the fully managed, hosted version.
+> Connect your Google Drive, SharePoint, or Confluence and get a living, AI-maintained wiki in minutes — no servers, no Postgres to babysit, enterprise SSO and premium connectors included. Free to start. See [pricing](https://qpedia.cloud/pricing).
 >
 > This repository is the open-source **engine** behind it (Apache-2.0). Self-host it, or let us run it for you.
 
-**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
+**Docs:** [CHANGELOG](CHANGELOG.md) · [Architecture](DESIGN.md) · [Agents](AGENTS.md) · [Platform integration & SDK](INTEGRATION.md) · [Project wiki](https://github.com/qern-net/qpedia/wiki)
 
 ---
 
@@ -39,12 +39,29 @@ Volumes: bind-mounts `./data/wiki`, `./data/raw`, `./data/models`; named volume 
 
 ---
 
+## Qpedia as a foundational layer
+
+Qpedia is not only an end-user product — it is the **foundational knowledge layer that other AI applications build on**. It owns the hard, amortizable parts of a retrieval system (ingestion, extraction, classification, the LLM-authored wiki, embeddings, hybrid search, and RAG chat) so an application on top doesn't have to reimplement any of it.
+
+**Integration is a first-class capability.** As of v1.3.0, building on Qpedia is a supported, stable path: a versioned `/api/v1` contract ([`qpedia-openapi.yaml`](qpedia-openapi.yaml), frozen across the 1.x line) plus the [`ExternalAuthProvider`](crates/qpedia-api/src/auth.rs) extension point for machine-to-machine auth. An external app authenticates non-interactively and is tenant-scoped by RLS exactly like a user session — no schema coupling, no forking.
+
+External applications integrate over the stable **`/api/v1` HTTP boundary** — never by reaching into Qpedia's database. The contract is versioned in this repo at [`qpedia-openapi.yaml`](qpedia-openapi.yaml) (OpenAPI 3.1); it is the canonical, sanctioned surface every consumer codes against. The platform pattern is:
+
+- **API boundary, not schema coupling.** Consumers call `/api/v1` (ingest → search → chat). They run their own Postgres *schema* in the same instance (e.g. the RFP app owns `rfp`) but never read Qpedia's tables via cross-schema SQL.
+- **Tenancy lines up.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and Postgres RLS enforces isolation end-to-end.
+- **Machine-to-machine auth.** External calls authenticate via an [`ExternalAuthProvider`](crates/qpedia-api/src/auth.rs) registered by the deployment overlay. The provider returns a `User` with tenant + groups, so RLS scoping is identical to a user session. The OSS engine ships no concrete implementation; overlays supply the scheme their consumers need (service tokens, OAuth 2 client-credentials JWTs, etc.).
+- **Graceful degradation.** A consumer that loses its Qpedia connection keeps operating on its own data and re-syncs later; Qpedia is an additive layer, not a hard runtime dependency.
+
+> Building a new application on Qpedia? Start with the **[platform integration & SDK guide](INTEGRATION.md)**, then the contract at `qpedia-openapi.yaml` and the platform notes in [`DESIGN.md`](DESIGN.md).
+
+---
+
 ## Quick Start
 
 This repository is the **engine** — the Rust workspace. Production
 container images, `docker-compose.yml`, and the SvelteKit frontend are
 maintained in the deployment overlay; for a one-command hosted instance
-use **[Qpedia Cloud](https://qpedia.qern.net)**.
+use **[Qpedia Cloud](https://qpedia.cloud)**.
 
 To run the engine from source you need a recent Rust toolchain and a
 PostgreSQL 17 instance with the `pgvector` extension.
@@ -57,14 +74,11 @@ docker compose up -d        # starts Postgres 17 + pgvector (the only dependency
 cargo run -p qpedia-api
 ```
 
-The API comes up on the address in `QPEDIA_BIND` (default
-`0.0.0.0:8080`). In dev mode (no Firebase configured) every request is the
-`dev:admin` user — no login required. With no SPA build present the server
-runs API-only; point `QPEDIA_WEB_DIR` at a built frontend to serve a UI.
-
-The bundled `docker-compose.yml` brings up **only** Postgres — this repo is
-the engine, with no app image of its own. The production image, frontend,
-and full multi-container stack live in the deployment overlay.
+The bundled `docker-compose.yml` brings up **only** Postgres. The API comes
+up on the address in `QPEDIA_BIND` (default `0.0.0.0:8080`). In dev mode (no
+Firebase configured) every request is the `dev:admin` user — no login
+required. With no SPA build present the server runs API-only; point
+`QPEDIA_WEB_DIR` at a built frontend to serve a UI.
 
 ---
 
@@ -74,15 +88,25 @@ All config is via environment variables, loaded from `.env` by Docker Compose.
 
 ### LLM Provider
 
+**Qpedia is BYOL — bring your own LLM.** Qpedia does not ship or resell
+inference: you supply a provider key (or an OpenAI-compatible / on-prem
+endpoint) and Qpedia calls *your* account. With no provider configured,
+ingestion stops at `Extracted` (no wiki distillation). A metered, Cloud-managed
+LLM option is planned for the hosted tier but BYOL stays first-class on every
+plan. The
+validated/supported models (cloud + open-weight), reviewed each quarter, are in
+[`APPROVED-MODELS.md`](APPROVED-MODELS.md).
+
 Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to override.
 
 | Variable | Purpose |
 |---|---|
-| `QPEDIA_LLM_PROVIDER` | `anthropic` \| `openai` \| `openrouter` \| `openai-compatible` |
+| `QPEDIA_LLM_PROVIDER` | `anthropic` \| `openai` \| `openrouter` \| `gemini` \| `openai-compatible` |
 | `QPEDIA_LLM_MODEL` | Override the per-provider default model |
 | `ANTHROPIC_API_KEY` | Anthropic direct (default: `claude-haiku-4-5`) |
-| `OPENAI_API_KEY` | OpenAI direct (default: `gpt-4.1-mini`) |
+| `OPENAI_API_KEY` | OpenAI direct (default: `gpt-5.4-mini`) |
 | `OPENROUTER_API_KEY` | OpenRouter (default: `anthropic/claude-haiku-4-5`) |
+| `GEMINI_API_KEY` | Google Gemini, native via its OpenAI-compatible endpoint (default: `gemini-3.5-flash`) |
 | `QPEDIA_LLM_BASE_URL` | Base URL for OpenAI-compatible endpoint (vLLM, Ollama, LM Studio) |
 | `QPEDIA_LLM_API_KEY` | API key for OpenAI-compatible endpoint |
 
@@ -123,6 +147,7 @@ Auto-detected from whichever API key is present. Set `QPEDIA_LLM_PROVIDER` to ov
 | `RUST_LOG` | `qpedia=info,tower_http=info` | Log filter |
 | `QPEDIA_MARKER_URL` | — | Optional high-fidelity PDF sidecar (see below) |
 | `QPEDIA_RRF_K` | `60` | Hybrid-search rank-decay constant for Reciprocal Rank Fusion. Lower (≈20–30) sharpens precision; higher (≈80–100) favors recall/consensus. Clamped to `1..=1000`. |
+| `QPEDIA_QUEUE_DEPTH_SAMPLE_SECS` | `15` | How often (seconds) to sample pending-job counts and record the `jobs.queue.depth` OTel gauge. Set to 0 or omit to use the default. |
 
 ---
 

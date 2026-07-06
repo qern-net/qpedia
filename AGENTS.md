@@ -239,3 +239,32 @@ All agents maintain a full message history across turns (user → assistant → 
 5. Return a typed result (e.g. `DiffBundle`, `Vec<Contradiction>`) — not raw LLM text.
 6. Wire into a job handler in `qpedia-ingest/src/handlers/` or a new crate.
 7. Ensure failures mark the source/job as failed (not silently swallowed).
+
+---
+
+## API Contract & Versioning Rules
+
+These are hard rules for anyone (human or agent) changing this repo.
+
+### Versioning
+
+- **Product/release version** lives in the workspace `Cargo.toml`
+  (`[workspace.package] version`) and is what `GET /api/v1/version` and the
+  telemetry `service.version` attribute report. Bump it on every release and
+  tag the commit `vX.Y.Z`. Keep the `CHANGELOG.md` and `APPROVED-MODELS.md`
+  changelog stamps in step with it.
+
+### OpenAPI contract (`qpedia-openapi.yaml`) — FROZEN within a major
+
+- The contract's `info.version` tracks the engine **MAJOR only**. While the
+  engine is on `1.x`, the contract is **`v1` and frozen**.
+- **Do not edit `qpedia-openapi.yaml` within the 1.x line.** No
+  additive endpoints, no field tweaks, no wording changes — the `/api/v1`
+  boundary is a stability promise external consumers code against. The next
+  edit to this file happens only when the engine cuts a **2.x major**, and then
+  it becomes the `v2` contract.
+- Additive `/api/v1` behavior shipped within `1.x` is described in the engine
+  source (`crates/qpedia-api/src/routes.rs`) and the `CHANGELOG`, not in the
+  contract file.
+- A `PostFileSave` hook (`.kiro/hooks/openapi-v1-freeze.json`) warns on any
+  save to the contract as a backstop for this rule.

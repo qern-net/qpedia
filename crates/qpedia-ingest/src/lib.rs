@@ -5,6 +5,7 @@ pub mod agent;
 pub mod handlers;
 pub mod pipeline;
 pub mod runner;
+pub mod telemetry;
 pub mod validator;
 
 pub use pipeline::IngestPipeline;
@@ -13,3 +14,4 @@ pub use runner::{
     IngestContext, IngestPayload, JobRunner, LintPayload, ReembedPayload, RemovePayload,
     SyncPayload,
 };
+pub use telemetry::{extractor, inject_current, TraceCarrier};

@@ -19,11 +19,27 @@ the [project wiki](https://github.com/qern-net/qpedia/wiki) for guides._
 - File-explorer folder/upload UX and chat-over-wiki UX, equally weighted.
 - Fits in **two containers**: `app` + `postgres` (pgvector). Marker is an optional third.
 - All heavy lifting hidden from users.
+- **Be a platform foundation** — a stable `/api/v1` that other AI applications build on, so they reuse Qpedia's ingestion / embeddings / wiki / RAG instead of reimplementing them.
 
 **Non-Goals (still)**
 - Real-time collaborative editing of wiki pages.
 - Federated search across external corpora.
 - Mobile app.
+- Bespoke per-consumer endpoints — the external surface stays the small, versioned `/api/v1` in `qpedia-openapi.yaml`; application-specific logic lives in the consuming app, not the engine.
+
+---
+
+## 0.5 Qpedia as a platform foundation
+
+Qpedia is consumed in two ways: directly by end users, and as the **foundational knowledge layer beneath other AI applications** (qpedia-rfp, qcodia). The second mode is a first-class design constraint, not an afterthought, and it has a deliberate shape:
+
+- **One integration surface.** External apps reach Qpedia only through the versioned `/api/v1` HTTP contract ([`qpedia-openapi.yaml`](qpedia-openapi.yaml)) — ingest, hybrid search, RAG chat. The Rust handlers are the source of truth; the contract is kept in lockstep and a change to either is a coordinated PR.
+- **Shared instance, isolated schemas.** A consumer may run its own Postgres schema in the same instance (e.g. `rfp`) for its own structured data, but **never** reads Qpedia's tables via cross-schema SQL. The only path to Qpedia's knowledge is the API. This keeps the engine free to evolve its schema without breaking consumers.
+- **Tenant = workspace, RLS end-to-end.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and every call sets `qpedia.tenant` so Postgres RLS enforces isolation regardless of which app originated the request.
+- **Machine identity carries tenant.** External apps authenticate M2M via an `ExternalAuthProvider` the deployment overlay registers (`AppBuilder::with_auth_provider`) — a service token, an OAuth 2 client-credentials JWT, or whatever scheme that deployment needs. The engine itself ships no concrete scheme; it only requires that whatever the overlay returns carries tenant + groups, so an external call is scoped by RLS identically to a user session. This is why a bare API key was rejected: it carries no identity.
+- **Additive, degradable dependency.** A consumer that can't reach Qpedia keeps serving its own data and re-syncs later. Qpedia is a layer apps lean on, never a hard runtime coupling.
+
+The payoff: the expensive, reusable retrieval machinery is built and operated once, and each new application on top is thin.
 
 ---
 
@@ -589,7 +605,7 @@ QPEDIA_FIREBASE_PROJECT_ID=qpedia-acme         # enable Firebase login (optional
 # QPEDIA_OIDC_ISSUER=https://...
 # QPEDIA_OIDC_CLIENT_ID=...
 QPEDIA_WIKI_AUTHOR_NAME=qpedia-bot
-QPEDIA_WIKI_AUTHOR_EMAIL=bot@qpedia.local
+QPEDIA_WIKI_AUTHOR_EMAIL=bot@qpedia.cloud
 ```
 
 ### 13.3 On-prem variant
@@ -607,8 +623,8 @@ Swap `QPEDIA_LLM` to point at internal vLLM; drop `ANTHROPIC_API_KEY`. That's it
 
 ## 14. Observability
 
-- `tracing` with OTLP exporter. Every ingest has a root span; every LLM call a child span with model/tokens.
-- `/admin/metrics` Prometheus endpoint.
+- `tracing` with an OTLP exporter (traces, metrics, logs). Every ingest has a root span; every LLM call a child span with model/tokens.
+- The engine ships no bundled collector, dashboards, or UI — it only exports OTLP to a shared endpoint the deployment configures (`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS`), e.g. Grafana Cloud's OTLP gateway or a self-run collector. Unset means console-only logging.
 - Structured audit log (Postgres `audit` table) + human-readable `wiki/log.md` (LLM-facing).
 
 ---

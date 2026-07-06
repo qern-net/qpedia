@@ -13,17 +13,21 @@ pub mod events;
 pub mod folder_acls;
 pub mod folders;
 pub mod jobs;
+pub mod llm_config;
 pub mod oauth_grants;
 pub mod oidc_pending;
 pub mod sessions;
 pub mod slug;
 pub mod sources;
+pub mod telemetry;
 pub mod tenants;
 pub mod wiki;
 pub mod workspaces;
 
 pub use events::{EventSink, NoopEventSink, NoopTenantHook, TenantHook};
+pub use telemetry::{with_db_span, DbErrorCategory, DbErrorClassify, DbSystem};
 pub use folders::FolderRow;
+pub use llm_config::LlmConfigRow;
 pub use oauth_grants::OAuthGrant;
 pub use oidc_pending::PendingLogin;
 pub use slug::{slugify, slugify_folder, unique_connector_name, unique_source_slug, unique_wiki_path};
@@ -83,6 +87,15 @@ impl PgStore {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Lightweight connectivity probe for the readiness/health endpoint.
+    ///
+    /// Runs `SELECT 1` against the pool and returns the underlying
+    /// [`sqlx::Error`] on failure so the caller can render a cause string.
+    /// The caller is responsible for bounding this with a timeout.
+    pub async fn ping(&self) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query("SELECT 1").execute(&self.pool).await.map(|_| ())
     }
 
     /// Register an audit sink. Every subsequent successful

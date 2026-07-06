@@ -41,6 +41,94 @@ pub(crate) async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Readiness / health endpoint (`GET /api/v1/health`, design §6).
+///
+/// Unlike [`healthz`] (a fast liveness probe), this endpoint actively checks
+/// each backing dependency. Postgres connectivity is verified with a
+/// lightweight `SELECT 1` under a 5s per-dependency timeout (Req 7.1); a
+/// timeout or error maps the dependency to [`DepStatus::Down`] with a cause
+/// string (Req 7.4). The per-dependency reports are aggregated by the pure
+/// [`crate::health::aggregate`] helper and the resulting aggregate is mapped to
+/// an HTTP status code by [`crate::health::http_status`] (`Healthy`→200,
+/// `Degraded`→503, Req 7.2/7.3). With a single dependency bounded at 5s the
+/// overall response is well within the 10s budget (Req 7.6).
+///
+/// On each check a `dependency.up` gauge (1 = up, 0 = down) is emitted, labeled
+/// by dependency name (Req 7.5). This path is excluded from `HTTP_Span`
+/// creation via [`crate::telemetry::http::EXCLUDED_PATHS`].
+pub(crate) async fn health(State(s): State<AppState>) -> Response {
+    use crate::health::{aggregate, http_status, DepReport, DepStatus};
+    use std::time::Duration;
+
+    /// Per-dependency check timeout (Req 7.1).
+    const DEP_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let mut deps: Vec<DepReport> = Vec::new();
+
+    // --- postgres: lightweight `SELECT 1` under a 5s timeout ---
+    let pg = {
+        let probe = s.ctx.db.ping();
+        match tokio::time::timeout(DEP_TIMEOUT, probe).await {
+            Ok(Ok(())) => DepReport {
+                name: "postgres".to_string(),
+                status: DepStatus::Up,
+                cause: None,
+            },
+            Ok(Err(e)) => DepReport {
+                name: "postgres".to_string(),
+                status: DepStatus::Down,
+                cause: Some(e.to_string()),
+            },
+            Err(_) => DepReport {
+                name: "postgres".to_string(),
+                status: DepStatus::Down,
+                cause: Some(format!("timed out after {}s", DEP_TIMEOUT.as_secs())),
+            },
+        }
+    };
+    deps.push(pg);
+
+    // Emit the `dependency.up` gauge (1=up, 0=down) labeled by dependency
+    // name (Req 7.5). Reuses the process-global meter installed by the
+    // telemetry pipeline; a no-op meter is used when telemetry is disabled.
+    let meter = opentelemetry::global::meter("qpedia-api");
+    let gauge = meter
+        .u64_gauge("dependency.up")
+        .with_description("Backing-dependency readiness (1 = up, 0 = down)")
+        .build();
+    for d in &deps {
+        let value = match d.status {
+            DepStatus::Up => 1u64,
+            DepStatus::Down => 0u64,
+        };
+        gauge.record(
+            value,
+            &[opentelemetry::KeyValue::new("dependency", d.name.clone())],
+        );
+    }
+
+    // Aggregate + map to HTTP status via the pure helpers (Req 7.2/7.3).
+    let agg = aggregate(&deps);
+    let code = StatusCode::from_u16(http_status(agg)).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = json!({
+        "status": match agg {
+            crate::health::Aggregate::Healthy => "healthy",
+            crate::health::Aggregate::Degraded => "degraded",
+        },
+        "dependencies": deps.iter().map(|d| json!({
+            "name": d.name,
+            "status": match d.status {
+                DepStatus::Up => "up",
+                DepStatus::Down => "down",
+            },
+            "cause": d.cause,
+        })).collect::<Vec<_>>(),
+    });
+
+    (code, Json(body)).into_response()
+}
+
 pub(crate) async fn version() -> Json<Value> {
     Json(json!({
         "name": "qpedia-api",
@@ -81,6 +169,7 @@ pub(crate) async fn auth_me(user: User) -> Json<Value> {
         "tenant": user.tenant.as_str(),
         "tenant_kind": kind,
         "is_admin": user.is_admin(),
+        "is_superadmin": crate::auth::is_superadmin_user(&user),
     }))
 }
 

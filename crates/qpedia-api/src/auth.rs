@@ -52,6 +52,59 @@ pub const SESSION_TTL_SECS: i64 = 24 * 60 * 60;
 pub struct AuthState {
     pub mode: AuthMode,
     pub firebase: Option<crate::firebase::FirebaseVerifier>,
+    /// Optional external (machine-to-machine) auth provider. Composes with
+    /// any `mode` — checked before the session-cookie path on every request.
+    /// `None` unless an overlay registers one via
+    /// [`crate::AppBuilder::with_auth_provider`]. The bare OSS engine ships
+    /// no concrete implementation; see [`ExternalAuthProvider`] docs.
+    pub external: Option<Arc<dyn ExternalAuthProvider>>,
+}
+
+/// Extension point for machine-to-machine authentication.
+///
+/// The engine's built-in auth is session-cookie based (human login via OIDC
+/// or Firebase). External applications calling `/api/v1` directly need a
+/// non-interactive credential (a static service token, an OAuth 2
+/// client-credentials JWT, etc.) — but the *shape* of that credential is a
+/// deployment concern, not an engine concern. An overlay (e.g. `qpedia-pvt`)
+/// implements this trait for whatever scheme its external consumers need and
+/// registers it with [`crate::AppBuilder::with_auth_provider`]; the `User`
+/// extractor calls it on every request, before falling back to the session
+/// path. Returning `None` falls through to the normal auth flow.
+///
+/// A returned [`User`] must carry a resolved `tenant` and `groups` exactly
+/// like a session-derived user, so RLS/ACL scoping is identical regardless
+/// of which path authenticated the request.
+///
+/// # Caching
+///
+/// `authenticate` runs on the hot path — once per request, before the
+/// session lookup — so an implementation that verifies a credential on
+/// every call will add that cost to every request. Verifying a JWT the
+/// naive way means fetching the issuer JWKS and (for opaque tokens) a
+/// round-trip to an introspection endpoint; doing that per request is a
+/// latency and rate-limit hazard. Implementations should cache:
+///
+/// - **Signing keys / JWKS** — fetch once and refresh on a TTL (respect the
+///   `Cache-Control`/`max-age` from the JWKS endpoint; re-fetch on an
+///   unknown `kid`). This is the single biggest win and is safe to share
+///   process-wide.
+/// - **Verification results** — key a short-TTL cache on a hash of the raw
+///   bearer token (never the plaintext) → the resolved `User`. A TTL of a
+///   few minutes, bounded well under the token's own expiry, keeps the fast
+///   path to a map lookup while still honouring revocation within the TTL.
+///   Bound the cache size (e.g. an LRU) so a spray of distinct tokens can't
+///   grow it without limit.
+/// - **Negative results** — briefly cache "not for me / invalid" so a stream
+///   of unauthenticated or malformed requests can't hammer the verifier.
+///
+/// Keep entries keyed and scoped per credential; never let one tenant's
+/// cached identity satisfy another's token. The engine intentionally holds
+/// the provider behind an `Arc`, so a single cache instance is shared across
+/// all requests — build it once in the constructor, not per call.
+#[axum::async_trait]
+pub trait ExternalAuthProvider: Send + Sync {
+    async fn authenticate(&self, headers: &HeaderMap) -> Option<User>;
 }
 
 #[derive(Clone)]
@@ -100,6 +153,11 @@ impl AuthState {
                 crate::firebase::FirebaseVerifier::new(pid)
             });
 
+        // External (M2M) auth is registered later via
+        // `AppBuilder::with_auth_provider`, not built from env here — the
+        // engine has no built-in scheme, only the extension point.
+        let external = None;
+
         // Validate an explicit mode up front.
         if let Some(m) = mode.as_deref() {
             if !matches!(m, "dev" | "oidc" | "firebase") {
@@ -113,7 +171,7 @@ impl AuthState {
         //    useful for exercising the login UI without enforcement).
         if mode.as_deref() == Some("dev") {
             info!("auth: dev mode (anonymous admin)");
-            return Ok(Self { mode: AuthMode::Dev, firebase });
+            return Ok(Self { mode: AuthMode::Dev, firebase, external });
         }
 
         // 2. Session/Firebase mode: requested explicitly, or implied by a
@@ -122,7 +180,7 @@ impl AuthState {
             || (issuer.is_none() && firebase.is_some())
         {
             info!("auth: session mode (Firebase login enforced)");
-            return Ok(Self { mode: AuthMode::Session, firebase });
+            return Ok(Self { mode: AuthMode::Session, firebase, external });
         }
 
         match (mode.as_deref(), issuer) {
@@ -131,7 +189,7 @@ impl AuthState {
             }
             (_, None) => {
                 info!("auth: dev mode (anonymous admin)");
-                Ok(Self { mode: AuthMode::Dev, firebase })
+                Ok(Self { mode: AuthMode::Dev, firebase, external })
             }
             (_, Some(issuer)) => {
                 let client_id = std::env::var("QPEDIA_OIDC_CLIENT_ID")
@@ -173,6 +231,7 @@ impl AuthState {
                         end_session_endpoint,
                     })),
                     firebase,
+                    external,
                 })
             }
         }
@@ -267,6 +326,24 @@ pub fn clear_session_cookie() -> HeaderValue {
     .expect("valid cookie")
 }
 
+/// Extract a bearer token from the `Authorization` header (scheme is
+/// case-insensitive). Shared helper for [`ExternalAuthProvider`] impls.
+pub fn read_bearer(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let rest = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))?;
+    let token = rest.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 pub fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
@@ -292,6 +369,16 @@ pub fn random_token(bytes: usize) -> String {
 pub fn augment_admin_by_email(email: Option<&str>, groups: Vec<String>) -> Vec<String> {
     let allow = std::env::var("QPEDIA_ADMIN_EMAILS").unwrap_or_default();
     augment_admin_with_allow(email, groups, &allow)
+}
+
+/// Whether `user`'s verified email is in the `QPEDIA_ADMIN_EMAILS` platform
+/// operator allowlist (independent of their session `groups`). Used to
+/// surface a platform-operator flag on `/api/v1/auth/me`. Total; never
+/// panics.
+pub fn is_superadmin_user(user: &User) -> bool {
+    augment_admin_by_email(user.email.as_deref(), Vec::new())
+        .iter()
+        .any(|g| g == "admin")
 }
 
 /// Pure core of [`augment_admin_by_email`] — the allowlist is passed in so
@@ -346,8 +433,21 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let ext = AuthExtractorState::from_ref(state);
-        match &ext.auth.mode {
-            AuthMode::Dev => Ok(User::dev_admin()),
+
+        // Machine-to-machine: an overlay-registered `ExternalAuthProvider`
+        // (see `AppBuilder::with_auth_provider`) authenticates in any mode
+        // and resolves its own tenant + groups, so RLS scoping is identical
+        // to a user session. Falls through to the session path when absent
+        // or when the provider itself returns `None`.
+        if let Some(provider) = &ext.auth.external {
+            if let Some(user) = provider.authenticate(&parts.headers).await {
+                tracing::Span::current().record("tenant", user.tenant.as_str());
+                return Ok(user);
+            }
+        }
+
+        let user = match &ext.auth.mode {
+            AuthMode::Dev => User::dev_admin(),
             // Both real modes are session-cookie gated; OIDC and Firebase
             // differ only in how the session is *minted*, not read.
             AuthMode::Oidc(_) | AuthMode::Session => {
@@ -359,15 +459,26 @@ where
                     .await
                     .map_err(|_| AuthRejection::Unauthorized)?
                     .ok_or(AuthRejection::Unauthorized)?;
-                Ok(User {
+                User {
                     id: session.user_id,
                     email: session.email,
                     name: session.name,
                     groups: session.groups,
                     tenant: session.tenant,
-                })
+                }
             }
-        }
+        };
+
+        // Now that the request is authenticated and the tenant is resolved,
+        // record it on the active `HTTP_Span` so the HTTP-backed views are
+        // per-tenant scopable (Req 4.9). The `tenant` field is declared
+        // (Empty) on the span by the HTTP tracing layer; recording here is a
+        // no-op when no span is active (excluded paths) or telemetry is
+        // disabled. Unauthenticated requests never reach this line, so the
+        // attribute is simply left unset for them (Req 4.10).
+        tracing::Span::current().record("tenant", user.tenant.as_str());
+
+        Ok(user)
     }
 }
 

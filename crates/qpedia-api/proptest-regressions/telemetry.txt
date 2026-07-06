@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0d3ebc15f90185e3d7490c6a2d23f892b893efc65fea9a6c0440994e2141d1f3 # shrinks to enabled = None, endpoint = None, rust_log = Some("\u{b}㐀="), deployment_env = None

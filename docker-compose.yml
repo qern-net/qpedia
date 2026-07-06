@@ -4,15 +4,21 @@
 # production image + frontend live in the deployment overlay, and the
 # managed product is Qpedia Cloud — https://qpedia.qern.net).
 #
-# What this file gives you is the one external dependency the engine needs
-# to run locally: PostgreSQL 17 with pgvector. Bring it up, then run the
-# API from source against it:
+# What this file gives you is the one external dependency the engine
+# needs to run locally:
+#   * PostgreSQL 17 with pgvector  — jobs, sources, sessions, ACLs, hybrid index
+#
+# Bring it up, then run the API from source against it:
 #
 #   docker compose up -d
 #   cargo run -p qpedia-api
 #
 # Credentials match .env.example's QPEDIA_DB_URL, so the defaults "just
 # work" for `cargo run` and `cargo test`.
+#
+# Telemetry: the engine exports OTLP to a collector you configure (Grafana
+# Cloud or self-run) — never a container here. Set OTEL_EXPORTER_OTLP_*
+# in .env; unset stays console-only. See .env.example.
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -32,6 +38,16 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+
+  # The qpedia-api app image lives in the deployment overlay, not this OSS
+  # repo (see header). The overlay's `app` service wires it up roughly as:
+  #
+  #   app:
+  #     # ...build/image...
+  #     depends_on: { postgres: { condition: service_healthy } }
+  #     environment:
+  #       OTEL_EXPORTER_OTLP_ENDPOINT: https://otlp-gateway-<zone>.grafana.net/otlp
+  #       OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Basic <base64(instance_id:api_token)>"
 
 volumes:
   postgres-data:

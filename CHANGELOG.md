@@ -4,6 +4,76 @@ All notable changes to **qpedia** (the OSS engine). Format: [Keep a
 Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.3.0] — 2026-07-05
+
+**Integration-ready.** This release makes Qpedia a platform other applications
+build on: a versioned `/api/v1` contract (`qpedia-openapi.yaml`, frozen
+across the 1.x line) plus the new `ExternalAuthProvider` extension point for
+machine-to-machine auth — an external app authenticates and is tenant-scoped by
+RLS exactly like a user session.
+
+### Added
+- **Native Google Gemini provider.** `QPEDIA_LLM_PROVIDER=gemini` + `GEMINI_API_KEY`
+  talks directly to Google via Gemini's OpenAI-compatible endpoint (no OpenRouter
+  hop), reusing the existing transport. Approved models moved from `google/gemini-*`
+  (OpenRouter) to native `gemini-*`.
+- **Per-tenant LLM configuration (BYO model + BYO credentials).** New
+  RLS-isolated `llm_config` table (migration 0008) with the BYO API key
+  encrypted at rest (pgcrypto, `QPEDIA_SECRET_KEY`); `PgStore::{get,resolve,
+  set,clear}_llm_config`. A machine-readable approved-models registry
+  (`qpedia-llm::models`) and `provider_from_config` for per-tenant provider
+  resolution. Fully additive — no row ⇒ deployment
+  provider (BYOL at deploy level unchanged).
+- **`ExternalAuthProvider` extension point.** A new trait
+  (`qpedia_api::auth::ExternalAuthProvider`) plus `AppBuilder::with_auth_provider`
+  let a deployment overlay register a machine-to-machine auth scheme (service
+  tokens, OAuth 2 client-credentials JWTs, etc.); the `User` extractor checks
+  it before falling back to the session-cookie path. The engine ships no
+  concrete scheme — see `INTEGRATION.md` §4. (Concrete M2M
+  implementations, including the ones qpedia.cloud runs, live in the
+  `qpedia-pvt` overlay, not here — see `OPEN-CORE.md` §2.)
+- **OpenTelemetry observability (OTLP export-only).** The engine emits traces,
+  metrics, and logs throughout: an `HTTP_Span` per request (continuing the
+  inbound W3C trace context), per-job `Job_Span`s linked to the originating
+  request through the job payload, datastore spans, and metrics for job
+  outcomes (`jobs.completed`), queue depth (`jobs.queue.depth`), and
+  dependency health (`dependency.up`). All three signals export over OTLP to a
+  deployment-configured endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT` /
+  `OTEL_EXPORTER_OTLP_HEADERS`); unset means console-only. A new
+  `GET /api/v1/health` readiness endpoint probes backing dependencies. No
+  bundled backend — the collector, dashboards, and alerting are a deployment
+  concern against whatever OTLP backend you point at (e.g. Grafana Cloud's
+  OTLP gateway).
+
+### Changed
+- **Engine version bumped to `1.3.0`.** `GET /api/v1/version` and the telemetry
+  `service.version` resource attribute now report `1.3.0`; the crate version had
+  stayed `0.1.0` across prior releases. The `/api/v1` OpenAPI contract stays at
+  major `v1` and is frozen until a 2.x major (see `AGENTS.md`).
+- **Default OpenAI model re-pinned** to `gpt-5.4-mini` (was `gpt-4.1-mini`),
+  tracking the Q2 2026 approved-models list. BYOL is unaffected — set
+  `QPEDIA_LLM_MODEL` to override. See [`APPROVED-MODELS.md`](APPROVED-MODELS.md).
+- **Q3 2026 approved-models review.** Added `claude-sonnet-5` (drops
+  `claude-sonnet-4-6`), `gemini-3.1-pro` (drops `gemini-3-pro`); promoted
+  `gpt-5.5-pro` and `GLM-5.2`/`Gemma 4` (open-weight) to ✅; new 🧪 trials
+  `Qwen 3.6-27B`, `MiniMax M3`, `Kimi K2.6`. No per-provider default changed.
+  See [`APPROVED-MODELS.md`](APPROVED-MODELS.md#changelog) for the full diff.
+
+### Security
+- **Dependency refresh (`cargo update`).** Pulls `quinn-proto` to `>=0.11.16`
+  (fixes [RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185),
+  remote memory exhaustion) and `anyhow` to `1.0.103` (fixes
+  [RUSTSEC-2026-0190](https://rustsec.org/advisories/RUSTSEC-2026-0190),
+  `Error::downcast_mut` unsoundness), and prunes dead `quinn`/`wit-bindgen`
+  lockfile entries. The remaining `cargo audit` finding —
+  [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (`rsa`
+  Marvin timing side-channel, via `openidconnect`) — is **not exploitable
+  here**: `rsa` is used only for RS256 ID-token *verification* (public-key
+  operations), never private-key decrypt/sign, and no fixed upstream release
+  exists.
+
 ## [1.2.0] — 2026-06-02
 
 The consolidated public release of the engine: Postgres + pgvector
