@@ -31,10 +31,10 @@ the [project wiki](https://github.com/qern-net/qpedia/wiki) for guides._
 
 ## 0.5 Qpedia as a platform foundation
 
-Qpedia is consumed in two ways: directly by end users, and as the **foundational knowledge layer beneath other AI applications** (qpedia-rfp, qcodia). The second mode is a first-class design constraint, not an afterthought, and it has a deliberate shape:
+Qpedia is consumed in two ways: directly by end users, and as the **foundational knowledge layer beneath other AI applications**. The second mode is a first-class design constraint, not an afterthought, and it has a deliberate shape:
 
 - **One integration surface.** External apps reach Qpedia only through the versioned `/api/v1` HTTP contract ([`qpedia-openapi.yaml`](qpedia-openapi.yaml)) — ingest, hybrid search, RAG chat. The Rust handlers are the source of truth; the contract is kept in lockstep and a change to either is a coordinated PR.
-- **Shared instance, isolated schemas.** A consumer may run its own Postgres schema in the same instance (e.g. `rfp`) for its own structured data, but **never** reads Qpedia's tables via cross-schema SQL. The only path to Qpedia's knowledge is the API. This keeps the engine free to evolve its schema without breaking consumers.
+- **Shared instance, isolated schemas.** A consumer may run its own Postgres schema in the same instance (e.g. an `app` schema) for its own structured data, but **never** reads Qpedia's tables via cross-schema SQL. The only path to Qpedia's knowledge is the API. This keeps the engine free to evolve its schema without breaking consumers.
 - **Tenant = workspace, RLS end-to-end.** Each consumer tenant maps to a Qpedia workspace; both sides share the OIDC issuer, and every call sets `qpedia.tenant` so Postgres RLS enforces isolation regardless of which app originated the request.
 - **Machine identity carries tenant.** External apps authenticate M2M via an `ExternalAuthProvider` the deployment overlay registers (`AppBuilder::with_auth_provider`) — a service token, an OAuth 2 client-credentials JWT, or whatever scheme that deployment needs. The engine itself ships no concrete scheme; it only requires that whatever the overlay returns carries tenant + groups, so an external call is scoped by RLS identically to a user session. This is why a bare API key was rejected: it carries no identity.
 - **Additive, degradable dependency.** A consumer that can't reach Qpedia keeps serving its own data and re-syncs later. Qpedia is a layer apps lean on, never a hard runtime coupling.

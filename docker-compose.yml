@@ -2,7 +2,7 @@
 #
 # This OSS repo is the Rust engine; it has no app image of its own (the
 # production image + frontend live in the deployment overlay, and the
-# managed product is Qpedia Cloud — https://qpedia.qern.net).
+# managed product is Qpedia Cloud — https://qpedia.cloud).
 #
 # What this file gives you is the one external dependency the engine
 # needs to run locally:

@@ -43,7 +43,7 @@ coupling, not by preference.
 | Coupling | Tight: shares `AppState`, `PgStore`, the wiki/blob stores, embedder, RLS pool. | Loose: only the HTTP contract. |
 | Use when | You are extending the engine itself with first-party features (billing, SSO, admin) **or** you want to reuse the wiki/graph/embeddings primitives directly. | You are a distinct product with its own lifecycle, deploy cadence, and (often) language. |
 | Auth | In-process; no token needed between overlay and core. | Service-token or OAuth 2 client-credentials (§4). |
-| Reference consumer | **qpedia-pvt** (the SaaS overlay: billing, SAML/SCIM, premium connectors). | **qproc / qpedia-rfp** (RFP assembly), **qcodia** (code knowledge layer). |
+| Typical consumer | A first-party SaaS/platform overlay (billing, SSO/SCIM, premium connectors). | A distinct product with its own lifecycle and language. |
 
 ### 2.1 Mode A — the `AppBuilder` overlay
 
@@ -74,8 +74,7 @@ over the wire.
 A separate service speaks only the contract: `/api/v1` for ingest → search →
 chat, authenticated per §4. It runs its own database (its own Postgres
 *schema*, even in the same instance) and never reaches into Qpedia's tables.
-`qproc` was the first external application and authored the original contract;
-`qcodia`'s resident adapters are external callers of the hub in the same way.
+This is how a distinct product integrates with no coupling beyond the contract.
 
 ## 3. The contract is the source of truth for the SDK
 
@@ -121,7 +120,7 @@ scope is rejected with `403`:
 | `qpedia.search.read` | Hybrid search + wiki read. |
 | `qpedia.chat` | RAG chat (SSE). |
 
-OAuth 2 env knobs are now overlay-specific (e.g. `qpedia-pvt` defines
+OAuth 2 env knobs are now overlay-specific (e.g. an overlay defines
 `QPEDIA_M2M_OIDC_ISSUER`, `QPEDIA_M2M_AUDIENCE`, etc.). The OSS engine has no
 M2M-specific env vars — overlays register their provider via
 `AppBuilder::with_auth_provider()`.
@@ -160,7 +159,7 @@ overlay-tunable via `upload_limit_bytes`).
 3. **Generate the SDK** from `qpedia-openapi.yaml` at a pinned version.
 4. **Wire graceful degradation:** the consumer must keep working (degraded)
    when Qpedia is unreachable, and re-sync on recovery.
-5. **Add yourself** to the consumers table in §8 below.
+5. **Match your integration to a mode** (§2) and the consumer patterns in §8.
 
 ## 7. Worked example (Mode B, curl)
 
@@ -184,10 +183,9 @@ curl -N -X POST https://qpedia.cloud/api/v1/chat \
   -d '{"message":"Summarize the revenue policy"}'
 ```
 
-## 8. Consumers today
+## 8. Consumer patterns
 
-| App | Mode | What it adds |
-|---|---|---|
-| **qpedia-pvt** | A (in-process) | SaaS overlay: billing, SAML/SCIM, premium connectors, compliance, observability sinks. |
-| **qproc / qpedia-rfp** | B (external) | RFP/tender aggregation & response assembly — the first external app; authored the contract. |
-| **qcodia** | B (external adapters) + A (Rust hub) | The same distilled-knowledge-layer idea for source code: symbol graph + code wiki for PR review and spec/codegen governance. Its hub is a Qpedia overlay; its resident forge adapters are external callers. |
+| Mode | Typical consumer |
+|---|---|
+| **A (in-process)** | A first-party SaaS/platform overlay: billing, SSO/SCIM, premium connectors, compliance, observability sinks. |
+| **B (external)** | A distinct product with its own lifecycle calling `/api/v1` — e.g. a domain-specific document workflow, or a code-knowledge layer whose resident adapters are external callers while its hub runs as a Mode-A overlay. |

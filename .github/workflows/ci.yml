@@ -86,3 +86,42 @@ jobs:
 
       - name: Run migrations + DB smoke + workspace unit tests
         run: cargo test --workspace --all-targets -- --nocapture
+
+  coverage:
+    name: coverage → codecov
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: qpedia_admin
+          POSTGRES_PASSWORD: qpedia-dev
+          POSTGRES_DB: qpedia
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qpedia_admin -d qpedia"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      QPEDIA_DB_URL: postgres://qpedia_admin:qpedia-dev@localhost:5432/qpedia?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-coverage
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage (workspace)
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false

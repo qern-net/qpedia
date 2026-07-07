@@ -268,3 +268,15 @@ These are hard rules for anyone (human or agent) changing this repo.
   contract file.
 - A `PostFileSave` hook (`.kiro/hooks/openapi-v1-freeze.json`) warns on any
   save to the contract as a backstop for this rule.
+
+---
+
+## Branding & entity names
+
+Three **distinct** entities — never conflate them or rename one to another:
+
+- **Qpedia** — the product / brand (this OSS engine and the product built on it).
+- **Dyanet** — the technology company that **builds** Qpedia (dyanet.com).
+- **Qern** — the organization that **hosts** the managed offering, **Qpedia Cloud** (qpedia.cloud).
+
+Correct usage: "built by **Dyanet**" (not Qern); "hosted / managed by **Qern**" → **Qpedia Cloud**; the product is always **Qpedia**. Do not do a blanket `Qern`↔`Dyanet` replacement — each name is correct in its own role. Fix only genuine misattributions (e.g. "built by Qern" → "built by Dyanet"). Managed-hosting URL is `qpedia.cloud`.
