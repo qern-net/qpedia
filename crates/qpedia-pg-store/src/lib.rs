@@ -82,13 +82,16 @@ impl PgStore {
 
     pub async fn connect_with_schema(url: &str, mode: SchemaMode) -> Result<Self> {
         let opts = PgConnectOptions::from_str(url).context("parse Postgres DSN")?;
+        let max_connections: u32 = std::env::var("QPEDIA_DB_MAX_CONN")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(match mode {
+                SchemaMode::Verify => 4,
+                SchemaMode::Migrate => 16,
+            });
+        anyhow::ensure!(max_connections > 0, "QPEDIA_DB_MAX_CONN must be positive");
         let pool = PgPoolOptions::new()
-            .max_connections(
-                std::env::var("QPEDIA_DB_MAX_CONN")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(16),
-            )
+            .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(15))
             .connect_with(opts)
             .await
@@ -106,13 +109,28 @@ impl PgStore {
                     anyhow::ensure!(actual.0 == expected.version && actual.1.as_slice() == expected.checksum.as_ref() && actual.2,
                         "schema migration checksum mismatch");
                 }
-                let privileged: bool = sqlx::query_scalar(
-                    "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls FROM pg_roles WHERE rolname=current_user")
-                    .fetch_one(&pool).await?;
+                let (privileged, role_limit): (bool, i32) = sqlx::query_as(
+                    "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls,
+                            rolconnlimit FROM pg_roles WHERE rolname = current_user",
+                )
+                .fetch_one(&pool)
+                .await?;
                 anyhow::ensure!(!privileged, "runtime database role must be restricted");
-                let ddl: bool = sqlx::query_scalar("SELECT has_schema_privilege(current_user,'public','CREATE')")
-                    .fetch_one(&pool).await?;
-                anyhow::ensure!(!ddl, "runtime database role cannot own or create schema objects");
+                anyhow::ensure!(
+                    role_limit < 0 || max_connections <= role_limit as u32,
+                    "QPEDIA_DB_MAX_CONN exceeds the runtime database role's connection limit"
+                );
+                let ddl: bool = sqlx::query_scalar(
+                    "SELECT has_schema_privilege(current_user, 'public', 'CREATE') OR EXISTS (
+                         SELECT FROM pg_class c
+                         JOIN pg_namespace n ON n.oid = c.relnamespace
+                         WHERE n.nspname = 'public'
+                            AND pg_has_role(current_user, c.relowner, 'MEMBER')
+                     )",
+                )
+                .fetch_one(&pool)
+                .await?;
+                anyhow::ensure!(!ddl, "runtime database role cannot own or create public relations");
             }
             SchemaMode::Migrate => {
                 migrator.run(&pool).await.context("apply Postgres migrations")?;

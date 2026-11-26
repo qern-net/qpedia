@@ -22,11 +22,12 @@ pub async fn from_env() -> Result<AppBuilder> {
 
 /// Build the engine router and its ingest worker. The caller owns route
 /// filtering, the network listener, and the lifetime of the worker.
-pub fn into_parts(
+pub async fn into_parts(
     builder: AppBuilder,
     auth: impl ExternalAuthProvider + 'static,
     worker_id: &str,
-) -> (Router, JobRunner) {
+) -> Result<(Router, JobRunner)> {
+    builder.ctx().db.verify_job_worker_role().await?;
     let worker = JobRunner::new(builder.ctx().clone(), worker_id);
-    (builder.with_auth_provider(auth).build(), worker)
+    Ok((builder.with_auth_provider(auth).build(), worker))
 }

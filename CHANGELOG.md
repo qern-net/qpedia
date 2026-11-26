@@ -6,6 +6,9 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+- Bound source analysis before the job lease expires and reject oversized documents before calling the inference provider.
+- Verify restricted database ownership and queue policies before starting an embedded worker, with a four-connection default in verify mode.
+
 - Add the optional qpedia-runtime library for application-owned HTTP routing, authentication and ingestion workers.
 - Isolate filesystem originals and derived artifacts by tenant, preserve page identity and timestamps on ingest, and support bounded local OCR.
 - Support opt-in versioned filing metadata, current filing labels and combined content and filing search.

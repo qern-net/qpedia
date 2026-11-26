@@ -3,6 +3,8 @@ use qpedia_llm::{current_model, CompleteReq, LlmProvider, Message, StopReason};
 
 pub const CHUNK_CHARS: usize = 6_000;
 const NOTES_PER_GROUP: usize = 4;
+const MAX_SOURCE_CHUNKS: usize = 32;
+const BRIEF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Contiguous UTF-8 slices with a preference for whole lines.
 pub fn chunks(text: &str) -> Vec<&str> {
@@ -47,6 +49,17 @@ pub async fn source_brief(llm: &dyn LlmProvider, parts: &[&str]) -> Result<Strin
     if parts.len() == 1 {
         return read_chunk(parts, 1);
     }
+    anyhow::ensure!(
+        parts.len() <= MAX_SOURCE_CHUNKS,
+        "document has {} passages; split it into documents of at most {MAX_SOURCE_CHUNKS} passages",
+        parts.len(),
+    );
+    tokio::time::timeout(BRIEF_TIMEOUT, summarize_parts(llm, parts))
+        .await
+        .context("source analysis timed out; split the document into smaller parts")?
+}
+
+async fn summarize_parts(llm: &dyn LlmProvider, parts: &[&str]) -> Result<String> {
     let mut level = Vec::with_capacity(parts.len());
     for number in 1..=parts.len() {
         let summary = notes(llm, "Read this entire source passage.", read_chunk(parts, number)?).await
@@ -103,6 +116,15 @@ mod tests {
         }
         drop(calls);
         assert!(source_brief(&RecordingLlm(Default::default(), true), &parts).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_sources_are_rejected_before_any_provider_requests() {
+        let parts = vec!["fragment"; MAX_SOURCE_CHUNKS + 1];
+        let llm = RecordingLlm(Default::default(), false);
+        let error = source_brief(&llm, &parts).await.unwrap_err();
+        assert!(error.to_string().contains("split"));
+        assert!(llm.0.lock().unwrap().is_empty());
     }
 
     #[test]

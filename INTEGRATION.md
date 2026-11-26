@@ -194,7 +194,8 @@ curl -N -X POST https://qpedia.cloud/api/v1/chat \
 
 The `qpedia-runtime` library provides `from_env` for a restricted,
 separately migrated database and `into_parts` for the router and ingest
-worker. An embedding host provides an `ExternalAuthProvider` and supplies
+worker. The worker requires explicit cross-tenant SELECT and UPDATE policies on the jobs table. The restricted login cannot own public relations or belong to an owning role. Verify mode defaults to four connections per process.
+An embedding host provides an `ExternalAuthProvider` and supplies
 its own route authorization, bind address and worker lifetime. To use
 revisioned source filings, mount the `VersionedSourceFiling` extension and
 authorize the corresponding writes. `WikiPageScope::Knowledge` selects
