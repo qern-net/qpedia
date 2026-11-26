@@ -309,17 +309,33 @@ impl WikiRepo {
         Ok(out)
     }
 
-    /// Markdown paths touched by the HEAD commit (works for the root commit
-    /// too via `git show --name-only`). Returns paths relative to the repo
-    /// root, with forward slashes.
+    /// Markdown paths touched by the HEAD commit, relative to the wiki.
     pub async fn changed_in_head(&self) -> Result<Vec<String>> {
-        let out = self.git(&["show", "--pretty=format:", "--name-only", "HEAD"]).await?;
-        Ok(out
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .filter(|l| l.ends_with(".md"))
-            .map(|l| l.replace('\\', "/"))
+        self.changed_in_commit("HEAD").await
+    }
+
+    /// Markdown paths touched by the latest commit for a particular bundle.
+    /// Match the generated subject prefix so another bundle that merely names
+    /// this source in its summary cannot become the resume point.
+    pub async fn changed_in_latest_ingest(&self, ingest_id: &str) -> Result<Option<Vec<String>>> {
+        let subject = format!("ingest({ingest_id})");
+        let pattern = format!("--grep={subject}");
+        let commits = self.git(&["log", "--fixed-strings", &pattern, "--format=%H%x09%s"]).await?;
+        for (commit, title) in commits.lines().filter_map(|line| line.split_once('\t')) {
+            if title.strip_prefix(&subject).is_some_and(|suffix| {
+                suffix.is_empty() || suffix.starts_with(": ")
+            }) {
+                return Ok(Some(self.changed_in_commit(commit).await?));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn changed_in_commit(&self, commit: &str) -> Result<Vec<String>> {
+        let out = self.git(&["show", "--pretty=format:", "--name-only", "-z", commit, "--"]).await?;
+        Ok(out.split('\0')
+            .filter(|path| path.ends_with(".md"))
+            .map(String::from)
             .collect())
     }
 
