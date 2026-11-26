@@ -4,7 +4,7 @@
 //! that now have a classification (catches sources uploaded before
 //! auto-organization was enabled, or uploaded directly via API).
 
-use crate::runner::IngestContext;
+use crate::runner::{persist, IngestContext};
 use anyhow::Result;
 use qpedia_core::{tenant::Tenant, wiki::{DiffBundle, DiffOp}};
 use qpedia_lint::Linter;
@@ -77,23 +77,28 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
         }],
     };
 
-    match wiki.commit_bundle(&bundle).await {
-        Ok(sha) => {
-            info!(sha = %sha, tenant = %tenant, issues = report.issue_count(), "lint commit landed");
+    persist(async {
+        match wiki.commit_bundle(&bundle).await {
+            Ok(sha) => {
+                info!(sha = %sha, tenant = %tenant, issues = report.issue_count(), "lint commit landed");
+            }
+            Err(e) if e.to_string().contains("no changes to commit") => {
+                info!(tenant = %tenant, "lint: report unchanged since last run");
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) if e.to_string().contains("no changes to commit") => {
-            info!(tenant = %tenant, "lint: report unchanged since last run");
-        }
-        Err(e) => return Err(e),
-    }
 
-    let mut report_value = serde_json::to_value(&report)?;
-    if let Some(obj) = report_value.as_object_mut() {
-        obj.insert("tenant".into(), serde_json::Value::String(tenant.to_string()));
-    }
-    let _ = ctx
-        .db
-        .write_audit(tenant, "qpedia-bot", "lint.run", Some(tenant.as_str()), Some(&report_value))
-        .await;
+        let mut report_value = serde_json::to_value(&report)?;
+        if let Some(obj) = report_value.as_object_mut() {
+            obj.insert("tenant".into(), serde_json::Value::String(tenant.to_string()));
+        }
+        let _ = ctx
+            .db
+            .write_audit(tenant, "qpedia-bot", "lint.run", Some(tenant.as_str()), Some(&report_value))
+            .await;
+        Ok(())
+    })
+    .await?;
+
     Ok(())
 }

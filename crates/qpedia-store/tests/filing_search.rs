@@ -195,3 +195,31 @@ async fn provenance_cache_is_shared_commit_invalidated_and_request_scoped() -> R
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn wiki_index_can_resume_ingest_or_removal_after_other_commits() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let wiki = WikiRepo::open_or_init(dir.path(), "fixture", "fixture@example.test").await?;
+    let path = "summaries/first source.md";
+    wiki.commit_bundle(&DiffBundle {
+        ingest_id: "first".into(),
+        summary: "ingest the first source".into(),
+        operations: vec![page(path, "first", "# First")],
+    }).await?;
+    wiki.commit_bundle(&DiffBundle {
+        ingest_id: "remove-first".into(),
+        summary: "remove the first source".into(),
+        operations: vec![DiffOp::Delete {path: path.into(), rationale: "fixture".into()}],
+    }).await?;
+    wiki.commit_bundle(&DiffBundle {
+        ingest_id: "later".into(),
+        summary: "mentions ingest(first) and ingest(remove-first)".into(),
+        operations: vec![page("summaries/later.md", "later", "# Later")],
+    }).await?;
+
+    assert_eq!(wiki.changed_in_head().await?, ["summaries/later.md"]);
+    assert_eq!(wiki.changed_in_latest_ingest("first").await?, Some(vec![path.into()]));
+    assert_eq!(wiki.changed_in_latest_ingest("remove-first").await?, Some(vec![path.into()]));
+    assert!(wiki.changed_in_latest_ingest("missing").await?.is_none());
+    Ok(())
+}

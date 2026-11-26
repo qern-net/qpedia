@@ -13,12 +13,11 @@
 //!   8. DELETE the row from `sources`.
 //!
 //! Idempotent: if the source row is already gone the job exits cleanly.
-//! If the git commit already happened (retry after partial failure) the
-//! pages won't be found in the wiki and the bundle will be empty — the
-//! handler skips the commit and proceeds to blob/DB cleanup.
+//! If the git commit already happened, recover its touched paths to
+//! reconcile the index before deleting the source.
 
-use crate::handlers::embed::embed_changed_pages;
-use crate::runner::IngestContext;
+use crate::handlers::embed::embed_pages;
+use crate::runner::{persist, IngestContext};
 use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
@@ -27,6 +26,7 @@ use qpedia_core::{
     SourceId,
 };
 use qpedia_store::blob::BlobStorage;
+use qpedia_store::WikiRepo;
 use tracing::{info, warn};
 
 pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
@@ -40,6 +40,14 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         return Ok(());
     }
     let wiki = ctx.wiki_store.get(tenant).await?;
+    let ingest_id = format!("remove-{source_id}");
+    let previous = wiki.changed_in_latest_ingest(&ingest_id).await?;
+    let previously_committed = previous.is_some();
+    if let Some(paths) = previous {
+        // Finish reconciliation before a new removal commit can become the
+        // resume point. A lost claim here will retry the same reconciliation.
+        reconcile_wiki_index(ctx, tenant, &wiki, paths).await?;
+    }
 
     // ── 1. Plan: walk wiki, decide delete vs patch per affected page ──────
 
@@ -114,7 +122,12 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     // ── 4. Append to log.md ───────────────────────────────────────────────
 
-    if let Some(log_content) = wiki.read_page("log.md").await? {
+    let log_content = if !previously_committed || !ops.is_empty() {
+        wiki.read_page("log.md").await?
+    } else {
+        None
+    };
+    if let Some(log_content) = log_content {
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let log_line = if to_delete.is_empty() && to_patch.is_empty() {
             format!("\n- {timestamp} remove({source_id}): no wiki pages affected\n")
@@ -136,7 +149,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     if !ops.is_empty() {
         let bundle = DiffBundle {
-            ingest_id: format!("remove-{source_id}"),
+            ingest_id: ingest_id.clone(),
             summary: format!(
                 "source {source_id} removed: {} deleted, {} patched",
                 to_delete.len(),
@@ -144,23 +157,10 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
             ),
             operations: ops,
         };
-        let sha = wiki.commit_bundle(&bundle).await?;
+        let sha = persist(wiki.commit_bundle(&bundle)).await?;
         info!(id = %source_id, sha = %sha, "remove: wiki committed");
-
-        // ── 6a. Drop deleted pages from wiki_pages ─────────────────────────
-        for path in &to_delete {
-            if let Err(e) = ctx.db.delete_wiki_page(tenant, path).await {
-                warn!(path = %path, error = %e, "wiki_pages delete failed (non-fatal)");
-            }
-        }
-
-        // ── 6b. Re-embed patched pages (HEAD diff captures the patches) ───
-        if !to_patch.is_empty() {
-            match embed_changed_pages(ctx, tenant).await {
-                Ok(embedded) => info!(id = %source_id, embedded = embedded.len(), "remove: re-embedded patched pages"),
-                Err(e) => warn!(id = %source_id, error = %e, "remove: re-embed failed (non-fatal)"),
-            }
-        }
+        let paths = wiki.changed_in_latest_ingest(&ingest_id).await?.unwrap_or_default();
+        reconcile_wiki_index(ctx, tenant, &wiki, paths).await?;
     } else {
         info!(id = %source_id, "remove: no wiki changes needed");
     }
@@ -190,6 +190,22 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         .await;
 
     info!(id = %source_id, "remove: done");
+    Ok(())
+}
+
+async fn reconcile_wiki_index(
+    ctx: &IngestContext,
+    tenant: &Tenant,
+    wiki: &WikiRepo,
+    paths: Vec<String>,
+) -> Result<()> {
+    for path in &paths {
+        if wiki.read_page(path).await?.is_none() {
+            ctx.db.delete_wiki_page(tenant, path).await?;
+        }
+    }
+    let embedded = embed_pages(ctx, tenant, wiki, paths).await?;
+    info!(%tenant, pages = embedded.len(), "remove: reconciled wiki index");
     Ok(())
 }
 
