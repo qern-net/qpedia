@@ -35,7 +35,12 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         embedder: ctx.embedder.clone(),
     };
 
-    let (bundle, coverage) = run_agent(&deps, &src).await?;
+    // Leave time for validation and persistence before the 30-minute job lease
+    // expires. This covers preprocessing and the agent's provider calls.
+    let (bundle, coverage) =
+        tokio::time::timeout(std::time::Duration::from_secs(20 * 60), run_agent(&deps, &src))
+            .await
+            .map_err(|_| anyhow!("document distillation timed out; split the document into smaller parts"))??;
     if bundle.operations.is_empty() {
         warn!(id = %source_id, "agent returned empty bundle; nothing to commit");
         ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;

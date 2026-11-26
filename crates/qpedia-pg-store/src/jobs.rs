@@ -45,7 +45,47 @@ impl PgStore {
         Ok(())
     }
 
-    /// Claim the next due job across all tenants. Uses the admin pool so
+    /// Check the capability of a restricted connection before starting a
+    /// worker. Cross-tenant access is limited to the durable job table.
+    pub async fn verify_job_worker_role(&self) -> Result<()> {
+        let allowed: bool = sqlx::query_scalar(
+            "WITH policies AS (
+                 SELECT cmd, permissive, qual, with_check FROM pg_policies
+                 WHERE schemaname = 'public' AND tablename = 'jobs'
+                   AND EXISTS (
+                       SELECT FROM unnest(roles) AS role(name)
+                       WHERE CASE WHEN role.name = 'public' THEN true
+                                  ELSE pg_has_role(current_user, role.name, 'USAGE')
+                             END
+                   )
+             )
+             SELECT has_table_privilege(current_user, 'public.jobs', 'SELECT')
+                AND has_table_privilege(current_user, 'public.jobs', 'UPDATE')
+                AND EXISTS (
+                    SELECT FROM policies WHERE permissive = 'PERMISSIVE'
+                      AND cmd IN ('ALL', 'SELECT') AND coalesce(qual, 'true') = 'true'
+                )
+                AND EXISTS (
+                    SELECT FROM policies WHERE permissive = 'PERMISSIVE'
+                      AND cmd IN ('ALL', 'UPDATE') AND coalesce(qual, 'true') = 'true'
+                      AND coalesce(with_check, qual, 'true') = 'true'
+                )
+                AND NOT EXISTS (
+                    SELECT FROM policies WHERE permissive = 'RESTRICTIVE'
+                      AND cmd IN ('ALL', 'SELECT', 'UPDATE')
+                )",
+        )
+        .fetch_one(self.pool())
+        .await
+        .context("verify restricted worker queue access")?;
+        anyhow::ensure!(
+            allowed,
+            "worker role needs cross-tenant SELECT and UPDATE policies on jobs"
+        );
+        Ok(())
+    }
+
+    /// Claim the next due job across all tenants. Uses the worker pool so
     /// workers see every tenant's queue. The returned job carries
     /// tenant_id, which the handler uses to scope its work.
     pub async fn claim_next_job(&self, worker_id: &str, lease_ms: i64) -> Result<Option<Job>> {
