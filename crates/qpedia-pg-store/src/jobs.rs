@@ -50,28 +50,58 @@ impl PgStore {
     pub async fn verify_job_worker_role(&self) -> Result<()> {
         let allowed: bool = sqlx::query_scalar(
             "WITH policies AS (
-                 SELECT cmd, permissive, qual, with_check FROM pg_policies
+                 SELECT policyname, cmd, permissive, qual, with_check,
+                     EXISTS (
+                         SELECT FROM unnest(roles) AS role(name)
+                         WHERE CASE WHEN role.name = 'public' THEN true
+                                    ELSE pg_has_role(current_user, role.name, 'USAGE')
+                               END
+                     ) AS worker_policy,
+                     EXISTS (
+                         SELECT FROM unnest(roles) AS role(name)
+                         WHERE CASE WHEN role.name = 'public' THEN true
+                                    ELSE pg_has_role('qpedia_app', role.name, 'USAGE')
+                               END
+                     ) AS tenant_policy
+                 FROM pg_policies
                  WHERE schemaname = 'public' AND tablename = 'jobs'
-                   AND EXISTS (
-                       SELECT FROM unnest(roles) AS role(name)
-                       WHERE CASE WHEN role.name = 'public' THEN true
-                                  ELSE pg_has_role(current_user, role.name, 'USAGE')
-                             END
-                   )
              )
              SELECT has_table_privilege(current_user, 'public.jobs', 'SELECT')
                 AND has_table_privilege(current_user, 'public.jobs', 'UPDATE')
                 AND EXISTS (
-                    SELECT FROM policies WHERE permissive = 'PERMISSIVE'
+                    SELECT FROM pg_class
+                    WHERE oid = 'public.jobs'::regclass AND relrowsecurity
+                      AND NOT pg_has_role('qpedia_app', relowner, 'USAGE')
+                )
+                AND EXISTS (
+                    SELECT FROM pg_roles WHERE rolname = 'qpedia_app'
+                      AND NOT (rolsuper OR rolbypassrls)
+                )
+                AND EXISTS (
+                    SELECT FROM policies WHERE tenant_policy AND permissive = 'PERMISSIVE'
+                      AND policyname = 'tenant_isolation' AND cmd = 'ALL'
+                )
+                AND NOT EXISTS (
+                    SELECT FROM policies WHERE tenant_policy AND permissive = 'PERMISSIVE'
+                      AND (
+                          policyname <> 'tenant_isolation'
+                          OR qual IS DISTINCT FROM '(tenant_id = current_setting(''qpedia.tenant''::text, true))'
+                          OR with_check IS DISTINCT FROM qual
+                      )
+                )
+                AND EXISTS (
+                    SELECT FROM policies WHERE worker_policy AND NOT tenant_policy
+                      AND permissive = 'PERMISSIVE'
                       AND cmd IN ('ALL', 'SELECT') AND coalesce(qual, 'true') = 'true'
                 )
                 AND EXISTS (
-                    SELECT FROM policies WHERE permissive = 'PERMISSIVE'
+                    SELECT FROM policies WHERE worker_policy AND NOT tenant_policy
+                      AND permissive = 'PERMISSIVE'
                       AND cmd IN ('ALL', 'UPDATE') AND coalesce(qual, 'true') = 'true'
                       AND coalesce(with_check, qual, 'true') = 'true'
                 )
                 AND NOT EXISTS (
-                    SELECT FROM policies WHERE permissive = 'RESTRICTIVE'
+                    SELECT FROM policies WHERE worker_policy AND permissive = 'RESTRICTIVE'
                       AND cmd IN ('ALL', 'SELECT', 'UPDATE')
                 )",
         )
@@ -80,7 +110,7 @@ impl PgStore {
         .context("verify restricted worker queue access")?;
         anyhow::ensure!(
             allowed,
-            "worker role needs cross-tenant SELECT and UPDATE policies on jobs"
+            "jobs require the tenant isolation policy and worker-only cross-tenant SELECT and UPDATE policies"
         );
         Ok(())
     }
@@ -90,36 +120,28 @@ impl PgStore {
     /// tenant_id, which the handler uses to scope its work.
     pub async fn claim_next_job(&self, worker_id: &str, lease_ms: i64) -> Result<Option<Job>> {
         with_db_span(DbSystem::Postgresql, "claim_next_job", async move {
-            let now = Utc::now();
-            let lease_until = now + chrono::Duration::milliseconds(lease_ms);
-            // Claim a queued job, OR reclaim one whose worker died mid-flight:
-            // a `running` job whose lease (`locked_until`) has expired. Without
-            // the second clause a crashed/restarted worker strands its in-flight
-            // jobs in `running` forever (the lease was written but never acted
-            // on). `lease_ms` must comfortably exceed the slowest job (Marker OCR
-            // + agent) so a legitimately-running job isn't reclaimed by a second
-            // worker mid-run. Handlers are idempotent, so a reclaimed job that
-            // had partially progressed re-runs safely.
+            // Use the database clock for claims and renewals, including
+            // reclaiming an expired job from another worker.
             let row = sqlx::query(
-                "UPDATE jobs SET \
-                     state = 'running', \
-                     locked_by = $1, \
-                     locked_until = $2, \
-                     attempt = attempt + 1, \
-                     updated_at = $3 \
-                 WHERE id = ( \
-                     SELECT id FROM jobs \
-                     WHERE (state = 'queued' AND next_run_at <= $3) \
-                        OR (state = 'running' AND locked_until < $3) \
-                     ORDER BY next_run_at ASC \
-                     FOR UPDATE SKIP LOCKED LIMIT 1 \
-                 ) \
-                 RETURNING id, tenant_id, kind, payload, state, attempt, max_attempts, \
-                           next_run_at, locked_by, locked_until, last_error, created_at, updated_at",
+                "WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS ts)
+                 UPDATE jobs AS claimed SET
+                     state = 'running',
+                     locked_by = $1,
+                     locked_until = tick.ts + $2 * interval '1 millisecond',
+                     attempt = claimed.attempt + 1,
+                     updated_at = tick.ts
+                 FROM tick
+                 WHERE claimed.id = (
+                     SELECT id FROM jobs
+                     WHERE (state = 'queued' AND next_run_at <= tick.ts)
+                        OR (state = 'running' AND locked_until <= tick.ts)
+                     ORDER BY next_run_at ASC
+                     FOR UPDATE SKIP LOCKED LIMIT 1
+                 )
+                 RETURNING claimed.*",
             )
             .bind(worker_id)
-            .bind(lease_until)
-            .bind(now)
+            .bind(lease_ms as f64)
             .fetch_optional(self.pool())
             .await
             .context("claim_next_job")?;
@@ -128,61 +150,96 @@ impl PgStore {
         .await
     }
 
+    /// Renew only the live attempt. The attempt number distinguishes claims
+    /// even when more than one process uses the same worker name.
+    pub async fn renew_job_claim(&self, id: &JobId, attempt: u32, lease_ms: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET locked_until = clock_timestamp() + $3 * interval '1 millisecond'
+             WHERE id::text = $1 AND attempt = $2 AND state = 'running'
+               AND locked_until > clock_timestamp()",
+        )
+        .bind(id.as_str())
+        .bind(attempt as i32)
+        .bind(lease_ms as f64)
+        .execute(self.pool())
+        .await
+        .context("renew job claim")?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn complete_job(&self, id: &JobId) -> Result<()> {
-        sqlx::query("UPDATE jobs SET state = 'done', updated_at = now() WHERE id::text = $1")
-            .bind(id.as_str())
-            .execute(self.pool())
-            .await
-            .context("complete_job")?;
+        self.complete_with_claim(id, None).await?;
         Ok(())
     }
 
-    /// Record a job failure. With `retry_in_ms`, the job re-queues unless it
-    /// has exhausted `max_attempts`, in which case it goes `dead`. Returns
-    /// `true` when the job is now permanently `dead` (so the caller can mark
-    /// the underlying source `failed`).
+    pub async fn complete_job_claim(&self, id: &JobId, attempt: u32) -> Result<bool> {
+        self.complete_with_claim(id, Some(attempt as i32)).await
+    }
+
+    async fn complete_with_claim(&self, id: &JobId, attempt: Option<i32>) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET state = 'done', updated_at = now(), locked_by = NULL, locked_until = NULL
+             WHERE id::text = $1 AND ($2::integer IS NULL OR
+                 (attempt = $2 AND state = 'running' AND locked_until > clock_timestamp()))",
+        )
+        .bind(id.as_str())
+        .bind(attempt)
+        .execute(self.pool())
+        .await
+        .context("complete job")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Record a failed job, returning whether retries are exhausted.
     pub async fn fail_job(
         &self,
         id: &JobId,
         err: &str,
         retry_in_ms: Option<i64>,
     ) -> Result<bool> {
+        let state = self.fail_with_claim(id, err, retry_in_ms, None).await?;
+        state.or_else(|| retry_in_ms.is_none().then_some(true)).context("job no longer exists")
+    }
+
+    /// `None` indicates that the claim has expired or been superseded.
+    pub async fn fail_job_claim(
+        &self,
+        id: &JobId,
+        attempt: u32,
+        err: &str,
+        retry_in_ms: Option<i64>,
+    ) -> Result<Option<bool>> {
+        self.fail_with_claim(id, err, retry_in_ms, Some(attempt as i32)).await
+    }
+
+    async fn fail_with_claim(
+        &self,
+        id: &JobId,
+        err: &str,
+        retry_in_ms: Option<i64>,
+        attempt: Option<i32>,
+    ) -> Result<Option<bool>> {
         let now = Utc::now();
-        if let Some(delay) = retry_in_ms {
-            let next = now + chrono::Duration::milliseconds(delay);
-            let row = sqlx::query(
-                "UPDATE jobs SET \
-                     state = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END, \
-                     last_error = $1, \
-                     next_run_at = $2, \
-                     locked_by = NULL, \
-                     locked_until = NULL, \
-                     updated_at = $3 \
-                 WHERE id::text = $4 \
-                 RETURNING state",
-            )
-            .bind(err)
-            .bind(next)
-            .bind(now)
-            .bind(id.as_str())
-            .fetch_one(self.pool())
-            .await
-            .context("fail_job with retry")?;
-            let state: String = row.get("state");
-            Ok(state == "dead")
-        } else {
-            sqlx::query(
-                "UPDATE jobs SET state = 'dead', last_error = $1, updated_at = $2 \
-                 WHERE id::text = $3",
-            )
-            .bind(err)
-            .bind(now)
-            .bind(id.as_str())
-            .execute(self.pool())
-            .await
-            .context("fail_job dead")?;
-            Ok(true)
-        }
+        let next = retry_in_ms.map(|ms| now + chrono::Duration::milliseconds(ms));
+        let state: Option<String> = sqlx::query_scalar(
+            "UPDATE jobs SET
+                 state = CASE WHEN $2::timestamptz IS NULL OR attempt >= max_attempts
+                              THEN 'dead' ELSE 'queued' END,
+                 last_error = $1, next_run_at = coalesce($2, next_run_at),
+                 locked_by = NULL, locked_until = NULL, updated_at = $3
+             WHERE id::text = $4 AND ($5::integer IS NULL OR
+                 (attempt = $5 AND state = 'running' AND locked_until > clock_timestamp()))
+             RETURNING state",
+        )
+        .bind(err)
+        .bind(next)
+        .bind(now)
+        .bind(id.as_str())
+        .bind(attempt)
+        .fetch_optional(self.pool())
+        .await
+        .context("fail job")?;
+        Ok(state.map(|s| s == "dead"))
     }
 
     /// Count currently-pending (`queued`) jobs grouped by kind, across all

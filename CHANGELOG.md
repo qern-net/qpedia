@@ -6,6 +6,9 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+- Renew job claims throughout processing and fence completion and failure to the current attempt.
+- Reject embedded queue grants that weaken the request role's tenant isolation.
+
 - Bound source analysis before the job lease expires and reject oversized documents before calling the inference provider.
 - Verify restricted database ownership and queue policies before starting an embedded worker, with a four-connection default in verify mode.
 
