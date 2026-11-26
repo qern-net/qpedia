@@ -54,11 +54,33 @@ pub struct PgStore {
     tenant_hooks: Arc<RwLock<Vec<Arc<dyn TenantHook>>>>,
 }
 
+/// Select whether startup migrates a database or checks a separately migrated one.
+#[derive(Clone, Copy)]
+pub enum SchemaMode {
+    Migrate,
+    Verify,
+}
+
+impl SchemaMode {
+    pub fn from_env() -> Result<Self> {
+        match std::env::var("QPEDIA_SCHEMA_MODE") {
+            Ok(mode) if mode == "verify" => Ok(Self::Verify),
+            Ok(mode) if mode == "migrate" => Ok(Self::Migrate),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Migrate),
+            _ => anyhow::bail!("QPEDIA_SCHEMA_MODE must be verify or migrate"),
+        }
+    }
+}
+
 impl PgStore {
     /// Connect, run migrations as the connecting role (must have BYPASSRLS
     /// for the migrations to install RLS policies — typically the
     /// `qpedia_admin` role or the postgres superuser).
     pub async fn connect(url: &str) -> Result<Self> {
+        Self::connect_with_schema(url, SchemaMode::from_env()?).await
+    }
+
+    pub async fn connect_with_schema(url: &str, mode: SchemaMode) -> Result<Self> {
         let opts = PgConnectOptions::from_str(url).context("parse Postgres DSN")?;
         let pool = PgPoolOptions::new()
             .max_connections(
@@ -72,10 +94,30 @@ impl PgStore {
             .await
             .context("connect Postgres")?;
 
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .context("apply Postgres migrations")?;
+        let migrator = sqlx::migrate!("./migrations");
+        match mode {
+            SchemaMode::Verify => {
+                let applied: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
+                    "SELECT version,checksum,success FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool).await.context("schema must be migrated separately")?;
+                let expected: Vec<_> = migrator.iter().filter(|m| !m.migration_type.is_down_migration()).collect();
+                anyhow::ensure!(applied.len() == expected.len(), "schema migration inventory mismatch");
+                for (actual, expected) in applied.iter().zip(expected) {
+                    anyhow::ensure!(actual.0 == expected.version && actual.1.as_slice() == expected.checksum.as_ref() && actual.2,
+                        "schema migration checksum mismatch");
+                }
+                let privileged: bool = sqlx::query_scalar(
+                    "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls FROM pg_roles WHERE rolname=current_user")
+                    .fetch_one(&pool).await?;
+                anyhow::ensure!(!privileged, "runtime database role must be restricted");
+                let ddl: bool = sqlx::query_scalar("SELECT has_schema_privilege(current_user,'public','CREATE')")
+                    .fetch_one(&pool).await?;
+                anyhow::ensure!(!ddl, "runtime database role cannot own or create schema objects");
+            }
+            SchemaMode::Migrate => {
+                migrator.run(&pool).await.context("apply Postgres migrations")?;
+            }
+        }
 
         info!("Postgres pool ready");
         Ok(Self {

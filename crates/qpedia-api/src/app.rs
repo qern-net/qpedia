@@ -46,6 +46,9 @@ use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
+#[cfg(test)]
+mod filing_tests;
+
 // ---------- AppState + extension container -------------------------------------
 
 /// Shared state held by axum and cloned per request.
@@ -135,6 +138,15 @@ impl AppBuilder {
     /// the `IngestContext`, set up auth. Initializes `tracing` if no
     /// subscriber is set yet (idempotent for tests that pre-install one).
     pub async fn from_env() -> Result<Self> {
+        Self::from_env_with(None, None).await
+    }
+
+    /// Construct with explicit database and authentication policies when a host
+    /// owns them. Other configuration uses the same defaults as the engine.
+    pub async fn from_env_with(
+        schema: Option<qpedia_pg_store::SchemaMode>,
+        auth: Option<AuthState>,
+    ) -> Result<Self> {
         // Load .env for local (non-Docker) runs. Real environment variables
         // always win over .env entries. Missing file is fine.
         let _ = dotenvy::dotenv();
@@ -170,8 +182,12 @@ impl AppBuilder {
             .unwrap_or_else(|_| {
                 "postgres://qpedia_admin:qpedia-dev@127.0.0.1:5432/qpedia?sslmode=disable".into()
             });
-        let db = PgStore::connect(&pg_dsn).await?;
         let blob = BlobStore::open(&raw_root)?;
+        let schema = match schema {
+            Some(mode) => mode,
+            None => qpedia_pg_store::SchemaMode::from_env()?,
+        };
+        let db = PgStore::connect_with_schema(&pg_dsn, schema).await?;
         let wiki_store = WikiRepoStore::new(&wiki_root, author_name, author_email);
         let extractors = Arc::new(ExtractorRegistry::with_default());
         let llm = provider_from_env()?;
@@ -182,7 +198,10 @@ impl AppBuilder {
         let reranker = qpedia_embed::reranker_from_env(data_dir.join("models"));
 
         let ctx = IngestContext::new(db, blob, wiki_store, extractors, llm, embedder, reranker);
-        let auth = AuthState::from_env().await?;
+        let auth = match auth {
+            Some(auth) => auth,
+            None => AuthState::from_env().await?,
+        };
 
         let bind: SocketAddr = std::env::var("QPEDIA_BIND")
             .unwrap_or_else(|_| "0.0.0.0:8080".into())

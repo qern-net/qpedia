@@ -1,0 +1,13 @@
+[package]
+name = "qpedia-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+qpedia-api.workspace = true
+qpedia-ingest.workspace = true
+qpedia-pg-store.workspace = true

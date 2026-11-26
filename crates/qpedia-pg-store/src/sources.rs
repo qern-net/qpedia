@@ -12,21 +12,42 @@ use qpedia_core::{
     SourceId,
 };
 use sqlx::Row;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 impl PgStore {
     pub async fn insert_source(&self, src: &Source) -> Result<()> {
         with_db_span(DbSystem::Postgresql, "insert_source", async move {
             let mut tx = self.begin_for(&src.tenant).await?;
-            let status = serde_json::to_string(&src.status)?;
-            let status = status.trim_matches('"').to_string();
-            let acl: Vec<String> = src.acl.0.iter().cloned().collect();
+            anyhow::ensure!(Self::insert_source_in(&mut tx, src, None).await?, "source slug already exists");
+            tx.commit().await.context("commit insert source")
+        }).await
+    }
 
-            sqlx::query(
+    /// The caller commits only after the original has been written. A concurrent
+    /// retry waits on the unique (tenant, slug) and cannot enqueue a second ingest.
+    pub async fn stage_upload(
+        &self, src: &Source, filing: Option<(&str, i32)>, job: &qpedia_core::job::Job,
+    ) -> Result<Option<sqlx::Transaction<'_, sqlx::Postgres>>> {
+        let mut tx = self.begin_for(&src.tenant).await?;
+        if !Self::insert_source_in(&mut tx, src, filing).await? {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        Self::enqueue_in(&mut tx, &src.tenant, job).await?;
+        Ok(Some(tx))
+    }
+
+    async fn insert_source_in(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, src: &Source, filing: Option<(&str, i32)>,
+    ) -> Result<bool> {
+        let status = serde_json::to_string(&src.status)?;
+        let acl: Vec<String> = src.acl.0.iter().cloned().collect();
+        let result = sqlx::query(
                 "INSERT INTO sources \
                  (tenant_id, slug, folder_path, filename, mime, sha256, size_bytes, \
-                  acl, status, language, classification, created_at, ingested_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                  acl, status, language, classification, created_at, ingested_at, filing_name, filing_revision) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                 ON CONFLICT (tenant_id,slug) DO NOTHING",
             )
             .bind(src.tenant.as_str())
             .bind(src.id.as_str())
@@ -36,19 +57,18 @@ impl PgStore {
             .bind(&src.sha256)
             .bind(src.size_bytes as i64)
             .bind(&acl)
-            .bind(status)
+            .bind(status.trim_matches('"'))
             .bind(src.language.as_deref())
             .bind(src.classification.clone())
             .bind(src.created_at)
             .bind(src.ingested_at)
-            .execute(&mut *tx)
+            .bind(filing.map(|(name, _)| name))
+            .bind(filing.map_or(0, |(_, revision)| revision))
+            .execute(&mut **tx)
             .await
             .context("insert source")?;
 
-            tx.commit().await.context("commit insert source")?;
-            Ok(())
-        })
-        .await
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn get_source_in(
@@ -85,11 +105,11 @@ impl PgStore {
                 "SELECT slug, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
                         acl, status, language, classification, created_at, ingested_at \
                  FROM sources \
-                 WHERE folder_path LIKE $1 \
+                 WHERE starts_with(folder_path, $1) \
                  ORDER BY created_at DESC \
                  LIMIT $2",
             )
-            .bind(format!("{folder_prefix}%"))
+            .bind(folder_prefix)
             .bind(limit)
             .fetch_all(&mut *tx)
             .await
@@ -167,19 +187,44 @@ impl PgStore {
         tenant: &Tenant,
         slug: &SourceId,
         folder_path: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         with_db_span(DbSystem::Postgresql, "update_source_folder_path", async move {
             let mut tx = self.begin_for(tenant).await?;
-            sqlx::query("UPDATE sources SET folder_path = $1 WHERE slug = $2")
+            let result = sqlx::query("UPDATE sources SET folder_path = $1 WHERE slug = $2 AND filing_revision=0")
                 .bind(folder_path)
                 .bind(slug.as_str())
                 .execute(&mut *tx)
                 .await
                 .context("update_folder_path")?;
             tx.commit().await?;
-            Ok(())
+            Ok(result.rows_affected() == 1)
         })
         .await
+    }
+
+    /// An older in-flight move cannot overwrite the newer filing. Equal revisions
+    /// acknowledge a retry only when identity and the full key match.
+    pub async fn apply_source_filing(
+        &self, tenant: &Tenant, slug: &SourceId, digest: &str, folder: &str, name: &str, revision: i32,
+    ) -> Result<bool> {
+        let mut tx = self.begin_for(tenant).await?;
+        let result = sqlx::query("UPDATE sources SET folder_path=$3, filing_name=$4, filing_revision=$5
+            WHERE slug=$1 AND sha256=$2 AND (filing_revision<$5 OR
+            (filing_revision=$5 AND folder_path=$3 AND filing_name=$4))")
+            .bind(slug.as_str()).bind(digest).bind(folder).bind(name).bind(revision)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn source_filings(&self, tenant: &Tenant, groups: &[String], admin: bool) -> Result<HashMap<String, String>> {
+        let mut tx = self.begin_for(tenant).await?;
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT slug, rtrim(folder_path, '/') || '/' || filing_name FROM sources
+             WHERE filing_revision>0 AND ($1 OR acl && $2::text[])")
+            .bind(admin).bind(groups).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Reset a source row for a replace-in-place re-upload. The public
@@ -251,7 +296,7 @@ impl PgStore {
                 "SELECT slug, tenant_id, folder_path, filename, mime, sha256, size_bytes, \
                         acl, status, language, classification, created_at, ingested_at \
                  FROM sources \
-                 WHERE folder_path = '/' AND classification IS NOT NULL \
+                 WHERE folder_path = '/' AND filing_revision=0 AND classification IS NOT NULL \
                  ORDER BY created_at DESC \
                  LIMIT $1",
             )

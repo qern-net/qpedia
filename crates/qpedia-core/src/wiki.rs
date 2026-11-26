@@ -2,6 +2,30 @@ use crate::{acl::Acl, PageId, SourceId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Repository paths maintained by QPedia itself.
+pub const SYSTEM_PAGES: [&str; 3] = ["index.md", "log.md", "QPEDIA.md"];
+pub const META_PREFIX: &str = "_meta/";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WikiPageScope {
+    #[default]
+    All,
+    Knowledge,
+}
+
+impl WikiPageScope {
+    pub fn includes(self, path: &str) -> bool {
+        self == Self::All || (path.ends_with(".md")
+            && !path.contains('\\')
+            && !path.split('/').any(|part| matches!(part, "" | "." | ".." | ".git"))
+            && !is_system_page(path))
+    }
+}
+
+pub fn is_system_page(path: &str) -> bool {
+    SYSTEM_PAGES.contains(&path) || path.starts_with(META_PREFIX)
+}
+
 /// LLM-authored wiki page. Persisted as markdown in the per-tenant git repo
 /// and mirrored into the `wiki_pages` table (pgvector + tsvector) for search.
 #[derive(Debug, Clone, Serialize, Deserialize)]

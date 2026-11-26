@@ -22,11 +22,13 @@ use futures::stream::StreamExt;
 use qpedia_core::{
     acl::Acl,
     source::{Source, SourceStatus},
+    wiki::WikiPageScope,
     SourceId,
 };
 use qpedia_pg_store::SearchHit;
 use qpedia_retriever::{ChatEvent, ChatRequest, Retriever};
 use qpedia_store::blob::{BlobKind, BlobStorage};
+use qpedia_store::WikiRepo;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -428,7 +430,7 @@ pub(crate) async fn download_source_original(
     let bytes = s
         .ctx
         .blob
-        .get(&sid, BlobKind::Original, ext)
+        .get(&user.tenant,&sid, BlobKind::Original, ext)
         .await
         .map_err(|_| ApiError::NotFound)?;
     let disposition = format!(
@@ -571,7 +573,7 @@ pub(crate) async fn replace_source(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
-    s.ctx.blob.put(&sid, BlobKind::Original, ext, bytes).await?;
+    s.ctx.blob.put(&user.tenant,&sid, BlobKind::Original, ext, bytes).await?;
 
     s.ctx
         .db
@@ -618,9 +620,29 @@ pub(crate) async fn replace_source(
 // folders + move
 // ============================================================================
 
+/// Enable versioned source filings for the application mounting this router.
+#[derive(Clone, Copy)]
+pub struct VersionedSourceFiling;
+
 #[derive(Deserialize)]
 pub(crate) struct MoveSourceBody {
     folder_path: String,
+    filing_name: Option<String>,
+    filing_revision: Option<i32>,
+    sha256: Option<String>,
+}
+
+fn validate_filing(folder: &str, name: &str, revision: i32) -> Result<(), ApiError> {
+    fn segment(s: &str) -> bool {
+        !s.is_empty() && s != "." && s != ".." &&
+            !s.bytes().any(|b| b.is_ascii_control() || b == b'\\' || b == b'/')
+    }
+    let relative = folder.strip_prefix('/').ok_or_else(|| ApiError::Bad("absolute folder required".into()))?;
+    if revision < 1 || !segment(name) || (!relative.is_empty() && !relative.split('/').all(segment)) ||
+        relative.len() + usize::from(!relative.is_empty()) + name.len() > 1024 {
+        return Err(ApiError::Bad("invalid source filing key or revision".into()));
+    }
+    Ok(())
 }
 
 pub(crate) async fn move_source(
@@ -642,12 +664,28 @@ pub(crate) async fn move_source(
     if !user.can_read(&existing.acl) {
         return Err(ApiError::NotFound);
     }
+    if scope_has_filings(&s) {
+        let (Some(name), Some(revision), Some(digest)) = (body.filing_name, body.filing_revision, body.sha256) else {
+            return Err(ApiError::Bad("filing name, revision and source digest required".into()));
+        };
+        validate_filing(&body.folder_path, &name, revision)?;
+        if !s.ctx.db.apply_source_filing(&user.tenant, &sid, &digest, &body.folder_path, &name, revision)
+            .await.map_err(ApiError::Internal)? {
+            return Err(ApiError::Conflict);
+        }
+        let filing = json!({ "id": sid.as_str(), "tenant": user.tenant.as_str(), "sha256": digest,
+            "folder_path": body.folder_path, "filing_name": name, "filing_revision": revision });
+        s.ctx.db.write_audit(&user.tenant, &user.id, "source.move", Some(sid.as_str()), Some(&filing))
+            .await.map_err(ApiError::Internal)?;
+        return Ok(Json(filing));
+    }
     let folder = qpedia_pg_store::slugify_folder(&body.folder_path);
-    s.ctx
+    let moved = s.ctx
         .db
         .update_folder_path(&user.tenant, &sid, &folder)
         .await
         .map_err(ApiError::Internal)?;
+    if !moved { return Err(ApiError::Conflict); }
     s.ctx
         .db
         .write_audit(
@@ -787,13 +825,32 @@ pub(crate) struct WikiListQuery {
     prefix: Option<String>,
 }
 
+fn scope_has_filings(s: &AppState) -> bool {
+    s.extensions.get::<VersionedSourceFiling>().is_some()
+}
+
+async fn reader_wiki(s: &AppState, user: &User) -> Result<WikiRepo, ApiError> {
+    let scope = s.extensions.get::<WikiPageScope>().as_deref().copied().unwrap_or_default();
+    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    if scope_has_filings(s) && scope == WikiPageScope::Knowledge {
+        // Filing labels enrich a read; they must not disable filesystem fallback.
+        // Page authorization still runs independently and fails closed on lookup errors.
+        match tokio::time::timeout(std::time::Duration::from_secs(1),
+            s.ctx.db.source_filings(&user.tenant, &user.groups, user.is_admin())).await {
+            Ok(Ok(filings)) => return Ok(wiki.with_page_scope(scope).with_source_filings(filings)),
+            _ => tracing::warn!("filing enrichment unavailable; retaining scoped wiki reads"),
+        }
+    }
+    Ok(wiki.with_page_scope(scope))
+}
+
 pub(crate) async fn list_wiki_pages(
     State(s): State<AppState>,
     user: User,
     Query(q): Query<WikiListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let prefix = q.prefix.unwrap_or_default();
-    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let wiki = reader_wiki(&s, &user).await?;
     let pages = wiki.list_pages(&prefix).await.map_err(ApiError::Internal)?;
     Ok(Json(json!({ "prefix": prefix, "pages": pages })))
 }
@@ -810,20 +867,39 @@ pub(crate) async fn search_wiki(
     Query(q): Query<WikiSearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = q.limit.unwrap_or(10).min(50);
-    let (mode, hits) = run_search(&s, &user, &q.q, limit * 3).await?;
-    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let wiki = reader_wiki(&s, &user).await?;
+    let (mode, hits) = run_search(&s, &user, &wiki, &q.q, limit * 3).await?;
 
-    let mut allowed = Vec::with_capacity(hits.len());
-    for h in hits {
+    let candidates = if scope_has_filings(&s) && wiki.page_scope() == WikiPageScope::Knowledge {
+        wiki.merge_search_hits(
+            &q.q,
+            hits.into_iter().map(|h| qpedia_store::wikirepo::SearchHit {
+                path: h.path, title: h.title, snippet: h.snippet,
+            }).collect(),
+            limit * 3,
+        ).await.map_err(ApiError::Internal)?
+    } else {
+        hits.into_iter().map(|h| (
+            qpedia_store::wikirepo::SearchHit { path: h.path, title: h.title, snippet: h.snippet },
+            f64::from(h.score),
+        )).collect()
+    };
+    let mut allowed = Vec::with_capacity(candidates.len());
+    let mut seen = std::collections::HashSet::new();
+    for (h, score) in candidates {
+        if !seen.insert(h.path.clone()) { continue; }
         if let Some(content) = wiki.read_page(&h.path).await.ok().flatten() {
-            let source_ids = parse_source_ids(&content);
-            let acl = effective_wiki_acl(&s.ctx.db, &user.tenant, &source_ids).await;
-            if source_ids.is_empty() || user.can_read(&acl) {
+            let Ok(source_ids) = qpedia_store::page_source_ids(&content) else { continue; };
+            if source_ids.is_empty() || user.is_admin() ||
+                user.can_read(&effective_wiki_acl(&s.ctx.db, &user.tenant, &source_ids).await) {
+                let paths = wiki.filing_paths(&content);
+                let snippet = if paths.is_empty() || paths.iter().all(|key| h.snippet.contains(key)) { h.snippet }
+                    else { format!("{} — {}", paths.join(" · "), h.snippet) };
                 allowed.push(json!({
                     "path": h.path,
                     "title": h.title,
-                    "snippet": h.snippet,
-                    "score": h.score,
+                    "snippet": snippet,
+                    "score": score,
                 }));
                 if allowed.len() >= limit {
                     break;
@@ -834,55 +910,24 @@ pub(crate) async fn search_wiki(
     Ok(Json(json!({ "query": q.q, "mode": mode, "hits": allowed })))
 }
 
-/// Parse `source_ids: [...]` from frontmatter without pulling in the lint
-/// crate — duplicated intentionally to keep deps clean.
-fn parse_source_ids(content: &str) -> Vec<String> {
-    let trimmed = content.trim_start();
-    let Some(after) = trimmed.strip_prefix("---") else { return Vec::new() };
-    let Some(end) = after.find("\n---") else { return Vec::new() };
-    let fm = &after[..end];
-    let mut out = Vec::new();
-    for line in fm.lines() {
-        let line = line.trim_start();
-        if let Some(rest) = line.strip_prefix("source_ids:") {
-            let s = rest.trim().trim_start_matches('[').trim_end_matches(']');
-            for x in s.split(',') {
-                let x = x.trim().trim_matches('"').trim_matches('\'');
-                if !x.is_empty() {
-                    out.push(x.to_string());
-                }
-            }
-        }
-    }
-    out
-}
-
 async fn run_search(
     s: &AppState,
     user: &User,
+    wiki: &WikiRepo,
     query: &str,
     limit: usize,
 ) -> Result<(&'static str, Vec<SearchHit>), ApiError> {
     if let Some(embedder) = &s.ctx.embedder {
-        let qv = embedder
-            .embed(&[query])
-            .await
-            .map_err(ApiError::Internal)?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        match s
-            .ctx
-            .db
-            .hybrid_search(&user.tenant, query, qv, limit as i64)
-            .await
-        {
+        let indexed = async {
+            let qv = embedder.embed(&[query]).await?.into_iter().next().unwrap_or_default();
+            s.ctx.db.hybrid_search_scoped(&user.tenant, query, qv, limit as i64, wiki.page_scope()).await
+        }.await;
+        match indexed {
             Ok(h) if !h.is_empty() => return Ok(("hybrid", h)),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "pg hybrid search failed; falling back"),
         }
     }
-    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
     let hits = wiki
         .search_text(query, limit)
         .await
@@ -915,7 +960,7 @@ pub(crate) async fn chat(
         )
     })?;
 
-    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let wiki = reader_wiki(&s, &user).await?;
     let retriever = Retriever {
         embedder: s.ctx.embedder.clone(),
         reranker: s.ctx.reranker.clone(),
@@ -955,14 +1000,14 @@ pub(crate) async fn get_wiki_page(
 ) -> Result<axum::response::Response, ApiError> {
     use axum::http::header;
     use axum::response::IntoResponse as _;
-    let wiki = s.ctx.wiki_store.get(&user.tenant).await.map_err(ApiError::Internal)?;
+    let wiki = reader_wiki(&s, &user).await?;
     let content = match wiki.read_page(&path).await {
         Ok(Some(c)) => c,
         Ok(None) => return Err(ApiError::NotFound),
         Err(e) => return Err(ApiError::Internal(e)),
     };
-    let source_ids = parse_source_ids(&content);
-    if !source_ids.is_empty() {
+    let source_ids = qpedia_store::page_source_ids(&content).map_err(|_| ApiError::NotFound)?;
+    if !source_ids.is_empty() && !user.is_admin() {
         let acl = effective_wiki_acl(&s.ctx.db, &user.tenant, &source_ids).await;
         if !user.can_read(&acl) {
             return Err(ApiError::NotFound);
@@ -979,14 +1024,22 @@ pub(crate) async fn upload_source(
     State(s): State<AppState>,
     user: User,
     mut mp: Multipart,
-) -> Result<Json<Source>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let mut folder_path = "/".to_string();
+    let mut filing_name = None;
+    let mut filing_revision = None;
+    let host_filing = scope_has_filings(&s);
     let mut filename = String::new();
     let mut bytes: Option<bytes::Bytes> = None;
 
     while let Some(field) = mp.next_field().await.map_err(|e| ApiError::Bad(e.to_string()))? {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
+            "filing_name" if host_filing => filing_name = Some(field.text().await.map_err(|e| ApiError::Bad(e.to_string()))?),
+            "filing_revision" if host_filing => {
+                let value = field.text().await.map_err(|e| ApiError::Bad(e.to_string()))?;
+                filing_revision = Some(value.parse::<i32>().map_err(|_| ApiError::Bad("invalid filing revision".into()))?);
+            }
             "folder_path" => {
                 folder_path = field
                     .text()
@@ -1008,11 +1061,19 @@ pub(crate) async fn upload_source(
     }
 
     let bytes = bytes.ok_or_else(|| ApiError::Bad("missing 'file' field".into()))?;
+    let filing = match (filing_name.as_deref(), filing_revision) {
+        (None, None) => None,
+        (Some(name), Some(revision)) => {
+            validate_filing(&folder_path, name, revision)?;
+            Some((name, revision))
+        }
+        _ => return Err(ApiError::Bad("incomplete or unsupported host filing".into())),
+    };
     if filename.is_empty() {
         return Err(ApiError::Bad("missing filename".into()));
     }
 
-    let mime = mime_guess::from_path(&filename)
+    let mime = mime_guess::from_path(filing.map_or(filename.as_str(), |(name, _)| name))
         .first_or_octet_stream()
         .to_string();
 
@@ -1020,9 +1081,23 @@ pub(crate) async fn upload_source(
     hasher.update(&bytes);
     let sha256 = hex::encode(hasher.finalize());
 
-    let slug = qpedia_pg_store::unique_source_slug(&s.ctx.db, &user.tenant, &filename)
-        .await
-        .map_err(ApiError::Internal)?;
+    let slug = if filing.is_some() {
+        // The host supplies a stable document identifier as the multipart filename.
+        // Keep a pre-existing legacy binding, but hash the COMPLETE identifier for
+        // new bindings (punctuation, case and suffixes beyond 80 chars matter).
+        let canonical = SourceId::from(format!("host-{}", hex::encode(Sha256::digest(filename.as_bytes()))));
+        if s.ctx.db.get_source_in(&user.tenant, &canonical).await.map_err(ApiError::Internal)?.is_some() {
+            canonical.to_string()
+        } else {
+            let legacy = SourceId::from(qpedia_pg_store::slugify(&filename));
+            match s.ctx.db.get_source_in(&user.tenant, &legacy).await.map_err(ApiError::Internal)? {
+                Some(source) if source.filename == filename => legacy.to_string(),
+                _ => canonical.to_string(),
+            }
+        }
+    } else {
+        qpedia_pg_store::unique_source_slug(&s.ctx.db, &user.tenant, &filename).await.map_err(ApiError::Internal)?
+    };
     let id = SourceId::from(slug);
     let now = Utc::now();
     let upload_acl = match s
@@ -1050,16 +1125,25 @@ pub(crate) async fn upload_source(
         ingested_at: None,
         classification: None,
     };
-    s.ctx.db.insert_source(&src).await.map_err(ApiError::Internal)?;
+    let job = qpedia_ingest::ingest_job(&user.tenant, &id).map_err(ApiError::Internal)?;
+    let Some(staged) = s.ctx.db.stage_upload(&src, filing, &job).await.map_err(ApiError::Internal)? else {
+        let existing = s.ctx.db.get_source_in(&user.tenant, &id).await.map_err(ApiError::Internal)?;
+        if let Some(prior) = existing.filter(|p| filing.is_some() && user.can_read(&p.acl) &&
+            p.filename == filename && p.sha256 == src.sha256 && p.size_bytes == src.size_bytes) {
+            // Only the source identity is acknowledged. The move route reconciles any
+            // revision change between the first POST and this replay.
+            return Ok(Json(json!(prior)));
+        }
+        return Err(ApiError::Conflict);
+    };
 
     let ext = std::path::Path::new(&filename)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
-    s.ctx.blob.put(&id, BlobKind::Original, ext, bytes).await?;
+    s.ctx.blob.put(&user.tenant,&id, BlobKind::Original, ext, bytes).await?;
 
-    let job = qpedia_ingest::ingest_job(&user.tenant, &id).map_err(ApiError::Internal)?;
-    s.ctx.db.enqueue(&user.tenant, &job).await.map_err(ApiError::Internal)?;
+    staged.commit().await.map_err(|e| ApiError::Internal(e.into()))?;
     s.ctx
         .db
         .write_audit(
@@ -1073,7 +1157,12 @@ pub(crate) async fn upload_source(
         .map_err(ApiError::Internal)?;
 
     info!(id = %id, mime = %mime, "source enqueued");
-    Ok(Json(src))
+    let mut receipt = json!(src);
+    if let Some((name, revision)) = filing {
+        receipt["filing_name"] = json!(name);
+        receipt["filing_revision"] = json!(revision);
+    }
+    Ok(Json(receipt))
 }
 
 // ============================================================================
@@ -2296,6 +2385,7 @@ pub(crate) async fn resume_stalled_sources(
 #[derive(Debug)]
 pub enum ApiError {
     NotFound,
+    Conflict,
     Bad(String),
     Forbidden,
     /// 429 with `Retry-After` header. The carried `u64` is seconds.
@@ -2339,6 +2429,7 @@ impl IntoResponse for ApiError {
         }
         let (status, msg) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::Conflict => (StatusCode::CONFLICT, "source filing revision or identity conflict".into()),
             ApiError::Bad(s) => (StatusCode::BAD_REQUEST, s),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
             ApiError::Internal(e) => {

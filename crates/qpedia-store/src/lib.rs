@@ -5,7 +5,9 @@
 //!   - `BlobStore`: raw + extracted blobs under `/data/raw/<id>/`.
 
 pub mod blob;
+mod page_metadata;
 pub mod wikirepo;
 
 pub use blob::{BlobKind, BlobStorage, BlobStore};
+pub use page_metadata::page_source_ids;
 pub use wikirepo::{SearchHit, WikiRepo, WikiRepoStore};
