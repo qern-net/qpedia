@@ -26,6 +26,7 @@ use qpedia_core::{
     SourceId,
 };
 use qpedia_store::blob::BlobStorage;
+use qpedia_store::WikiRepo;
 use tracing::{info, warn};
 
 pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
@@ -41,6 +42,12 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
     let wiki = ctx.wiki_store.get(tenant).await?;
     let ingest_id = format!("remove-{source_id}");
     let previous = wiki.changed_in_latest_ingest(&ingest_id).await?;
+    let previously_committed = previous.is_some();
+    if let Some(paths) = previous {
+        // Finish reconciliation before a new removal commit can become the
+        // resume point. A lost claim here will retry the same reconciliation.
+        reconcile_wiki_index(ctx, tenant, &wiki, paths).await?;
+    }
 
     // ── 1. Plan: walk wiki, decide delete vs patch per affected page ──────
 
@@ -115,7 +122,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     // ── 4. Append to log.md ───────────────────────────────────────────────
 
-    let log_content = if previous.is_none() || !ops.is_empty() {
+    let log_content = if !previously_committed || !ops.is_empty() {
         wiki.read_page("log.md").await?
     } else {
         None
@@ -140,7 +147,6 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     // ── 5. Commit ─────────────────────────────────────────────────────────
 
-    let mut paths = previous.unwrap_or_default();
     if !ops.is_empty() {
         let bundle = DiffBundle {
             ingest_id: ingest_id.clone(),
@@ -153,22 +159,11 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         };
         let sha = persist(wiki.commit_bundle(&bundle)).await?;
         info!(id = %source_id, sha = %sha, "remove: wiki committed");
-        paths.extend(wiki.changed_in_latest_ingest(&ingest_id).await?.unwrap_or_default());
+        let paths = wiki.changed_in_latest_ingest(&ingest_id).await?.unwrap_or_default();
+        reconcile_wiki_index(ctx, tenant, &wiki, paths).await?;
     } else {
         info!(id = %source_id, "remove: no wiki changes needed");
     }
-
-    // Reconcile even after a lease loss, when the already committed pages no
-    // longer contain the removed source's citation.
-    paths.sort_unstable();
-    paths.dedup();
-    for path in &paths {
-        if wiki.read_page(path).await?.is_none() {
-            ctx.db.delete_wiki_page(tenant, path).await?;
-        }
-    }
-    let embedded = embed_pages(ctx, tenant, &wiki, paths).await?;
-    info!(id = %source_id, pages = embedded.len(), "remove: reconciled wiki index");
 
     // ── 7. Drop raw blobs ─────────────────────────────────────────────────
 
@@ -195,6 +190,22 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         .await;
 
     info!(id = %source_id, "remove: done");
+    Ok(())
+}
+
+async fn reconcile_wiki_index(
+    ctx: &IngestContext,
+    tenant: &Tenant,
+    wiki: &WikiRepo,
+    paths: Vec<String>,
+) -> Result<()> {
+    for path in &paths {
+        if wiki.read_page(path).await?.is_none() {
+            ctx.db.delete_wiki_page(tenant, path).await?;
+        }
+    }
+    let embedded = embed_pages(ctx, tenant, wiki, paths).await?;
+    info!(%tenant, pages = embedded.len(), "remove: reconciled wiki index");
     Ok(())
 }
 

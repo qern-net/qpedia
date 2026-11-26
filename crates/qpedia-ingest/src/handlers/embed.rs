@@ -10,7 +10,7 @@ use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
 use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
 use qpedia_pg_store::WikiPageUpsert;
-use qpedia_store::WikiRepo;
+use qpedia_store::{page_source_ids, WikiRepo};
 use tracing::{info, warn};
 
 const MAX_EMBED_CHARS: usize = 8000;
@@ -34,7 +34,8 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
             let mut paths = Vec::new();
             for path in wiki.list_pages("").await? {
                 if wiki.read_page(&path).await?.is_some_and(|page| {
-                    parse_frontmatter(&page).source_ids.iter().any(|id| id == source_id.as_str())
+                    page_source_ids(&page)
+                        .is_ok_and(|ids| ids.iter().any(|id| id == source_id.as_str()))
                 }) {
                     paths.push(path);
                 }
@@ -91,6 +92,7 @@ pub(crate) async fn embed_pages(
 
     for path in &touched {
         let Some(content) = wiki.read_page(path).await? else { continue };
+        let source_ids = page_source_ids(&content)?;
         let fm = parse_frontmatter(&content);
         let title = fm.title.clone().unwrap_or_else(|| path.clone());
         let body = strip_frontmatter(&content);
@@ -105,7 +107,7 @@ pub(crate) async fn embed_pages(
             title,
             content,
             tags: fm.tags,
-            source_ids: fm.source_ids,
+            source_ids,
         };
         records.push((path.clone(), upsert));
         embed_inputs.push(embed_text);
@@ -142,7 +144,6 @@ struct Frontmatter {
     title: Option<String>,
     kind: Option<String>,
     tags: Vec<String>,
-    source_ids: Vec<String>,
 }
 
 fn strip_frontmatter(content: &str) -> &str {
@@ -171,8 +172,6 @@ fn parse_frontmatter(content: &str) -> Frontmatter {
             r.kind = Some(unquote(rest.trim()));
         } else if let Some(rest) = line.strip_prefix("tags:") {
             r.tags = parse_inline_list(rest.trim());
-        } else if let Some(rest) = line.strip_prefix("source_ids:") {
-            r.source_ids = parse_inline_list(rest.trim());
         }
     }
     r
