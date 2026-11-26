@@ -6,6 +6,8 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+- Keep job handlers running during lease renewal and finish an in-progress wiki commit safely if a worker loses its claim.
+
 - Renew job claims throughout processing and fence completion and failure to the current attempt.
 - Reject embedded queue grants that weaken the request role's tenant isolation.
 

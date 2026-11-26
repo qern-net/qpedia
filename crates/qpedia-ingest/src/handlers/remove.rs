@@ -18,7 +18,7 @@
 //! handler skips the commit and proceeds to blob/DB cleanup.
 
 use crate::handlers::embed::embed_changed_pages;
-use crate::runner::IngestContext;
+use crate::runner::{persist, IngestContext};
 use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
@@ -144,15 +144,19 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
             ),
             operations: ops,
         };
-        let sha = wiki.commit_bundle(&bundle).await?;
-        info!(id = %source_id, sha = %sha, "remove: wiki committed");
+        persist(async {
+            let sha = wiki.commit_bundle(&bundle).await?;
+            info!(id = %source_id, sha = %sha, "remove: wiki committed");
 
-        // ── 6a. Drop deleted pages from wiki_pages ─────────────────────────
-        for path in &to_delete {
-            if let Err(e) = ctx.db.delete_wiki_page(tenant, path).await {
-                warn!(path = %path, error = %e, "wiki_pages delete failed (non-fatal)");
+            // ── 6a. Drop deleted pages from wiki_pages ─────────────────────────
+            for path in &to_delete {
+                if let Err(e) = ctx.db.delete_wiki_page(tenant, path).await {
+                    warn!(path = %path, error = %e, "wiki_pages delete failed (non-fatal)");
+                }
             }
-        }
+            Ok(())
+        })
+        .await?;
 
         // ── 6b. Re-embed patched pages (HEAD diff captures the patches) ───
         if !to_patch.is_empty() {
