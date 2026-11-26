@@ -35,7 +35,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         embedder: ctx.embedder.clone(),
     };
 
-    let bundle = run_agent(&deps, &src).await?;
+    let (bundle, coverage) = run_agent(&deps, &src).await?;
     if bundle.operations.is_empty() {
         warn!(id = %source_id, "agent returned empty bundle; nothing to commit");
         ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;
@@ -69,6 +69,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
             Some(source_id.as_str()),
             Some(&serde_json::json!({
                 "sha": sha,
+                "source_coverage": coverage,
                 "ops": bundle.operations.len(),
                 "touched_pages": report.touched,
                 "bundle_bytes": report.bytes,

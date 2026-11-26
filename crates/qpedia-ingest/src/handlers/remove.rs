@@ -23,7 +23,7 @@ use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
     tenant::Tenant,
-    wiki::{DiffBundle, DiffOp},
+    wiki::{is_system_page, DiffBundle, DiffOp},
     SourceId,
 };
 use qpedia_store::blob::BlobStorage;
@@ -36,7 +36,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
     // If the row is already gone (idempotent retry) skip straight to cleanup.
     if ctx.db.get_source_in(tenant, source_id).await?.is_none() {
         info!(id = %source_id, "remove: source already gone, cleaning up blobs");
-        let _ = ctx.blob.delete_all(source_id).await;
+        let _ = ctx.blob.delete_all(tenant,source_id).await;
         return Ok(());
     }
     let wiki = ctx.wiki_store.get(tenant).await?;
@@ -48,7 +48,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     for path in wiki.list_pages("").await? {
         // Skip system files — they're handled separately below.
-        if is_system_path(&path) {
+        if is_system_page(&path) {
             continue;
         }
         let Some(content) = wiki.read_page(&path).await? else { continue };
@@ -167,7 +167,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     // ── 7. Drop raw blobs ─────────────────────────────────────────────────
 
-    if let Err(e) = ctx.blob.delete_all(source_id).await {
+    if let Err(e) = ctx.blob.delete_all(tenant,source_id).await {
         warn!(id = %source_id, error = %e, "remove: blob cleanup failed (non-fatal)");
     }
 
@@ -194,10 +194,6 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-fn is_system_path(path: &str) -> bool {
-    matches!(path, "index.md" | "log.md" | "QPEDIA.md") || path.starts_with("_meta/")
-}
 
 fn extract_source_ids(content: &str) -> Vec<String> {
     let trimmed = content.trim_start();

@@ -6,6 +6,11 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+- Add the optional qpedia-runtime library for application-owned HTTP routing, authentication and ingestion workers.
+- Isolate filesystem originals and derived artifacts by tenant, preserve page identity and timestamps on ingest, and support bounded local OCR.
+- Support opt-in versioned filing metadata, current filing labels and combined content and filing search.
+- Verify migration history at startup when schema changes are managed separately.
+
 ## [1.3.0] — 2026-07-05
 
 **Integration-ready.** This release makes Qpedia a platform other applications

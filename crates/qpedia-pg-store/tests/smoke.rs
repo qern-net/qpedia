@@ -23,6 +23,7 @@ use qpedia_core::{
     acl::Acl,
     source::{Source, SourceStatus},
     tenant::Tenant,
+    wiki::WikiPageScope,
     SourceId,
 };
 use qpedia_pg_store::{unique_source_slug, PgStore, WikiPageUpsert};
@@ -35,6 +36,45 @@ fn unique_tenant() -> Tenant {
         .unwrap()
         .as_nanos();
     Tenant::new(format!("ci-{nanos:032}"))
+}
+
+#[tokio::test]
+async fn knowledge_search_filters_existing_index_entries_before_ranking() -> anyhow::Result<()> {
+    let Ok(url) = std::env::var("QPEDIA_DB_URL") else { return Ok(()); };
+    let db = PgStore::connect(&url).await?;
+    let tenant = unique_tenant();
+    db.upsert_tenant(&tenant, "Search fixture", None).await?;
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    let mut page = WikiPageUpsert {
+        page_id: String::new(), path: String::new(), kind: "meta".into(),
+        title: "catalog catalog catalog".into(), content: "catalog ".repeat(20),
+        tags: vec![], source_ids: vec![],
+    };
+    // More obsolete index entries than the minimum candidate pool of 50.
+    let internal = ["index.md", "log.md", "QPEDIA.md"].map(str::to_owned);
+    for (i, path) in internal.into_iter().chain((0..55).map(|i| format!("_meta/{i}.md"))).enumerate() {
+        page.page_id = format!("system-{i}");
+        page.path = path;
+        db.upsert_wiki_page(&tenant, &page, vector.clone()).await?;
+    }
+    page.page_id = "genuine".into();
+    page.path = "summaries/index.md".into();
+    page.kind = "summary".into();
+    page.title = "Case summary".into();
+    page.content = "An exhibit catalog.".into();
+    let mut less_similar = vector.clone();
+    less_similar[1] = 0.5;
+    db.upsert_wiki_page(&tenant, &page, less_similar).await?;
+
+    let full = db.hybrid_search(&tenant, "catalog", vector.clone(), 1).await?;
+    assert_eq!(full.len(), 1);
+    assert_ne!(full[0].path, page.path);
+    for query in ["catalog", "unmatchedword"] {
+        let hits = db.hybrid_search_scoped(&tenant, query, vector.clone(), 1, WikiPageScope::Knowledge).await?;
+        assert_eq!(hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), [page.path.as_str()]);
+    }
+    Ok(())
 }
 
 #[tokio::test]

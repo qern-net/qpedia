@@ -87,8 +87,7 @@ fn check_page(
     //    rather than full YAML parse to avoid choking on the agent's quoting.
     //    System-managed files (index.md, log.md, QPEDIA.md, _meta/*) are exempt
     //    because they are seeded without frontmatter and maintained by the bot.
-    let is_system = matches!(path, "index.md" | "log.md" | "QPEDIA.md")
-        || path.starts_with("_meta/");
+    let is_system = qpedia_core::wiki::is_system_page(path);
 
     if !is_system {
         let fm = extract_frontmatter(content);

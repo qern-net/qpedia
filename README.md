@@ -446,4 +446,13 @@ bash scripts/restore.sh ./backups/20260529T120000Z
 
 Both default to a `postgres` service and the `./data` bind-mount; override with `QPEDIA_DATA_DIR`, `QPEDIA_BACKUP_DIR`, or `QPEDIA_PG_MODE=dsn QPEDIA_DB_URL=…` for a direct connection. See the header comments in each script for the full env surface.
 
+### Embed the engine
 
+Add the optional `qpedia-runtime` workspace crate to compose Qpedia in an
+application. A host supplies its authenticator, selects the API routes it
+exposes, and manages its network listener and workers. Ordinary engine and CLI
+builds work without the runtime crate. See [INTEGRATION.md](INTEGRATION.md).
+
+PostgreSQL schema startup uses `QPEDIA_SCHEMA_MODE=migrate` by default for
+standalone installations. Set it to `verify` after applying migrations
+separately if the application connects as a restricted runtime role.

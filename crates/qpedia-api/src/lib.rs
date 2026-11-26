@@ -44,4 +44,4 @@ pub use auth::{
     AuthState, ExternalAuthProvider, User,
 };
 pub use rate_limit::ChatRateLimiter;
-pub use routes::ApiError;
+pub use routes::{ApiError, VersionedSourceFiling};

@@ -32,10 +32,10 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant) -> Result<()> {
                     continue;
                 }
             }
-            if let Err(e) = ctx.db.update_folder_path(tenant, &src.id, &folder).await {
-                tracing::warn!(id = %src.id, error = %e, "lint: failed to reorganize source");
-            } else {
-                reorganized += 1;
+            match ctx.db.update_folder_path(tenant, &src.id, &folder).await {
+                Ok(true) => reorganized += 1,
+                Ok(false) => {},
+                Err(e) => tracing::warn!(id = %src.id, error = %e, "lint: failed to reorganize source"),
             }
         }
     }

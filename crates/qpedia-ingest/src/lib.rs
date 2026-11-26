@@ -2,6 +2,7 @@
 //! See SPEC-v2.md §5 and §6.
 
 pub mod agent;
+mod source_chunks;
 pub mod handlers;
 pub mod pipeline;
 pub mod runner;

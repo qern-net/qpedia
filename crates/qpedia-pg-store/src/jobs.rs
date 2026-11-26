@@ -17,7 +17,14 @@ impl PgStore {
     pub async fn enqueue(&self, tenant: &Tenant, job: &Job) -> Result<()> {
         with_db_span(DbSystem::Postgresql, "enqueue_job", async move {
             let mut tx = self.begin_for(tenant).await?;
-            sqlx::query(
+            Self::enqueue_in(&mut tx, tenant, job).await?;
+            tx.commit().await?;
+            Ok(())
+        }).await
+    }
+
+    pub(crate) async fn enqueue_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, tenant: &Tenant, job: &Job) -> Result<()> {
+        sqlx::query(
                 "INSERT INTO jobs \
                  (tenant_id, kind, payload, state, attempt, max_attempts, next_run_at, last_error, created_at, updated_at) \
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
@@ -32,13 +39,10 @@ impl PgStore {
             .bind(job.last_error.as_deref())
             .bind(job.created_at)
             .bind(job.updated_at)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .context("enqueue job")?;
-            tx.commit().await?;
-            Ok(())
-        })
-        .await
+        Ok(())
     }
 
     /// Claim the next due job across all tenants. Uses the admin pool so
