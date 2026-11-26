@@ -216,6 +216,9 @@ pub fn lint_job(tenant: &Tenant) -> Result<Job> {
     })
 }
 
+const JOB_LEASE_MS: i64 = 30 * 60_000;
+const RENEW_CLAIM_EVERY: Duration = Duration::from_secs(5 * 60);
+
 pub struct JobRunner {
     ctx: IngestContext,
     worker_id: String,
@@ -240,13 +243,10 @@ impl JobRunner {
             "job runner started"
         );
         loop {
-            // Lease length must exceed the slowest job so a legitimately
-            // long run (Marker OCR up to ~10 min + agent LLM turns + embed)
-            // isn't reclaimed by another worker mid-flight. A crashed worker's
-            // jobs become reclaimable once this lease lapses.
-            match self.ctx.db.claim_next_job(&self.worker_id, 30 * 60_000).await {
+            match self.ctx.db.claim_next_job(&self.worker_id, JOB_LEASE_MS).await {
                 Ok(Some(job)) => {
                     let id = job.id.clone();
+                    let attempt = job.attempt;
                     // Capture the ingest target up front: if the job dies
                     // permanently we mark the source `failed` so it surfaces
                     // as a terminal error instead of being stranded
@@ -254,11 +254,12 @@ impl JobRunner {
                     let ingest_target = matches!(job.kind, JobKind::Ingest)
                         .then(|| serde_json::from_value::<IngestPayload>(job.payload.clone()).ok())
                         .flatten();
-                    if let Err(e) = self.handle(job).await {
+                    let Some(result) = self.run_with_claim(job).await else { continue; };
+                    if let Err(e) = result {
                         let msg = format!("{e:#}");
                         error!(job = %id, error = %msg, "job failed");
-                        match self.ctx.db.fail_job(&id, &msg, Some(5_000)).await {
-                            Ok(true) => {
+                        match self.ctx.db.fail_job_claim(&id, attempt, &msg, Some(5_000)).await {
+                            Ok(Some(true)) => {
                                 if let Some(p) = ingest_target {
                                     warn!(job = %id, source = %p.source_id, "ingest job exhausted retries — marking source failed");
                                     let _ = self
@@ -282,11 +283,16 @@ impl JobRunner {
                                         .await;
                                 }
                             }
-                            Ok(false) => {} // re-queued for another attempt
+                            Ok(Some(false)) => {} // re-queued for another attempt
+                            Ok(None) => warn!(job = %id, "job claim expired before failure was recorded"),
                             Err(fe) => warn!(job = %id, error = %format!("{fe:#}"), "fail_job errored"),
                         }
                     } else {
-                        let _ = self.ctx.db.complete_job(&id).await;
+                        match self.ctx.db.complete_job_claim(&id, attempt).await {
+                            Ok(true) => {}
+                            Ok(false) => warn!(job = %id, "job claim expired before completion was recorded"),
+                            Err(e) => warn!(job = %id, error = %e, "could not record job completion"),
+                        }
                     }
                 }
                 Ok(None) => tokio::time::sleep(self.poll_idle).await,
@@ -297,6 +303,35 @@ impl JobRunner {
                     warn!(error = %format!("{e:#}"), "claim_next error; backing off");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
+            }
+        }
+    }
+
+    async fn run_with_claim(&self, job: Job) -> Option<Result<()>> {
+        let id = job.id.clone();
+        let attempt = job.attempt;
+        let handler = self.handle(job);
+        tokio::pin!(handler);
+        let first_tick = tokio::time::Instant::now() + RENEW_CLAIM_EVERY;
+        let mut renew = tokio::time::interval_at(first_tick, RENEW_CLAIM_EVERY);
+        renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                _ = renew.tick() => {
+                    match self.ctx.db.renew_job_claim(&id, attempt, JOB_LEASE_MS).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(job = %id, "stopping work after losing the job claim");
+                            return None;
+                        }
+                        Err(error) => {
+                            warn!(job = %id, %error, "stopping work because the job lease could not be renewed");
+                            return None;
+                        }
+                    }
+                }
+                result = &mut handler => return Some(result),
             }
         }
     }

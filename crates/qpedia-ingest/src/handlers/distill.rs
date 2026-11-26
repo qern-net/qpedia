@@ -35,8 +35,8 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         embedder: ctx.embedder.clone(),
     };
 
-    // Leave time for validation and persistence before the 30-minute job lease
-    // expires. This covers preprocessing and the agent's provider calls.
+    // Bound provider work independently of the worker's renewable job lease.
+    // Validation and persistence run after the agent produces a complete bundle.
     let (bundle, coverage) =
         tokio::time::timeout(std::time::Duration::from_secs(20 * 60), run_agent(&deps, &src))
             .await
