@@ -1,0 +1,21 @@
+{
+  "name": "@qern/file-manager",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    "./FileManager.svelte": "./file-manager/FileManager.svelte",
+    "./types": "./file-manager/types.ts",
+    "./qpedia": "./file-manager/qpedia.ts",
+    "./archive": "./file-manager/archive.js",
+    "./archive/Cargo.toml": "./file-manager/archive/Cargo.toml",
+    "./select-files.sql": "./file-manager/select-files.sql"
+  },
+  "files": [
+    "file-manager",
+    "!file-manager/**/target"
+  ],
+  "peerDependencies": {
+    "svelte": "^5.0.0"
+  }
+}
