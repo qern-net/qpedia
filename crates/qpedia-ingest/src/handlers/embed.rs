@@ -1,4 +1,4 @@
-//! Embedding phase: walk the pages touched by the latest wiki commit,
+//! Embedding phase: walk the pages touched by the source's wiki commit,
 //! embed each, and upsert into the `wiki_pages` table (pgvector + tsvector).
 //! See SPEC-v2.md §5.1.
 //!
@@ -10,11 +10,12 @@ use crate::runner::IngestContext;
 use anyhow::{anyhow, Result};
 use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
 use qpedia_pg_store::WikiPageUpsert;
+use qpedia_store::{page_source_ids, WikiRepo};
 use tracing::{info, warn};
 
 const MAX_EMBED_CHARS: usize = 8000;
 
-/// Per-source ingest phase: update status, embed pages from HEAD, audit.
+/// Per-source ingest phase: update status, resume its wiki commit, audit.
 pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> Result<()> {
     if ctx.embedder.is_none() {
         info!(id = %source_id, "no embedder — marking Done");
@@ -24,9 +25,27 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     ctx.db.update_status(tenant, source_id, SourceStatus::Embedding).await?;
 
-    let touched = embed_changed_pages(ctx, tenant).await?;
+    let wiki = ctx.wiki_store.get(tenant).await?;
+    let paths = match wiki.changed_in_latest_ingest(source_id.as_str()).await? {
+        Some(paths) => paths,
+        None => {
+            // Older imported wikis can have pages with citations but no
+            // engine-authored commit for this source.
+            let mut paths = Vec::new();
+            for path in wiki.list_pages("").await? {
+                if wiki.read_page(&path).await?.is_some_and(|page| {
+                    page_source_ids(&page)
+                        .is_ok_and(|ids| ids.iter().any(|id| id == source_id.as_str()))
+                }) {
+                    paths.push(path);
+                }
+            }
+            paths
+        }
+    };
+    let touched = embed_pages(ctx, tenant, &wiki, paths).await?;
     if touched.is_empty() {
-        warn!(id = %source_id, "embed: no markdown pages touched in HEAD");
+        warn!(id = %source_id, "embed: no markdown pages for the source");
     }
 
     ctx.db.update_status(tenant, source_id, SourceStatus::Done).await?;
@@ -45,17 +64,25 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 }
 
 /// Re-embed exactly the pages touched by HEAD and upsert into pgvector.
-/// Used by both the per-source embed phase and the remove pipeline (which
-/// re-embeds patched pages after stripping a removed source from frontmatter).
-///
-/// Returns the list of paths embedded. No-ops cleanly when embedder is missing.
 pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result<Vec<String>> {
+    if ctx.embedder.is_none() {
+        return Ok(Vec::new());
+    }
+    let wiki = ctx.wiki_store.get(tenant).await?;
+    let touched = wiki.changed_in_head().await?;
+    embed_pages(ctx, tenant, &wiki, touched).await
+}
+
+/// Re-index the current contents of specific wiki paths.
+pub(crate) async fn embed_pages(
+    ctx: &IngestContext,
+    tenant: &Tenant,
+    wiki: &WikiRepo,
+    touched: Vec<String>,
+) -> Result<Vec<String>> {
     let Some(embedder) = ctx.embedder.as_ref() else {
         return Ok(Vec::new());
     };
-
-    let wiki = ctx.wiki_store.get(tenant).await?;
-    let touched = wiki.changed_in_head().await?;
     if touched.is_empty() {
         return Ok(touched);
     }
@@ -65,6 +92,7 @@ pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result
 
     for path in &touched {
         let Some(content) = wiki.read_page(path).await? else { continue };
+        let source_ids = page_source_ids(&content)?;
         let fm = parse_frontmatter(&content);
         let title = fm.title.clone().unwrap_or_else(|| path.clone());
         let body = strip_frontmatter(&content);
@@ -79,7 +107,7 @@ pub async fn embed_changed_pages(ctx: &IngestContext, tenant: &Tenant) -> Result
             title,
             content,
             tags: fm.tags,
-            source_ids: fm.source_ids,
+            source_ids,
         };
         records.push((path.clone(), upsert));
         embed_inputs.push(embed_text);
@@ -116,7 +144,6 @@ struct Frontmatter {
     title: Option<String>,
     kind: Option<String>,
     tags: Vec<String>,
-    source_ids: Vec<String>,
 }
 
 fn strip_frontmatter(content: &str) -> &str {
@@ -145,8 +172,6 @@ fn parse_frontmatter(content: &str) -> Frontmatter {
             r.kind = Some(unquote(rest.trim()));
         } else if let Some(rest) = line.strip_prefix("tags:") {
             r.tags = parse_inline_list(rest.trim());
-        } else if let Some(rest) = line.strip_prefix("source_ids:") {
-            r.source_ids = parse_inline_list(rest.trim());
         }
     }
     r

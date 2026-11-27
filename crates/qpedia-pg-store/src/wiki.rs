@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use pgvector::Vector;
 use qpedia_core::tenant::Tenant;
+use qpedia_core::wiki::{WikiPageScope, META_PREFIX, SYSTEM_PAGES};
 use sqlx::Row;
 
 #[derive(Debug, Clone)]
@@ -116,6 +117,17 @@ impl PgStore {
         vector: Vec<f32>,
         limit: i64,
     ) -> Result<Vec<SearchHit>> {
+        self.hybrid_search_scoped(tenant, query, vector, limit, WikiPageScope::All).await
+    }
+
+    pub async fn hybrid_search_scoped(
+        &self,
+        tenant: &Tenant,
+        query: &str,
+        vector: Vec<f32>,
+        limit: i64,
+        scope: WikiPageScope,
+    ) -> Result<Vec<SearchHit>> {
         with_db_span(DbSystem::Postgresql, "hybrid_search", async move {
             let mut tx = self.begin_for(tenant).await?;
             let q_vec = Vector::from(vector);
@@ -128,9 +140,13 @@ impl PgStore {
             // an empty tsquery for garbage — then `tsv @@ q` matches nothing and
             // RRF degrades cleanly to vector-only, which is the right behavior.
             let rows = sqlx::query(
-                "WITH vec AS ( \
+                "WITH candidates AS NOT MATERIALIZED ( \
+                     SELECT path, embedding, tsv FROM wiki_pages \
+                     WHERE $6::boolean OR (path <> ALL($7::text[]) AND NOT starts_with(path, $8) \
+                         AND right(path, 3) = '.md') \
+                 ), vec AS ( \
                      SELECT path, row_number() OVER (ORDER BY embedding <=> $1::vector) AS rank \
-                     FROM wiki_pages \
+                     FROM candidates \
                      WHERE embedding IS NOT NULL \
                      ORDER BY embedding <=> $1::vector \
                      LIMIT $2 \
@@ -139,7 +155,7 @@ impl PgStore {
                      SELECT path, row_number() OVER ( \
                                 ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('english', $3)) DESC \
                             ) AS rank \
-                     FROM wiki_pages \
+                     FROM candidates \
                      WHERE tsv @@ websearch_to_tsquery('english', $3) \
                      ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('english', $3)) DESC \
                      LIMIT $2 \
@@ -165,6 +181,9 @@ impl PgStore {
             .bind(query)
             .bind(rrf_k as f64)
             .bind(limit)
+            .bind(scope == WikiPageScope::All)
+            .bind(&SYSTEM_PAGES[..])
+            .bind(META_PREFIX)
             .fetch_all(&mut *tx)
             .await
             .context("hybrid search (rrf)")?;

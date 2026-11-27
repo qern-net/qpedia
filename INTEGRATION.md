@@ -189,3 +189,27 @@ curl -N -X POST https://qpedia.cloud/api/v1/chat \
 |---|---|
 | **A (in-process)** | A first-party SaaS/platform overlay: billing, SSO/SCIM, premium connectors, compliance, observability sinks. |
 | **B (external)** | A distinct product with its own lifecycle calling `/api/v1` — e.g. a domain-specific document workflow, or a code-knowledge layer whose resident adapters are external callers while its hub runs as a Mode-A overlay. |
+
+## Optional runtime and upgrades
+
+The `qpedia-runtime` library provides `from_env` for a restricted,
+separately migrated database and `into_parts` for the router and ingest
+worker. The worker requires explicit cross-tenant SELECT and UPDATE policies on the jobs table that apply only to the worker. The request role must retain the standard jobs tenant policy without additional permissive grants. The restricted login cannot own public relations or belong to an owning role. Verify mode defaults to four connections per process.
+An embedding host provides an `ExternalAuthProvider` and supplies
+its own route authorization, bind address and worker lifetime. To use
+revisioned source filings, mount the `VersionedSourceFiling` extension and
+authorize the corresponding writes. `WikiPageScope::Knowledge` selects
+knowledge pages for a reader without changing the wiki repository on disk.
+
+The API v1 contract and existing tenant-scoped data paths stay stable.
+The Rust `BlobStorage` interface now requires the authenticated tenant on
+all operations. The filesystem layout is `raw/<tenant>/<source-id>/`.
+For an installation with the older flat layout, fence writes and migrate
+from a consistent database and filesystem snapshot before starting the new
+engine. Verify each original against the owning tenant's recorded digest
+and size, resolve ambiguous ownership from trusted backups, and keep the
+previous snapshot for rollback. An old flat tree must not be shared as a
+fallback between tenants. Migrations 1–8 retain their existing checksums.
+
+`QPEDIA_LOCAL_OCR=true` enables the bounded local Poppler/Tesseract extractor
+when those tools are installed. Off is the default.

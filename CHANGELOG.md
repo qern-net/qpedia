@@ -6,6 +6,19 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+- Keep job handlers running during lease renewal and finish an in-progress wiki commit safely if a worker loses its claim. Resume indexing from the affected bundle after a retry.
+
+- Renew job claims throughout processing and fence completion and failure to the current attempt.
+- Reject embedded queue grants that weaken the request role's tenant isolation.
+
+- Bound source analysis before the job lease expires and reject oversized documents before calling the inference provider.
+- Verify restricted database ownership and queue policies before starting an embedded worker, with a four-connection default in verify mode.
+
+- Add the optional qpedia-runtime library for application-owned HTTP routing, authentication and ingestion workers.
+- Isolate filesystem originals and derived artifacts by tenant, preserve page identity and timestamps on ingest, and support bounded local OCR.
+- Support opt-in versioned filing metadata, current filing labels and combined content and filing search.
+- Verify migration history at startup when schema changes are managed separately.
+
 ## [1.3.0] — 2026-07-05
 
 **Integration-ready.** This release makes Qpedia a platform other applications

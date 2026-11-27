@@ -7,8 +7,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use qpedia_core::{tenant::Tenant, wiki::{DiffBundle, DiffOp}};
-use std::collections::HashMap;
+use qpedia_core::{tenant::Tenant, wiki::{DiffBundle, DiffOp, WikiPageScope}};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
@@ -97,6 +97,21 @@ pub struct WikiRepo {
     root: PathBuf,
     author_name: String,
     author_email: String,
+    page_scope: WikiPageScope,
+    source_filings: Arc<HashMap<String, String>>,
+    provenance: Arc<Mutex<Option<Arc<ProvenanceIndex>>>>,
+}
+
+struct ProvenanceIndex {
+    head: String,
+    pages: HashMap<String, FilingPage>,
+    by_source: HashMap<String, Vec<String>>,
+}
+
+struct FilingPage {
+    title: String,
+    content: String,
+    source_ids: Vec<String>,
 }
 
 impl WikiRepo {
@@ -117,7 +132,8 @@ impl WikiRepo {
             return Err(anyhow!("`git` not found on PATH — install git or use the qpedia container image"));
         }
 
-        let repo = Self { root: root.clone(), author_name, author_email };
+        let repo = Self { root: root.clone(), author_name, author_email, page_scope: WikiPageScope::All,
+            source_filings: Arc::default(), provenance: Arc::default() };
 
         if !root.join(".git").exists() {
             info!(path = %root.display(), "initializing wiki repo");
@@ -145,10 +161,133 @@ impl WikiRepo {
 
     pub fn root(&self) -> &Path { &self.root }
 
+    pub fn with_page_scope(mut self, scope: WikiPageScope) -> Self {
+        self.page_scope = scope;
+        self
+    }
+
+    pub fn page_scope(&self) -> WikiPageScope { self.page_scope }
+
+    /// Attached to the request's reader, never to the cached writer or the Git tree.
+    pub fn with_source_filings(mut self, filings: HashMap<String, String>) -> Self {
+        self.source_filings = Arc::new(filings);
+        self
+    }
+
+    pub fn filing_paths<'a>(&'a self, content: &str) -> Vec<&'a str> {
+        if self.source_filings.is_empty() { return vec![]; }
+        let Ok(ids) = crate::page_source_ids(content) else { return vec![]; };
+        ids.iter().filter_map(|id| self.source_filings.get(id).map(String::as_str)).collect()
+    }
+
+    /// Shared across request readers. Only committed wiki changes invalidate this
+    /// reverse-provenance index; current authorized filing labels stay per request.
+    async fn provenance_index(&self) -> Result<Arc<ProvenanceIndex>> {
+        let head = self.git(&["rev-parse", "HEAD"]).await.ok();
+        let mut cache = self.provenance.lock().await;
+        if let (Some(head), Some(index)) = (&head, cache.as_ref()) {
+            if head == &index.head { return Ok(index.clone()); }
+        }
+        let mut index = ProvenanceIndex { head: head.clone().unwrap_or_default(), pages: HashMap::new(), by_source: HashMap::new() };
+        let all = self.clone().with_page_scope(WikiPageScope::All);
+        for path in all.list_pages("").await? {
+            let Some(content) = all.read_stored_page(&path).await? else { continue; };
+            let Ok(source_ids) = crate::page_source_ids(&content) else { continue; };
+            for source in &source_ids {
+                index.by_source.entry(source.clone()).or_default().push(path.clone());
+            }
+            let title = extract_title(&content).unwrap_or_else(|| path.clone());
+            index.pages.insert(path, FilingPage { title, content, source_ids });
+        }
+        let index = Arc::new(index);
+        // Never retain a snapshot built across a concurrent commit or without Git.
+        if head.is_some() && self.git(&["rev-parse", "HEAD"]).await.ok() == head {
+            *cache = Some(index.clone());
+        }
+        Ok(index)
+    }
+
+    pub async fn exact_filing_pages(&self, query: &str) -> Result<HashSet<String>> {
+        let q = query.trim().to_lowercase();
+        let sources: Vec<_> = self.source_filings.iter().filter(|(_, key)| exact_filing(key, &q)).map(|(source, _)| source).collect();
+        if sources.is_empty() { return Ok(HashSet::new()); }
+        let index = self.provenance_index().await?;
+        Ok(sources.into_iter().filter_map(|source| index.by_source.get(source)).flatten()
+            .filter(|path| self.page_scope.includes(path)).cloned().collect())
+    }
+
+    pub async fn search_filings(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() || limit == 0 { return Ok(vec![]); }
+        let matching: HashSet<_> = self.source_filings.iter()
+            .filter(|(_, key)| filing_matches(key, &q)).map(|(source, _)| source.as_str()).collect();
+        if matching.is_empty() { return Ok(vec![]); }
+        let index = self.provenance_index().await?;
+        let paths: HashSet<_> = matching.iter().filter_map(|source| index.by_source.get(*source)).flatten().collect();
+        let mut hits = Vec::new();
+        for path in paths {
+            if !self.page_scope.includes(path) { continue; }
+            let page = &index.pages[path];
+            let keys: Vec<_> = page.source_ids.iter().filter(|id| matching.contains(id.as_str()))
+                .filter_map(|id| self.source_filings.get(id)).collect();
+            let exact = keys.iter().any(|key| exact_filing(key, &q));
+            let score = relevance(&q, &page.title, &page.content);
+            let labels = keys.iter().map(|key| key.as_str()).collect::<Vec<_>>().join(" · ");
+            let snippet = if exact { labels } else {
+                format!("{} — {}", labels, page.content.chars().take(500).collect::<String>().replace('\n', " "))
+            };
+            hits.push((exact, score, SearchHit { path: path.clone(), title: page.title.clone(), snippet }));
+        }
+        // Rank ALL matching pages before taking a bounded candidate pool.
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.path.cmp(&b.2.path)));
+        Ok(hits.into_iter().take(limit).map(|(_, _, hit)| hit).collect())
+    }
+
+    /// Reciprocal-rank fusion avoids comparing incompatible PG and filesystem
+    /// scores. Exact filing keys remain first; broad folder matches compete with
+    /// content hits instead of exhausting the result budget ahead of them.
+    pub async fn merge_search_hits(&self, query: &str, content: Vec<SearchHit>, limit: usize) -> Result<Vec<(SearchHit, f64)>> {
+        if limit == 0 { return Ok(vec![]); }
+        let exact = self.exact_filing_pages(query).await?;
+        let filings = self.search_filings(query, limit).await?;
+        let mut candidates: HashMap<String, (SearchHit, f64, usize)> = HashMap::new();
+        for list in [content, filings] {
+            let mut seen = HashSet::new();
+            for (rank, hit) in list.into_iter().enumerate() {
+                if !seen.insert(hit.path.clone()) { continue; }
+                let order = candidates.len();
+                let entry = candidates.entry(hit.path.clone()).or_insert_with(|| (hit.clone(), 0., order));
+                entry.1 += 1. / (60. + rank as f64);
+                if exact.contains(&hit.path) { entry.0 = hit; }
+            }
+        }
+        let mut candidates: Vec<_> = candidates.into_values().collect();
+        candidates.sort_by(|a, b| exact.contains(&b.0.path).cmp(&exact.contains(&a.0.path))
+            .then_with(|| b.1.total_cmp(&a.1))
+            .then_with(|| relevance(query, &b.0.title, &b.0.snippet).cmp(&relevance(query, &a.0.title, &a.0.snippet)))
+            .then(a.2.cmp(&b.2)));
+        Ok(candidates.into_iter().take(limit).map(|(hit, score, _)| {
+            let score = if exact.contains(&hit.path) { 1. + score } else { score };
+            (hit, score)
+        }).collect())
+    }
+
     pub async fn read_page(&self, path: &str) -> Result<Option<String>> {
+        let Some(mut content) = self.read_stored_page(path).await? else { return Ok(None); };
+        let keys = self.filing_paths(&content);
+        if !keys.is_empty() {
+            let (_, body) = crate::page_metadata::split(&content)?;
+            let offset = content.len() - body.len();
+            content.insert_str(offset, &format!("Current source filing paths: {}\n\n", serde_json::to_string(&keys)?));
+        }
+        Ok(Some(content))
+    }
+
+    async fn read_stored_page(&self, path: &str) -> Result<Option<String>> {
+        if !self.page_scope.includes(path) { return Ok(None); }
         let safe = self.safe_join(path)?;
         match tokio::fs::read_to_string(&safe).await {
-            Ok(s) => Ok(Some(s)),
+            Ok(content) => Ok(Some(content)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -165,21 +304,38 @@ impl WikiRepo {
             return Ok(out);
         }
         walk_md(&self.root, &scope, &mut out)?;
+        out.retain(|path| self.page_scope.includes(path));
         out.sort();
         Ok(out)
     }
 
-    /// Markdown paths touched by the HEAD commit (works for the root commit
-    /// too via `git show --name-only`). Returns paths relative to the repo
-    /// root, with forward slashes.
+    /// Markdown paths touched by the HEAD commit, relative to the wiki.
     pub async fn changed_in_head(&self) -> Result<Vec<String>> {
-        let out = self.git(&["show", "--pretty=format:", "--name-only", "HEAD"]).await?;
-        Ok(out
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .filter(|l| l.ends_with(".md"))
-            .map(|l| l.replace('\\', "/"))
+        self.changed_in_commit("HEAD").await
+    }
+
+    /// Markdown paths touched by the latest commit for a particular bundle.
+    /// Match the generated subject prefix so another bundle that merely names
+    /// this source in its summary cannot become the resume point.
+    pub async fn changed_in_latest_ingest(&self, ingest_id: &str) -> Result<Option<Vec<String>>> {
+        let subject = format!("ingest({ingest_id})");
+        let pattern = format!("--grep={subject}");
+        let commits = self.git(&["log", "--fixed-strings", &pattern, "--format=%H%x09%s"]).await?;
+        for (commit, title) in commits.lines().filter_map(|line| line.split_once('\t')) {
+            if title.strip_prefix(&subject).is_some_and(|suffix| {
+                suffix.is_empty() || suffix.starts_with(": ")
+            }) {
+                return Ok(Some(self.changed_in_commit(commit).await?));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn changed_in_commit(&self, commit: &str) -> Result<Vec<String>> {
+        let out = self.git(&["show", "--pretty=format:", "--name-only", "-z", commit, "--"]).await?;
+        Ok(out.split('\0')
+            .filter(|path| path.ends_with(".md"))
+            .map(String::from)
             .collect())
     }
 
@@ -198,15 +354,21 @@ impl WikiRepo {
         let mut hits = Vec::new();
         for path in pages {
             if hits.len() >= limit { break; }
-            let Some(content) = self.read_page(&path).await? else { continue };
+            let Some(content) = self.read_stored_page(&path).await? else { continue };
             let lower = content.to_lowercase();
             let Some(pos) = lower.find(&q) else { continue };
 
             let title = extract_title(&content).unwrap_or_else(|| path.clone());
-            let start = pos.saturating_sub(80);
-            let end = (pos + q.len() + 80).min(content.len());
-            let mut snippet = content[start..end].replace('\n', " ");
-            snippet = snippet.chars().take(200).collect();
+            // A lowercase mapping can expand a character. Translate to a character
+            // position before constructing the snippet from the original UTF-8 text.
+            let mut lower_bytes = 0;
+            let index = content.chars().take_while(|c| {
+                if lower_bytes >= pos { return false; }
+                lower_bytes += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+                true
+            }).count();
+            let snippet = content.chars().skip(index.saturating_sub(80)).take(200)
+                .collect::<String>().replace('\n', " ");
             hits.push(SearchHit { path, title, snippet });
         }
         Ok(hits)
@@ -216,8 +378,31 @@ impl WikiRepo {
     pub async fn commit_bundle(&self, bundle: &DiffBundle) -> Result<String> {
         let mut total_bytes = 0usize;
 
+        // Prepare all replacements before touching the working tree.
+        let mut operations = bundle.operations.clone();
+        let mut prepared: HashMap<String, Option<String>> = HashMap::new();
+        for op in &mut operations {
+            let (path, content, creating) = match op {
+                DiffOp::Create { path, content, .. } => (path, content, true),
+                DiffOp::Patch { path, new_content, .. } => (path, new_content, false),
+                DiffOp::Delete { path, .. } => {
+                    prepared.insert(path.clone(), None);
+                    continue;
+                }
+                DiffOp::Link { .. } => continue,
+            };
+            if crate::page_metadata::is_managed(path) {
+                let previous = match prepared.get(path) {
+                    Some(page) => page.clone(),
+                    None => self.read_page(path).await?,
+                };
+                anyhow::ensure!(creating == previous.is_none(), "unexpected page existence for {path}");
+                *content = self.stamp_page(path, content, previous.as_deref()).await?;
+                prepared.insert(path.clone(), Some(content.clone()));
+            }
+        }
         // Validate up-front: paths safe, sizes within caps.
-        for op in &bundle.operations {
+        for op in &operations {
             match op {
                 DiffOp::Create { path, content, .. } |
                 DiffOp::Patch  { path, new_content: content, .. } => {
@@ -239,7 +424,7 @@ impl WikiRepo {
         }
 
         // Apply ops to working tree.
-        for op in &bundle.operations {
+        for op in &operations {
             match op {
                 DiffOp::Create { path, content, .. } => {
                     let full = self.safe_join(path)?;
@@ -313,7 +498,7 @@ impl WikiRepo {
         Ok(self.root.join(p))
     }
 
-    async fn git(&self, args: &[&str]) -> Result<String> {
+    pub(crate) async fn git(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("git")
             .args(args)
             .current_dir(&self.root)
@@ -347,6 +532,35 @@ fn walk_md(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn exact_filing(key: &str, query: &str) -> bool {
+    !query.is_empty() && key.to_lowercase().trim_start_matches('/') == query.trim_start_matches('/')
+}
+
+fn relevance(query: &str, title: &str, content: &str) -> usize {
+    let title = title.to_lowercase();
+    let content = content.to_lowercase();
+    let terms: HashSet<_> = query.split(|c: char| !c.is_alphanumeric()).filter(|term| term.len() > 1
+        && !matches!(*term, "the" | "and" | "what" | "was" | "in" | "of" | "to" | "is" | "for")).collect();
+    terms.into_iter().map(|term| usize::from(content.contains(term)) + 3 * usize::from(title.contains(term))).sum()
+}
+
+// Match a literal search or a folder (including an ancestor) named in a question.
+fn filing_matches(key: &str, query: &str) -> bool {
+    let key = key.to_lowercase();
+    if key.contains(query) { return true; }
+    let relative = key.trim_start_matches('/');
+    let boundary = |c: char| c.is_whitespace() || "\"'()[]?!,.:".contains(c);
+    relative.match_indices('/').map(|(index, _)| index).chain(std::iter::once(relative.len())).any(|end| {
+        let prefix = &relative[..end];
+        query.match_indices(prefix).any(|(i, _)| {
+            let before = query[..i].trim_end_matches('/').chars().next_back();
+            let after = &query[i + end..];
+            let after = after.strip_prefix('/').unwrap_or(after).chars().next();
+            before.is_none_or(boundary) && after.is_none_or(boundary)
+        })
+    })
 }
 
 /// Convenience helper for callers that want a current ISO-8601 timestamp string.

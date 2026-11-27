@@ -115,7 +115,7 @@ pub async fn expand(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("zip");
-    let bytes = ctx.blob.get(source_id, BlobKind::Original, zip_ext).await?;
+    let bytes = ctx.blob.get(tenant,source_id, BlobKind::Original, zip_ext).await?;
 
     // Locked folder named after the archive (slugified → e.g. "foo.zip" →
     // "foo-zip"), placed beside the archive in the tree.
@@ -190,7 +190,7 @@ pub async fn expand(
         };
         ctx.db.insert_source(&child).await?;
         ctx.blob
-            .put(&child_id, BlobKind::Original, &ext, bytes::Bytes::from(e.bytes))
+            .put(tenant,&child_id, BlobKind::Original, &ext, bytes::Bytes::from(e.bytes))
             .await?;
         ctx.db.enqueue(tenant, &ingest_job(tenant, &child_id)?).await?;
         created += 1;
@@ -209,7 +209,7 @@ pub async fn expand(
         "notes": notes,
     });
     ctx.blob
-        .put_text(
+        .put_text(tenant,
             source_id,
             BlobKind::Manifest,
             &serde_json::to_string_pretty(&manifest)?,

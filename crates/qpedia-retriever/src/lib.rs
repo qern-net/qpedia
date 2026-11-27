@@ -355,6 +355,7 @@ impl Retriever {
                 let links: Vec<String> = extract_wikilinks(&content)
                     .into_iter()
                     .map(|t| t.split('#').next().unwrap_or(&t).to_string())
+                    .filter(|path| self.wiki.page_scope().includes(path))
                     .collect();
                 Ok(serde_json::to_string(&links)?)
             }
@@ -363,12 +364,29 @@ impl Retriever {
     }
 
     async fn do_search(&self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
+        if k == 0 { return Ok(vec![]); }
+        let pool = k.max(RERANK_POOL);
+        // Always search content, even if a folder supplies enough filing matches.
+        let content = self.search_content(query, pool).await?;
+        let merged = self.wiki.merge_search_hits(query, content, pool * 2).await?;
+        let exact = self.wiki.exact_filing_pages(query).await?;
+        let mut hits = self.rerank_hits(query, merged.into_iter().map(|(hit, _)| hit).collect(), pool * 2).await;
+        // Exact filing-key lookups are navigation, rather than broad folder queries.
+        hits.sort_by_key(|hit| !exact.contains(&hit.path));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    async fn search_content(&self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
         if let Some(emb) = &self.embedder {
-            let qv = emb.embed(&[query]).await?.into_iter().next().unwrap_or_default();
             // Over-fetch a candidate pool so the cross-encoder rerank has
             // room to promote a page the RRF fusion ranked lower.
             let pool = k.max(RERANK_POOL) as i64;
-            match self.db.hybrid_search(&self.tenant, query, qv, pool).await {
+            let indexed = async {
+                let qv = emb.embed(&[query]).await?.into_iter().next().unwrap_or_default();
+                self.db.hybrid_search_scoped(&self.tenant, query, qv, pool, self.wiki.page_scope()).await
+            }.await;
+            match indexed {
                 Ok(rows) if !rows.is_empty() => {
                     let hits: Vec<SearchHit> = rows
                         .into_iter()
@@ -378,15 +396,14 @@ impl Retriever {
                             snippet: r.snippet,
                         })
                         .collect();
-                    return Ok(self.rerank_hits(query, hits, k).await);
+                    return Ok(hits);
                 }
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "pg hybrid search failed; falling back"),
             }
         }
-        // Filesystem fallback (no embedder / pg down): still rerank.
-        let hits = self.wiki.search_text(query, k.max(RERANK_POOL)).await?;
-        Ok(self.rerank_hits(query, hits, k).await)
+        // Filesystem fallback; do_search reranks the complete merged candidate set.
+        self.wiki.search_text(query, k.max(RERANK_POOL)).await
     }
 
     /// Reorder a fused candidate set with the cross-encoder reranker and
@@ -437,7 +454,7 @@ impl Retriever {
         if self.user_groups.iter().any(|g| g == "admin") {
             return true;
         }
-        let source_ids = parse_source_ids(content);
+        let Ok(source_ids) = qpedia_store::page_source_ids(content) else { return false; };
         if source_ids.is_empty() {
             return true; // system page (index/log/QPEDIA) — readable by all
         }
@@ -522,27 +539,6 @@ fn extract_title(content: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_source_ids(content: &str) -> Vec<String> {
-    let trimmed = content.trim_start();
-    let Some(after) = trimmed.strip_prefix("---") else { return Vec::new() };
-    let Some(end) = after.find("\n---") else { return Vec::new() };
-    let fm = &after[..end];
-    let mut out = Vec::new();
-    for line in fm.lines() {
-        let line = line.trim_start();
-        if let Some(rest) = line.strip_prefix("source_ids:") {
-            let s = rest.trim().trim_start_matches('[').trim_end_matches(']');
-            for x in s.split(',') {
-                let x = x.trim().trim_matches('"').trim_matches('\'');
-                if !x.is_empty() {
-                    out.push(x.to_string());
-                }
-            }
-        }
-    }
-    out
 }
 
 /// Code-span aware [[wikilink]] extraction.

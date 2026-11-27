@@ -4,7 +4,7 @@
 //! See SPEC-v2.md §5 (state machine), §6 (agent), §6.4 (validator).
 
 use crate::agent::{run_agent, AgentDeps};
-use crate::runner::IngestContext;
+use crate::runner::{persist, IngestContext};
 use crate::validator;
 use anyhow::{anyhow, Result};
 use qpedia_core::{source::SourceStatus, tenant::Tenant, SourceId};
@@ -35,7 +35,12 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         embedder: ctx.embedder.clone(),
     };
 
-    let bundle = run_agent(&deps, &src).await?;
+    // Bound provider work independently of the worker's renewable job lease.
+    // Validation and persistence run after the agent produces a complete bundle.
+    let (bundle, coverage) =
+        tokio::time::timeout(std::time::Duration::from_secs(20 * 60), run_agent(&deps, &src))
+            .await
+            .map_err(|_| anyhow!("document distillation timed out; split the document into smaller parts"))??;
     if bundle.operations.is_empty() {
         warn!(id = %source_id, "agent returned empty bundle; nothing to commit");
         ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;
@@ -58,31 +63,37 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
         ));
     }
 
-    let sha = wiki.commit_bundle(&bundle).await?;
+    persist(async {
+        let sha = wiki.commit_bundle(&bundle).await?;
 
-    ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;
-    ctx.db
-        .write_audit(
-            tenant,
-            "qpedia-bot",
-            "wiki.committed",
-            Some(source_id.as_str()),
-            Some(&serde_json::json!({
-                "sha": sha,
-                "ops": bundle.operations.len(),
-                "touched_pages": report.touched,
-                "bundle_bytes": report.bytes,
-                "summary": bundle.summary,
-            })),
-        )
-        .await?;
+        ctx.db.update_status(tenant, source_id, SourceStatus::Committed).await?;
+        ctx.db
+            .write_audit(
+                tenant,
+                "qpedia-bot",
+                "wiki.committed",
+                Some(source_id.as_str()),
+                Some(&serde_json::json!({
+                    "sha": sha,
+                    "source_coverage": coverage,
+                    "ops": bundle.operations.len(),
+                    "touched_pages": report.touched,
+                    "bundle_bytes": report.bytes,
+                    "summary": bundle.summary,
+                })),
+            )
+            .await?;
 
-    info!(
-        id = %source_id,
-        sha = %sha,
-        ops = bundle.operations.len(),
-        bytes = report.bytes,
-        "distill commit landed"
-    );
+        info!(
+            id = %source_id,
+            sha = %sha,
+            ops = bundle.operations.len(),
+            bytes = report.bytes,
+            "distill commit landed"
+        );
+        Ok(())
+    })
+    .await?;
+
     Ok(())
 }

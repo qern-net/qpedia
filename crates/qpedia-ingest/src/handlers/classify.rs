@@ -46,7 +46,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
 
     let extracted_bytes = ctx
         .blob
-        .get(source_id, BlobKind::Extracted, "txt")
+        .get(tenant,source_id, BlobKind::Extracted, "txt")
         .await
         .context("read extracted.txt")?;
     let text = String::from_utf8_lossy(&extracted_bytes);
@@ -96,8 +96,7 @@ pub async fn run(ctx: &IngestContext, tenant: &Tenant, source_id: &SourceId) -> 
             let auto_folder = format!("/{}", doc_type.trim());
             if ctx.db.is_folder_pinned(tenant, &auto_folder).await? {
                 info!(id = %source_id, folder = %auto_folder, "skip auto-organize: target folder is pinned");
-            } else {
-                ctx.db.update_folder_path(tenant, source_id, &auto_folder).await?;
+            } else if ctx.db.update_folder_path(tenant, source_id, &auto_folder).await? {
                 info!(id = %source_id, folder = %auto_folder, "auto-organized into folder by doc_type");
             }
         }

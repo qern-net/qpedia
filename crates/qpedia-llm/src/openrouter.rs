@@ -36,7 +36,9 @@ impl LlmProvider for OpenRouter {
     fn name(&self) -> &str { "openrouter" }
 
     async fn complete(&self, req: CompleteReq) -> Result<CompleteResp, LlmError> {
-        let body = OpenAIRequest::from_complete(&req, &self.default_model);
+        let mut body = serde_json::to_value(OpenAIRequest::from_complete(&req, &self.default_model))
+            .map_err(|_| LlmError::Provider("request encoding failed".into()))?;
+        apply_routing_policy(&mut body)?;
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let resp = self.client.post(&url)
@@ -51,10 +53,10 @@ impl LlmProvider for OpenRouter {
         let text = resp.text().await.map_err(|e| LlmError::Http(e.to_string()))?;
         if !status.is_success() {
             if status.as_u16() == 429 { return Err(LlmError::RateLimited); }
-            return Err(LlmError::Provider(format!("{status}: {text}")));
+            return Err(LlmError::Provider(format!("OpenRouter returned HTTP {status}")));
         }
         let parsed: OpenAIResponse = serde_json::from_str(&text)
-            .map_err(|e| LlmError::Provider(format!("decode: {e}\nbody: {text}")))?;
+            .map_err(|_| LlmError::Provider("OpenRouter returned an invalid response".into()))?;
         Ok(parsed.into())
     }
 
@@ -62,6 +64,7 @@ impl LlmProvider for OpenRouter {
         let mut body = serde_json::to_value(OpenAIRequest::from_complete(&req, &self.default_model))
             .map_err(|e| LlmError::Provider(format!("encode req: {e}")))?;
         body.as_object_mut().unwrap().insert("stream".into(), serde_json::Value::Bool(true));
+        apply_routing_policy(&mut body)?;
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let resp = self.client.post(&url)
@@ -75,14 +78,56 @@ impl LlmProvider for OpenRouter {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
             if status.as_u16() == 429 { return Err(LlmError::RateLimited); }
-            return Err(LlmError::Provider(format!("{status}: {text}")));
+            return Err(LlmError::Provider(format!("OpenRouter returned HTTP {status}")));
         }
 
         let bytes_stream = resp.bytes_stream();
         let token_stream = openai_sse_to_tokens(bytes_stream);
         Ok(Box::pin(token_stream))
+    }
+}
+
+fn apply_routing_policy(body: &mut serde_json::Value) -> Result<(), LlmError> {
+    let enabled = std::env::var("QPEDIA_OPENROUTER_ZDR").ok();
+    let only = std::env::var("QPEDIA_OPENROUTER_PROVIDERS_JSON").ok();
+    if let Some(options) = routing_policy(enabled.as_deref(), only.as_deref())? {
+        body["provider"] = options;
+    }
+    Ok(())
+}
+
+fn routing_policy(enabled: Option<&str>, only: Option<&str>) -> Result<Option<serde_json::Value>, LlmError> {
+    if !matches!(enabled, None | Some("true") | Some("false")) {
+        return Err(LlmError::Provider("invalid OpenRouter privacy configuration".into()));
+    }
+    if enabled != Some("true") && only.is_none() { return Ok(None); }
+    let mut options = serde_json::json!({"require_parameters":true});
+    if enabled == Some("true") {
+        options["zdr"] = true.into(); options["data_collection"] = "deny".into();
+    }
+    if let Some(raw) = only {
+        let providers: Vec<String> = serde_json::from_str(raw)
+            .map_err(|_| LlmError::Provider("invalid OpenRouter provider allowlist".into()))?;
+        if providers.is_empty() || providers.len()>8 || providers.iter().any(|s| s.is_empty() || s.len()>80 || !s.chars().all(|c| c.is_ascii_alphanumeric() || ['-','_','/',' '].contains(&c))) {
+            return Err(LlmError::Provider("invalid OpenRouter provider allowlist".into()));
+        }
+        options["only"] = serde_json::json!(providers);
+        options["allow_fallbacks"] = false.into();
+    }
+    Ok(Some(options))
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    #[test] fn explicit_privacy_and_provider_constraints_are_not_dropped() {
+        let value=routing_policy(Some("true"),Some("[\"Anthropic\"]")).unwrap().unwrap();
+        assert_eq!(value["zdr"],true); assert_eq!(value["data_collection"],"deny");
+        assert_eq!(value["only"],serde_json::json!(["Anthropic"]));
+        assert_eq!(value["allow_fallbacks"],false);
+        assert!(routing_policy(Some("tru"),None).is_err());
+        assert!(routing_policy(Some("true"),Some("[]")).is_err());
     }
 }
 

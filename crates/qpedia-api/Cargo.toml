@@ -58,6 +58,7 @@ dotenvy.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 proptest.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tower.workspace = true

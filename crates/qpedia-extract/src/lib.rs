@@ -13,6 +13,7 @@ pub mod html;
 pub mod image;
 pub mod media;
 pub mod marker;
+pub mod local_ocr;
 
 pub use text::TextExtractor;
 pub use pdf::PdfExtractor;
@@ -60,6 +61,9 @@ impl ExtractorRegistry {
     /// pdfium so a broken sidecar doesn't break ingestion.
     pub fn with_default() -> Self {
         let mut reg = Self::new();
+        if std::env::var("QPEDIA_LOCAL_OCR").as_deref() == Ok("true") {
+            reg.register(Box::new(local_ocr::LocalOcrExtractor));
+        }
         // HTML before Text: TextExtractor's `text/*` match would otherwise
         // claim `text/html` and dump raw tags. HtmlExtractor distills it.
         reg.register(Box::new(HtmlExtractor));

@@ -150,7 +150,7 @@ async fn ingest_one(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
-    ctx.blob.put(&id, BlobKind::Original, ext, dl.bytes).await?;
+    ctx.blob.put(tenant,&id, BlobKind::Original, ext, dl.bytes).await?;
 
     let job = ingest_job(tenant, &id)?;
     ctx.db.enqueue(tenant, &job).await?;

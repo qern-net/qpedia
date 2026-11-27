@@ -134,7 +134,7 @@ async fn extract_phase(
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
 
-    let bytes = ctx.blob.get(source_id, BlobKind::Original, ext).await?;
+    let bytes = ctx.blob.get(tenant,source_id, BlobKind::Original, ext).await?;
 
     // Unsupported type: degrade gracefully to a terminal `tainted` state with
     // a clear note, rather than returning Err (which fails the job and leaves
@@ -164,7 +164,7 @@ async fn extract_phase(
     // transcribe any text and/or describe the picture, and use that as the
     // page content (metadata kept as a trailer). Best-effort: on any error we
     // keep the metadata floor so the source still ingests.
-    if mime.starts_with("image/") {
+    if mime.starts_with("image/") && std::env::var("QPEDIA_LOCAL_OCR").as_deref() != Ok("true") {
         if let (Some(llm), Some(vmodel)) = (&ctx.llm, qpedia_llm::vision_model()) {
             match describe_image(llm.as_ref(), &vmodel, mime, &bytes).await {
                 Ok(desc) if !desc.trim().is_empty() => {
@@ -181,7 +181,7 @@ async fn extract_phase(
         }
     }
 
-    ctx.blob.put_text(source_id, BlobKind::Extracted, &text).await?;
+    ctx.blob.put_text(tenant,source_id, BlobKind::Extracted, &text).await?;
 
     let manifest = serde_json::json!({
         "language": extraction.language,
@@ -190,7 +190,7 @@ async fn extract_phase(
         "notes": notes,
     });
     ctx.blob
-        .put_text(source_id, BlobKind::Manifest, &serde_json::to_string_pretty(&manifest)?)
+        .put_text(tenant,source_id, BlobKind::Manifest, &serde_json::to_string_pretty(&manifest)?)
         .await?;
 
     ctx.db.update_status(tenant, source_id, SourceStatus::Extracted).await?;

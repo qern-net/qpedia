@@ -17,7 +17,10 @@ use qpedia_llm::LlmProvider;
 use qpedia_pg_store::PgStore;
 use qpedia_store::{blob::BlobStore, WikiRepoStore};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 use std::time::Duration;
 use tracing::{error, info, warn, Instrument};
 
@@ -216,6 +219,56 @@ pub fn lint_job(tenant: &Tenant) -> Result<Job> {
     })
 }
 
+const JOB_LEASE_MS: i64 = 30 * 60_000;
+const RENEW_CLAIM_EVERY: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Default)]
+struct JobPersistence {
+    active_write: Mutex<()>,
+    claim_lost: AtomicBool,
+}
+
+tokio::task_local! {
+    static JOB_PERSISTENCE: Arc<JobPersistence>;
+}
+
+/// Let a short, already-started persistence operation finish on claim loss.
+/// Callers outside a job (including direct handler tests) write normally.
+pub(crate) async fn persist<T>(write: impl Future<Output = Result<T>>) -> Result<T> {
+    let Ok(persistence) = JOB_PERSISTENCE.try_with(Arc::clone) else {
+        return write.await;
+    };
+    let _write_guard = persistence.active_write.lock().await;
+    anyhow::ensure!(!persistence.claim_lost.load(Ordering::Relaxed), "job claim lost");
+    let result = write.await;
+    // Stop the handler at this boundary before it can start its next phase.
+    anyhow::ensure!(!persistence.claim_lost.load(Ordering::Relaxed), "job claim lost");
+    result
+}
+
+async fn run_until_claim_loss<T>(
+    handler: impl Future<Output = T>,
+    watch_claim: impl Future<Output = ()>,
+) -> Option<T> {
+    let persistence = Arc::new(JobPersistence::default());
+    let handler = JOB_PERSISTENCE.scope(persistence.clone(), handler);
+    tokio::pin!(handler);
+    tokio::select! {
+        biased;
+        _ = watch_claim => {}
+        result = &mut handler => return Some(result),
+    }
+    persistence.claim_lost.store(true, Ordering::Relaxed);
+    // Keep polling the handler while it holds the write guard. Waiting for the
+    // guard on its own would suspend the future responsible for releasing it.
+    tokio::select! {
+        biased;
+        _ = persistence.active_write.lock() => {}
+        _ = &mut handler => {}
+    }
+    None
+}
+
 pub struct JobRunner {
     ctx: IngestContext,
     worker_id: String,
@@ -240,13 +293,10 @@ impl JobRunner {
             "job runner started"
         );
         loop {
-            // Lease length must exceed the slowest job so a legitimately
-            // long run (Marker OCR up to ~10 min + agent LLM turns + embed)
-            // isn't reclaimed by another worker mid-flight. A crashed worker's
-            // jobs become reclaimable once this lease lapses.
-            match self.ctx.db.claim_next_job(&self.worker_id, 30 * 60_000).await {
+            match self.ctx.db.claim_next_job(&self.worker_id, JOB_LEASE_MS).await {
                 Ok(Some(job)) => {
                     let id = job.id.clone();
+                    let attempt = job.attempt;
                     // Capture the ingest target up front: if the job dies
                     // permanently we mark the source `failed` so it surfaces
                     // as a terminal error instead of being stranded
@@ -254,11 +304,12 @@ impl JobRunner {
                     let ingest_target = matches!(job.kind, JobKind::Ingest)
                         .then(|| serde_json::from_value::<IngestPayload>(job.payload.clone()).ok())
                         .flatten();
-                    if let Err(e) = self.handle(job).await {
+                    let Some(result) = self.run_with_claim(job).await else { continue; };
+                    if let Err(e) = result {
                         let msg = format!("{e:#}");
                         error!(job = %id, error = %msg, "job failed");
-                        match self.ctx.db.fail_job(&id, &msg, Some(5_000)).await {
-                            Ok(true) => {
+                        match self.ctx.db.fail_job_claim(&id, attempt, &msg, Some(5_000)).await {
+                            Ok(Some(true)) => {
                                 if let Some(p) = ingest_target {
                                     warn!(job = %id, source = %p.source_id, "ingest job exhausted retries — marking source failed");
                                     let _ = self
@@ -282,11 +333,16 @@ impl JobRunner {
                                         .await;
                                 }
                             }
-                            Ok(false) => {} // re-queued for another attempt
+                            Ok(Some(false)) => {} // re-queued for another attempt
+                            Ok(None) => warn!(job = %id, "job claim expired before failure was recorded"),
                             Err(fe) => warn!(job = %id, error = %format!("{fe:#}"), "fail_job errored"),
                         }
                     } else {
-                        let _ = self.ctx.db.complete_job(&id).await;
+                        match self.ctx.db.complete_job_claim(&id, attempt).await {
+                            Ok(true) => {}
+                            Ok(false) => warn!(job = %id, "job claim expired before completion was recorded"),
+                            Err(e) => warn!(job = %id, error = %e, "could not record job completion"),
+                        }
                     }
                 }
                 Ok(None) => tokio::time::sleep(self.poll_idle).await,
@@ -296,6 +352,32 @@ impl JobRunner {
                     // detail behind the .context() label.
                     warn!(error = %format!("{e:#}"), "claim_next error; backing off");
                     tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    async fn run_with_claim(&self, job: Job) -> Option<Result<()>> {
+        let id = job.id.clone();
+        let attempt = job.attempt;
+        run_until_claim_loss(self.handle(job), self.watch_claim(&id, attempt)).await
+    }
+
+    async fn watch_claim(&self, id: &JobId, attempt: u32) {
+        let first_tick = tokio::time::Instant::now() + RENEW_CLAIM_EVERY;
+        let mut renew = tokio::time::interval_at(first_tick, RENEW_CLAIM_EVERY);
+        renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            renew.tick().await;
+            match self.ctx.db.renew_job_claim(id, attempt, JOB_LEASE_MS).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(job = %id, "job lease lost");
+                    return;
+                }
+                Err(error) => {
+                    warn!(job = %id, %error, "job lease could not be renewed");
+                    return;
                 }
             }
         }
@@ -437,4 +519,74 @@ struct JobSpanMeta {
     source_id: Option<SourceId>,
     #[serde(default)]
     trace: Option<TraceCarrier>,
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use tokio::sync::{oneshot, Semaphore};
+
+    #[tokio::test]
+    async fn renewal_waiting_for_the_only_connection_does_not_suspend_the_handler() {
+        let connections = Semaphore::new(1);
+        let (taken_tx, taken_rx) = oneshot::channel();
+        let (renew_started_tx, renew_started_rx) = oneshot::channel();
+        let (renewed_tx, renewed_rx) = oneshot::channel();
+        let pool = &connections;
+        let handler = async move {
+            let connection = pool.acquire().await.unwrap();
+            taken_tx.send(()).unwrap();
+            renew_started_rx.await.unwrap();
+            drop(connection);
+            renewed_rx.await.unwrap();
+            "finished"
+        };
+        let watch = async move {
+            taken_rx.await.unwrap();
+            renew_started_tx.send(()).unwrap();
+            let connection = pool.acquire().await.unwrap();
+            renewed_tx.send(()).unwrap();
+            drop(connection);
+            std::future::pending().await
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_until_claim_loss(handler, watch),
+        )
+        .await
+        .expect("both operations can use the one connection");
+        assert_eq!(outcome, Some("finished"));
+    }
+
+    #[tokio::test]
+    async fn claim_loss_finishes_an_active_write_and_stops_the_next_phase() {
+        let writes = Mutex::new(Vec::new());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (lost_tx, lost_rx) = oneshot::channel();
+        let log = &writes;
+        let handler = async move {
+            persist(async {
+                log.lock().await.push("first file");
+                started_tx.send(()).unwrap();
+                lost_rx.await.unwrap();
+                log.lock().await.push("second file");
+                Ok(())
+            })
+            .await?;
+            log.lock().await.push("next phase");
+            Ok::<_, anyhow::Error>(())
+        };
+        let watch = async move {
+            started_rx.await.unwrap();
+            lost_tx.send(()).unwrap();
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_until_claim_loss(handler, watch),
+        )
+        .await
+        .expect("active write should drain");
+        assert!(outcome.is_none());
+        assert_eq!(*writes.lock().await, ["first file", "second file"]);
+    }
 }

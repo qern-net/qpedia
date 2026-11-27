@@ -54,28 +54,88 @@ pub struct PgStore {
     tenant_hooks: Arc<RwLock<Vec<Arc<dyn TenantHook>>>>,
 }
 
+/// Select whether startup migrates a database or checks a separately migrated one.
+#[derive(Clone, Copy)]
+pub enum SchemaMode {
+    Migrate,
+    Verify,
+}
+
+impl SchemaMode {
+    pub fn from_env() -> Result<Self> {
+        match std::env::var("QPEDIA_SCHEMA_MODE") {
+            Ok(mode) if mode == "verify" => Ok(Self::Verify),
+            Ok(mode) if mode == "migrate" => Ok(Self::Migrate),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Migrate),
+            _ => anyhow::bail!("QPEDIA_SCHEMA_MODE must be verify or migrate"),
+        }
+    }
+}
+
 impl PgStore {
     /// Connect, run migrations as the connecting role (must have BYPASSRLS
     /// for the migrations to install RLS policies — typically the
     /// `qpedia_admin` role or the postgres superuser).
     pub async fn connect(url: &str) -> Result<Self> {
+        Self::connect_with_schema(url, SchemaMode::from_env()?).await
+    }
+
+    pub async fn connect_with_schema(url: &str, mode: SchemaMode) -> Result<Self> {
         let opts = PgConnectOptions::from_str(url).context("parse Postgres DSN")?;
+        let max_connections: u32 = std::env::var("QPEDIA_DB_MAX_CONN")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(match mode {
+                SchemaMode::Verify => 4,
+                SchemaMode::Migrate => 16,
+            });
+        anyhow::ensure!(max_connections > 0, "QPEDIA_DB_MAX_CONN must be positive");
         let pool = PgPoolOptions::new()
-            .max_connections(
-                std::env::var("QPEDIA_DB_MAX_CONN")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(16),
-            )
+            .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(15))
             .connect_with(opts)
             .await
             .context("connect Postgres")?;
 
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .context("apply Postgres migrations")?;
+        let migrator = sqlx::migrate!("./migrations");
+        match mode {
+            SchemaMode::Verify => {
+                let applied: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
+                    "SELECT version,checksum,success FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool).await.context("schema must be migrated separately")?;
+                let expected: Vec<_> = migrator.iter().filter(|m| !m.migration_type.is_down_migration()).collect();
+                anyhow::ensure!(applied.len() == expected.len(), "schema migration inventory mismatch");
+                for (actual, expected) in applied.iter().zip(expected) {
+                    anyhow::ensure!(actual.0 == expected.version && actual.1.as_slice() == expected.checksum.as_ref() && actual.2,
+                        "schema migration checksum mismatch");
+                }
+                let (privileged, role_limit): (bool, i32) = sqlx::query_as(
+                    "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls,
+                            rolconnlimit FROM pg_roles WHERE rolname = current_user",
+                )
+                .fetch_one(&pool)
+                .await?;
+                anyhow::ensure!(!privileged, "runtime database role must be restricted");
+                anyhow::ensure!(
+                    role_limit < 0 || max_connections <= role_limit as u32,
+                    "QPEDIA_DB_MAX_CONN exceeds the runtime database role's connection limit"
+                );
+                let ddl: bool = sqlx::query_scalar(
+                    "SELECT has_schema_privilege(current_user, 'public', 'CREATE') OR EXISTS (
+                         SELECT FROM pg_class c
+                         JOIN pg_namespace n ON n.oid = c.relnamespace
+                         WHERE n.nspname = 'public'
+                            AND pg_has_role(current_user, c.relowner, 'MEMBER')
+                     )",
+                )
+                .fetch_one(&pool)
+                .await?;
+                anyhow::ensure!(!ddl, "runtime database role cannot own or create public relations");
+            }
+            SchemaMode::Migrate => {
+                migrator.run(&pool).await.context("apply Postgres migrations")?;
+            }
+        }
 
         info!("Postgres pool ready");
         Ok(Self {
