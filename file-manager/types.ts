@@ -28,5 +28,7 @@ export interface FileAdapter<F extends ManagedFile = ManagedFile> {
   download(file: F, version?: number, name?: string): Promise<void>
   archive(folder: string): Promise<void>
   upload?(file: File, folder: string): Promise<'uploaded' | 'unchanged'>
+  move?(file: F, destination: string): Promise<void>
+  removeFolder?(folder: string): Promise<void>
   createFolder?(parent: string, name: string): Promise<void>
 }

@@ -9,8 +9,15 @@ license = "Apache-2.0"
 [dependencies]
 qpedia-api = { git = "https://github.com/qern-net/qpedia", tag = "v1.4.0" }
 qpedia-core = { git = "https://github.com/qern-net/qpedia", tag = "v1.4.0" }
+qpedia-store = { git = "https://github.com/qern-net/qpedia", tag = "v1.4.0" }
 qpedia-file-archive = { path = "../archive" }
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+zip = { version = "2", default-features = false }

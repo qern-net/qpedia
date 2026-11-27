@@ -9,6 +9,7 @@ use axum::{
 use qpedia_api::{ApiError, AppState, User};
 use qpedia_core::SourceId;
 use qpedia_file_archive::{check_component, Archive, MAX_BYTES, MAX_ENTRIES};
+use qpedia_store::BlobStorage;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
