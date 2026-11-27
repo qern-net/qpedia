@@ -6,6 +6,10 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-11-27
+
+- Upgrade the OpenTelemetry API, SDK and exporters to 0.32 and the tracing bridge to 0.33.
+
 - Keep job handlers running during lease renewal and finish an in-progress wiki commit safely if a worker loses its claim. Resume indexing from the affected bundle after a retry.
 
 - Renew job claims throughout processing and fence completion and failure to the current attempt.
