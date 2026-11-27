@@ -132,9 +132,14 @@ impl PgStore {
                      updated_at = tick.ts
                  FROM tick
                  WHERE claimed.id = (
-                     SELECT id FROM jobs
-                     WHERE (state = 'queued' AND next_run_at <= tick.ts)
-                        OR (state = 'running' AND locked_until <= tick.ts)
+                     SELECT j.id FROM jobs j
+                     WHERE ((j.state = 'queued' AND j.next_run_at <= tick.ts)
+                        OR (j.state = 'running' AND j.locked_until <= tick.ts))
+                       AND (j.kind <> 'ingest' OR NOT EXISTS (
+                           SELECT 1 FROM jobs prior WHERE prior.kind='ingest'
+                             AND prior.tenant_id=j.tenant_id AND prior.id<j.id
+                             AND prior.payload->>'source_id'=j.payload->>'source_id'
+                             AND prior.state IN ('queued','running')))
                      ORDER BY next_run_at ASC
                      FOR UPDATE SKIP LOCKED LIMIT 1
                  )

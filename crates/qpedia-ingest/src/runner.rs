@@ -485,7 +485,13 @@ impl JobRunner {
     async fn dispatch(&self, kind: JobKind, payload: serde_json::Value) -> Result<()> {
         match kind {
             JobKind::Ingest => {
+                let sha = payload.get("upload_sha256").and_then(|v| v.as_str()).map(str::to_owned);
                 let p: IngestPayload = serde_json::from_value(payload)?;
+                if let Some(sha) = sha {
+                    if !self.ctx.db.start_version_ingest(&p.tenant, &p.source_id, &sha).await? {
+                        return Ok(());
+                    }
+                }
                 handlers::ingest::run(&self.ctx, &p.tenant, &p.source_id).await
             }
             JobKind::Remove => {

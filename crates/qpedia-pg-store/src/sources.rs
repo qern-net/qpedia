@@ -37,7 +37,7 @@ impl PgStore {
         Ok(Some(tx))
     }
 
-    async fn insert_source_in(
+    pub(crate) async fn insert_source_in(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, src: &Source, filing: Option<(&str, i32)>,
     ) -> Result<bool> {
         let status = serde_json::to_string(&src.status)?;
@@ -341,7 +341,7 @@ impl PgStore {
     }
 }
 
-fn row_to_source(row: sqlx::postgres::PgRow) -> Result<Source> {
+pub(crate) fn row_to_source(row: sqlx::postgres::PgRow) -> Result<Source> {
     let acl: Vec<String> = row.try_get("acl").context("acl")?;
     let status_s: String = row.try_get("status").context("status")?;
     let status: SourceStatus = serde_json::from_str(&format!("\"{status_s}\""))

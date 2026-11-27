@@ -80,7 +80,7 @@ async fn step_once(
                 // A zip isn't a document — expand it into child sources.
                 super::archive::expand(ctx, tenant, source_id, src).await?;
             } else {
-                extract_phase(ctx, tenant, source_id, &src.mime, &src.filename).await?;
+                extract_phase(ctx, tenant, source_id, src).await?;
             }
         }
         SourceStatus::Extracted | SourceStatus::Classifying => {
@@ -124,17 +124,12 @@ async fn extract_phase(
     ctx: &IngestContext,
     tenant: &Tenant,
     source_id: &SourceId,
-    mime: &str,
-    filename: &str,
+    source: &qpedia_core::source::Source,
 ) -> Result<()> {
     ctx.db.update_status(tenant, source_id, SourceStatus::Extracting).await?;
-
-    let ext = std::path::Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-
-    let bytes = ctx.blob.get(tenant,source_id, BlobKind::Original, ext).await?;
+    let mime = source.mime.as_str();
+    let filename = source.filename.as_str();
+    let bytes = ctx.blob.original(tenant, source_id, filename, &source.sha256).await?;
 
     // Unsupported type: degrade gracefully to a terminal `tainted` state with
     // a clear note, rather than returning Err (which fails the job and leaves
