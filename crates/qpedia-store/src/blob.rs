@@ -15,6 +15,22 @@ use tokio::io::AsyncReadExt;
 pub trait BlobStorage: Send + Sync {
     async fn put(&self, tenant: &Tenant, id: &SourceId, kind: BlobKind, ext: &str, bytes: Bytes) -> Result<PathBuf>;
     async fn get(&self, tenant: &Tenant, id: &SourceId, kind: BlobKind, ext: &str) -> Result<Bytes>;
+    /// Content-addressed originals coexist with files written by earlier releases.
+    async fn original(&self, tenant: &Tenant, id: &SourceId, filename: &str, sha256: &str) -> Result<Bytes> {
+        use sha2::{Digest, Sha256};
+        let bytes = match self.get(tenant, id, BlobKind::Version, sha256).await {
+            Ok(bytes) => bytes,
+            Err(Error::NotFound(_)) => {
+                let ext = Path::new(filename).extension().and_then(|x| x.to_str()).unwrap_or("bin");
+                self.get(tenant, id, BlobKind::Original, ext).await?
+            }
+            Err(err) => return Err(err),
+        };
+        if hex::encode(Sha256::digest(&bytes)) != sha256 {
+            return Err(Error::Invalid("source checksum mismatch".into()));
+        }
+        Ok(bytes)
+    }
     async fn put_text(&self, tenant: &Tenant, id: &SourceId, kind: BlobKind, text: &str) -> Result<PathBuf>;
     fn path_for(&self, tenant: &Tenant, id: &SourceId, kind: BlobKind, ext: &str) -> Result<PathBuf>;
     /// Recursively delete every blob for a source. Idempotent.
@@ -24,6 +40,7 @@ pub trait BlobStorage: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub enum BlobKind {
     Original,
+    Version,
     Extracted,
     Manifest,
 }
@@ -32,6 +49,7 @@ impl BlobKind {
     fn stem(self) -> &'static str {
         match self {
             BlobKind::Original  => "original",
+            BlobKind::Version   => "version",
             BlobKind::Extracted => "extracted",
             BlobKind::Manifest  => "manifest",
         }
@@ -73,6 +91,15 @@ impl BlobStore {
         Ok(Self { root })
     }
 
+    pub async fn preserve_original(&self, tenant: &Tenant, id: &SourceId, filename: &str, sha256: &str) -> Result<()> {
+        let path = self.path_for(tenant, id, BlobKind::Version, sha256)?;
+        if !tokio::fs::try_exists(path).await? {
+            let bytes = self.original(tenant, id, filename, sha256).await?;
+            self.put(tenant, id, BlobKind::Version, sha256, bytes).await?;
+        }
+        Ok(())
+    }
+
     fn dir(&self, tenant: &Tenant, id: &SourceId) -> Result<PathBuf> {
         for segment in [tenant.as_str(), id.as_str()] {
             if segment.is_empty() || segment == "." || segment == ".." || segment.contains(['/', '\\', ':', '\0']) {
@@ -107,7 +134,18 @@ impl BlobStorage for BlobStore {
         let dir = self.dir(tenant, id)?;
         tokio::fs::create_dir_all(&dir).await?;
         let path = self.path_for(tenant, id, kind, ext)?;
-        tokio::fs::write(&path, &bytes).await?;
+        if matches!(kind, BlobKind::Version) {
+            // A reader never observes a partially written original, including on a retry.
+            let tmp = tempfile::NamedTempFile::new_in(&dir)?.into_temp_path();
+            tokio::fs::write(&tmp, &bytes).await?;
+            match tmp.persist_noclobber(&path) {
+                Ok(()) => {}
+                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.error.into()),
+            }
+        } else {
+            tokio::fs::write(&path, &bytes).await?;
+        }
         Ok(path)
     }
 

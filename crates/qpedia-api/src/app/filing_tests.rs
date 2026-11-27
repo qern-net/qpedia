@@ -363,6 +363,71 @@ fn filing_state(db: PgStore, tenant: &Tenant, temp: &std::path::Path) -> Result<
     })
 }
 
+#[tokio::test]
+async fn cloud_uploads_keep_downloadable_scoped_versions() -> Result<()> {
+    let Ok(url) = std::env::var("QPEDIA_DB_URL") else { return Ok(()); };
+    let db = PgStore::connect(&url).await?;
+    let tenant = Tenant::new(format!("versions-{}", ulid::Ulid::new().to_string().to_lowercase()));
+    db.upsert_tenant(&tenant, "Synthetic versions", None).await?;
+    let temp = tempfile::tempdir()?;
+    let mut state = filing_state(db.clone(), &tenant, temp.path())?;
+    state.extensions = Extensions::default();
+    let app = core_router(DEFAULT_UPLOAD_LIMIT_BYTES).with_state(state.clone());
+    let mime = "multipart/form-data; boundary=test";
+    let form = |folder: &str, content: &str, versioned: bool| {
+        let mode = if versioned {
+            "--test\r\nContent-Disposition: form-data; name=\"on_conflict\"\r\n\r\nversion\r\n"
+        } else { "" };
+        format!("{mode}--test\r\nContent-Disposition: form-data; name=\"folder_path\"\r\n\r\n{folder}\r\n\
+            --test\r\nContent-Disposition: form-data; name=\"file\"; filename=\"Exhibit.txt\"\r\n\r\n{content}\r\n--test--\r\n")
+    };
+    let upload = |folder: &str, content: &str, versioned| {
+        request(&app, "POST", "/api/v1/sources", mime, form(folder, content, versioned))
+    };
+    // Existing sources start at version one, including old original.ext storage.
+    let (status, first) = upload("/counsel", "first", false).await?;
+    assert_eq!(status, StatusCode::OK);
+    let first: Value = serde_json::from_str(&first)?;
+    let id = first["id"].as_str().unwrap();
+    let (a,b) = tokio::try_join!(upload("/counsel","next",true), upload("/counsel","next",true))?;
+    assert_eq!((a.0,b.0),(StatusCode::OK,StatusCode::OK));
+    let a: Value = serde_json::from_str(&a.1)?;
+    let b: Value = serde_json::from_str(&b.1)?;
+    assert_eq!(a["id"], id);
+    assert_eq!(b["id"], id);
+    assert_ne!(a["unchanged"],b["unchanged"]);
+    assert_eq!(db.queue_overview(&tenant).await?["by_state"]["queued"], 2);
+
+    let original = format!("/api/v1/sources/{id}/original");
+    let versions = format!("/api/v1/sources/{id}/versions");
+    let replace = format!("/api/v1/sources/{id}/replace");
+    assert_eq!(request(&app,"POST",&replace,mime,form("/","third",false)).await?.0,StatusCode::OK);
+    for (suffix, bytes) in [("?version=1","first"),("?version=2","next"),("?version=3","third"),("","third")] {
+        let (status, body) = request(&app,"GET",&format!("{original}{suffix}"),"",String::new()).await?;
+        assert_eq!((status,body.as_str()),(StatusCode::OK,bytes));
+    }
+    let (_,body) = request(&app,"GET",&versions,"",String::new()).await?;
+    let history: Vec<Value> = serde_json::from_str(&body)?;
+    assert_eq!(history.iter().map(|v| v["version"].as_u64().unwrap()).collect::<Vec<_>>(),vec![3,2,1]);
+    assert_eq!(request(&app,"GET",&format!("{original}?version=4"),"",String::new()).await?.0,StatusCode::NOT_FOUND);
+    let (a,b) = tokio::try_join!(upload("/other","same",true), upload("/other","same",true))?;
+    let a: Value = serde_json::from_str(&a.1)?;
+    let b: Value = serde_json::from_str(&b.1)?;
+    assert_eq!(a["id"],b["id"]);
+    assert_ne!(a["id"],id);
+    assert_eq!(db.list_sources(&tenant,"/",10).await?.len(),2);
+    assert_eq!(db.queue_overview(&tenant).await?["by_state"]["queued"],4);
+
+    for reader in [ScopedReader(tenant.clone(),false),ScopedReader(Tenant::new("different-tenant"),true)] {
+        state.auth.external = Some(Arc::new(reader));
+        let denied = core_router(DEFAULT_UPLOAD_LIMIT_BYTES).with_state(state.clone());
+        for path in [&versions, &format!("{original}?version=1")] {
+            assert_eq!(request(&denied,"GET",path,"",String::new()).await?.0,StatusCode::NOT_FOUND);
+        }
+    }
+    Ok(())
+}
+
 fn upload_body(identifier: &str, name: &str, content: &str) -> String {
     // Metadata deliberately follows the file part.
     format!("--test\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{identifier}\"\r\n\r\n{content}\r\n\

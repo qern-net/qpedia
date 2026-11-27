@@ -19,6 +19,7 @@ pub mod oidc_pending;
 pub mod sessions;
 pub mod slug;
 pub mod sources;
+pub mod versions;
 pub mod telemetry;
 pub mod tenants;
 pub mod wiki;

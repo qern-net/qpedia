@@ -111,11 +111,7 @@ pub async fn expand(
         .update_status(tenant, source_id, SourceStatus::Extracting)
         .await?;
 
-    let zip_ext = std::path::Path::new(&src.filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("zip");
-    let bytes = ctx.blob.get(tenant,source_id, BlobKind::Original, zip_ext).await?;
+    let bytes = ctx.blob.original(tenant, source_id, &src.filename, &src.sha256).await?;
 
     // Locked folder named after the archive (slugified → e.g. "foo.zip" →
     // "foo-zip"), placed beside the archive in the tree.

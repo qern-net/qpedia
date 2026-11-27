@@ -452,6 +452,7 @@ fn core_router(upload_limit: usize) -> Router<AppState> {
             "/api/v1/sources/:id",
             get(routes::get_source).delete(routes::delete_source),
         )
+        .route("/api/v1/sources/:id/versions", get(routes::list_source_versions))
         .route(
             "/api/v1/sources/:id/original",
             get(routes::download_source_original),

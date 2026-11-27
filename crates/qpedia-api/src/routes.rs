@@ -405,46 +405,43 @@ pub(crate) async fn get_source(
     }
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct OriginalQuery {
+    version: Option<u64>,
+}
+
+async fn readable_versions(s: &AppState, user: &User, id: &SourceId)
+    -> Result<Vec<qpedia_pg_store::versions::SourceVersion>, ApiError>
+{
+    let (source, versions) = s.ctx.db.source_versions(&user.tenant, id).await
+        .map_err(ApiError::Internal)?.ok_or(ApiError::NotFound)?;
+    if !user.can_read(&source.acl) { return Err(ApiError::NotFound); }
+    Ok(versions)
+}
+
+pub(crate) async fn list_source_versions(
+    State(s): State<AppState>, user: User, Path(id): Path<String>,
+) -> Result<Json<Vec<qpedia_pg_store::versions::SourceVersion>>, ApiError> {
+    let mut versions = readable_versions(&s, &user, &SourceId::from(id)).await?;
+    versions.reverse();
+    Ok(Json(versions))
+}
+
 pub(crate) async fn download_source_original(
-    State(s): State<AppState>,
-    user: User,
-    Path(id): Path<String>,
-) -> Result<axum::response::Response, ApiError> {
+    State(s): State<AppState>, user: User, Path(id): Path<String>, Query(query): Query<OriginalQuery>,
+) -> Result<Response, ApiError> {
     use axum::http::header;
-    use axum::response::IntoResponse as _;
     let sid = SourceId::from(id);
-    let src = match s
-        .ctx
-        .db
-        .get_source_in(&user.tenant, &sid)
-        .await
-        .map_err(ApiError::Internal)?
-    {
-        Some(src) if user.can_read(&src.acl) => src,
-        Some(_) | None => return Err(ApiError::NotFound),
-    };
-    let ext = std::path::Path::new(&src.filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-    let bytes = s
-        .ctx
-        .blob
-        .get(&user.tenant,&sid, BlobKind::Original, ext)
-        .await
-        .map_err(|_| ApiError::NotFound)?;
-    let disposition = format!(
-        "attachment; filename=\"{}\"",
-        src.filename.replace('"', "_")
-    );
-    Ok((
-        [
-            (header::CONTENT_TYPE, src.mime.clone()),
-            (header::CONTENT_DISPOSITION, disposition),
-        ],
-        bytes,
-    )
-        .into_response())
+    let versions = readable_versions(&s, &user, &sid).await?;
+    let file = match query.version {
+        Some(n) => versions.iter().find(|v| v.version == n),
+        None => versions.last(),
+    }.ok_or(ApiError::NotFound)?;
+    let bytes = s.ctx.blob.original(&user.tenant, &sid, &file.filename, &file.sha256).await?;
+    let encoded: String = url::form_urlencoded::byte_serialize(file.filename.as_bytes()).collect();
+    let disposition = format!("attachment; filename*=UTF-8''{}", encoded.replace('+', "%20"));
+    Ok(([(header::CONTENT_TYPE, file.mime.clone()), (header::CONTENT_DISPOSITION, disposition)],
+        bytes).into_response())
 }
 
 /// Enqueue a Remove job. Cleanup (wiki commit, pgvector, blobs, row delete)
@@ -552,68 +549,46 @@ pub(crate) async fn replace_source(
         filename = existing.filename.clone();
     }
 
-    // Identical bytes — nothing to do. Return the existing row so the
-    // client UI just re-renders the unchanged source.
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let sha256 = hex::encode(hasher.finalize());
-    if sha256 == existing.sha256 {
-        info!(id = %sid, "replace: identical bytes — no-op");
-        return Ok(Json(existing));
-    }
+    let mut proposed = existing;
+    proposed.mime = mime_guess::from_path(&filename).first_or_octet_stream().to_string();
+    proposed.filename = filename;
+    proposed.size_bytes = bytes.len() as u64;
+    proposed.sha256 = hex::encode(Sha256::digest(&bytes));
+    store_version(&s, &user, proposed, bytes, Some(&sid)).await.map(|(source, _)| Json(source))
+}
 
-    let mime = mime_guess::from_path(&filename)
-        .first_or_octet_stream()
-        .to_string();
-    let size = bytes.len() as u64;
-
-    // Persist new blob first; on failure the DB row still points at the
-    // old SHA256 + filename and the source remains in its prior status.
-    let ext = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-    s.ctx.blob.put(&user.tenant,&sid, BlobKind::Original, ext, bytes).await?;
-
-    s.ctx
-        .db
-        .replace_source_blob(&user.tenant, &sid, &filename, &mime, &sha256, size)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let job = qpedia_ingest::ingest_job(&user.tenant, &sid).map_err(ApiError::Internal)?;
-    s.ctx
-        .db
-        .enqueue(&user.tenant, &job)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    s.ctx
-        .db
-        .write_audit(
-            &user.tenant,
-            &user.id,
-            "source.replaced",
-            Some(sid.as_str()),
-            Some(&json!({
-                "old_sha256": existing.sha256,
-                "new_sha256": sha256,
-                "filename":   filename,
-            })),
-        )
-        .await
-        .map_err(ApiError::Internal)?;
-
-    // Return the refreshed row so the client can re-render immediately.
-    let updated = s
-        .ctx
-        .db
-        .get_source_in(&user.tenant, &sid)
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or(ApiError::NotFound)?;
-    info!(id = %sid, mime = %mime, "source replaced; ingest re-enqueued");
-    Ok(Json(updated))
+/// Used by the Cloud uploader and explicit Replace. The DB lock covers the duplicate
+/// check and blob publication. Only committed metadata can make an original downloadable.
+async fn store_version(
+    s: &AppState, user: &User, proposed: Source, bytes: bytes::Bytes, by_id: Option<&SourceId>,
+) -> Result<(Source, bool), ApiError> {
+    let stage = s.ctx.db.begin_source_upload(&proposed, by_id).await
+        .map_err(ApiError::Internal)?.ok_or(ApiError::NotFound)?;
+    let mut source = stage.source.clone();
+    if !user.can_read(&source.acl) { return Err(ApiError::NotFound); }
+    if !stage.created && source.sha256 == proposed.sha256 { return Ok((source, true)); }
+    let prior_hash = if stage.created { None } else {
+        // Freeze legacy original.ext bytes before changing their database metadata.
+        s.ctx.blob.preserve_original(&user.tenant, &source.id, &source.filename, &source.sha256).await?;
+        Some(source.sha256.clone())
+    };
+    s.ctx.blob.put(&user.tenant, &source.id, BlobKind::Version, &proposed.sha256, bytes).await?;
+    source.sha256 = proposed.sha256;
+    source.size_bytes = proposed.size_bytes;
+    source.filename = proposed.filename;
+    source.mime = proposed.mime;
+    source.status = SourceStatus::Pending;
+    source.classification = None;
+    source.language = None;
+    source.ingested_at = None;
+    let mut job = qpedia_ingest::ingest_job(&source.tenant, &source.id).map_err(ApiError::Internal)?;
+    job.payload["upload_sha256"] = json!(source.sha256);
+    stage.commit(&source, &job).await.map_err(ApiError::Internal)?;
+    let action = if prior_hash.is_some() { "source.replaced" } else { "source.upload" };
+    s.ctx.db.write_audit(&user.tenant, &user.id, action, Some(source.id.as_str()),
+        Some(&json!({"old_sha256":prior_hash,"new_sha256":source.sha256,"filename":source.filename})))
+        .await.map_err(ApiError::Internal)?;
+    Ok((source, false))
 }
 
 // ============================================================================
@@ -1029,6 +1004,7 @@ pub(crate) async fn upload_source(
     let mut filing_name = None;
     let mut filing_revision = None;
     let host_filing = scope_has_filings(&s);
+    let mut version_on_conflict = false;
     let mut filename = String::new();
     let mut bytes: Option<bytes::Bytes> = None;
 
@@ -1039,6 +1015,9 @@ pub(crate) async fn upload_source(
             "filing_revision" if host_filing => {
                 let value = field.text().await.map_err(|e| ApiError::Bad(e.to_string()))?;
                 filing_revision = Some(value.parse::<i32>().map_err(|_| ApiError::Bad("invalid filing revision".into()))?);
+            }
+            "on_conflict" if !host_filing => {
+                version_on_conflict = field.text().await.map_err(|e| ApiError::Bad(e.to_string()))? == "version";
             }
             "folder_path" => {
                 folder_path = field
@@ -1095,6 +1074,8 @@ pub(crate) async fn upload_source(
                 _ => canonical.to_string(),
             }
         }
+    } else if version_on_conflict {
+        qpedia_pg_store::slugify(&filename)
     } else {
         qpedia_pg_store::unique_source_slug(&s.ctx.db, &user.tenant, &filename).await.map_err(ApiError::Internal)?
     };
@@ -1125,6 +1106,12 @@ pub(crate) async fn upload_source(
         ingested_at: None,
         classification: None,
     };
+    if version_on_conflict {
+        let (source, unchanged) = store_version(&s, &user, src, bytes, None).await?;
+        let mut receipt = json!(source);
+        receipt["unchanged"] = json!(unchanged);
+        return Ok(Json(receipt));
+    }
     let job = qpedia_ingest::ingest_job(&user.tenant, &id).map_err(ApiError::Internal)?;
     let Some(staged) = s.ctx.db.stage_upload(&src, filing, &job).await.map_err(ApiError::Internal)? else {
         let existing = s.ctx.db.get_source_in(&user.tenant, &id).await.map_err(ApiError::Internal)?;
