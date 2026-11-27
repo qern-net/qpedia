@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-api"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3477,7 +3477,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-bench"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3495,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-cli"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-connectors"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-core"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3541,7 +3541,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-embed"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3554,7 +3554,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-extract"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3577,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-ingest"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3612,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-lint"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3631,7 +3631,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-llm"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3651,7 +3651,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-pg-store"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-retriever"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-runtime"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "qpedia-store"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
