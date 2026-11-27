@@ -127,7 +127,7 @@ pub async fn http_trace(req: Request, next: Next) -> Response {
     );
     // Continue the inbound trace (or start a fresh root when the extracted
     // context is empty) by adopting it as the span's parent.
-    span.set_parent(parent_cx);
+    let _ = span.set_parent(parent_cx);
 
     // Run the inner service with the span active so log records emitted during
     // handling are correlated with the active trace/span ids (Req 4.5). The

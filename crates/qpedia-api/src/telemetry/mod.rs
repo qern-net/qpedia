@@ -251,9 +251,9 @@ pub struct TelemetryGuard {
 /// The SDK providers backing the three signals. Private; only the guard
 /// touches them.
 struct OtelProviders {
-    tracer_provider: opentelemetry_sdk::trace::TracerProvider,
+    tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
     meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
-    logger_provider: opentelemetry_sdk::logs::LoggerProvider,
+    logger_provider: opentelemetry_sdk::logs::SdkLoggerProvider,
 }
 
 impl TelemetryGuard {
@@ -270,19 +270,9 @@ impl TelemetryGuard {
         let providers = self.providers;
 
         let handle = tokio::task::spawn_blocking(move || {
-            // `force_flush` returns per-processor results; treat any error as
-            // "this signal did not flush". `all` on an empty vec is `true`.
-            let traces_ok = providers
-                .tracer_provider
-                .force_flush()
-                .iter()
-                .all(|r| r.is_ok());
+            let traces_ok = providers.tracer_provider.force_flush().is_ok();
             let metrics_ok = providers.meter_provider.force_flush().is_ok();
-            let logs_ok = providers
-                .logger_provider
-                .force_flush()
-                .iter()
-                .all(|r| r.is_ok());
+            let logs_ok = providers.logger_provider.force_flush().is_ok();
 
             // Best-effort orderly shutdown to release exporter resources.
             let _ = providers.tracer_provider.shutdown();
@@ -337,11 +327,13 @@ fn build_resource(cfg: &TelemetryConfig) -> opentelemetry_sdk::Resource {
     // crate's experimental feature, so the stable key string is used here.
     const DEPLOYMENT_ENVIRONMENT: &str = "deployment.environment";
 
-    opentelemetry_sdk::Resource::new(vec![
-        KeyValue::new(SC_SERVICE_NAME, cfg.service_name.clone()),
-        KeyValue::new(SERVICE_VERSION, cfg.service_version.clone()),
-        KeyValue::new(DEPLOYMENT_ENVIRONMENT, cfg.deployment_environment.clone()),
-    ])
+    opentelemetry_sdk::Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new(SC_SERVICE_NAME, cfg.service_name.clone()),
+            KeyValue::new(SERVICE_VERSION, cfg.service_version.clone()),
+            KeyValue::new(DEPLOYMENT_ENVIRONMENT, cfg.deployment_environment.clone()),
+        ])
+        .build()
 }
 
 /// Batch config for spans: drop-oldest queue cap at `max_buffered_batches`
@@ -366,10 +358,9 @@ fn log_batch_config(cfg: &TelemetryConfig) -> opentelemetry_sdk::logs::BatchConf
 /// Build the three SDK providers wired to OTLP exporters over the selected
 /// transport. Returns an error string on exporter build failure so the
 /// caller can fall back to console-only (Req 2.6). Must be called from
-/// within a Tokio runtime (the batch processors and periodic reader spawn
-/// background tasks).
+/// within a Tokio runtime for the gRPC transport.
 fn build_otel_providers(cfg: &TelemetryConfig) -> Result<OtelProviders, String> {
-    use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
+    use opentelemetry_otlp::{Protocol, WithExportConfig};
 
     let endpoint = cfg
         .endpoint
@@ -392,7 +383,6 @@ fn build_otel_providers(cfg: &TelemetryConfig) -> Result<OtelProviders, String> 
             .with_endpoint(endpoint_str.clone())
             .with_protocol(Protocol::HttpBinary)
             .with_timeout(cfg.export_timeout)
-            .with_http_client(reqwest::Client::new())
             .build()
             .map_err(|e| format!("span exporter (http): {e}"))?,
     };
@@ -410,7 +400,6 @@ fn build_otel_providers(cfg: &TelemetryConfig) -> Result<OtelProviders, String> 
             .with_endpoint(endpoint_str.clone())
             .with_protocol(Protocol::HttpBinary)
             .with_timeout(cfg.export_timeout)
-            .with_http_client(reqwest::Client::new())
             .build()
             .map_err(|e| format!("metric exporter (http): {e}"))?,
     };
@@ -428,41 +417,31 @@ fn build_otel_providers(cfg: &TelemetryConfig) -> Result<OtelProviders, String> 
             .with_endpoint(endpoint_str)
             .with_protocol(Protocol::HttpBinary)
             .with_timeout(cfg.export_timeout)
-            .with_http_client(reqwest::Client::new())
             .build()
             .map_err(|e| format!("log exporter (http): {e}"))?,
     };
 
     // ---- providers (batched span/log processors + periodic metric reader) ----
-    let span_processor = opentelemetry_sdk::trace::BatchSpanProcessor::builder(
-        span_exporter,
-        opentelemetry_sdk::runtime::Tokio,
-    )
-    .with_batch_config(trace_batch_config(cfg))
-    .build();
-    let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
+    let span_processor = opentelemetry_sdk::trace::BatchSpanProcessor::builder(span_exporter)
+        .with_batch_config(trace_batch_config(cfg))
+        .build();
+    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_span_processor(span_processor)
         .with_resource(resource.clone())
         .build();
 
-    let metric_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
-        metric_exporter,
-        opentelemetry_sdk::runtime::Tokio,
-    )
-    .with_interval(MAX_EXPORT_DELAY)
-    .build();
+    let metric_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metric_exporter)
+        .with_interval(MAX_EXPORT_DELAY)
+        .build();
     let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(metric_reader)
         .with_resource(resource.clone())
         .build();
 
-    let log_processor = opentelemetry_sdk::logs::BatchLogProcessor::builder(
-        log_exporter,
-        opentelemetry_sdk::runtime::Tokio,
-    )
-    .with_batch_config(log_batch_config(cfg))
-    .build();
-    let logger_provider = opentelemetry_sdk::logs::LoggerProvider::builder()
+    let log_processor = opentelemetry_sdk::logs::BatchLogProcessor::builder(log_exporter)
+        .with_batch_config(log_batch_config(cfg))
+        .build();
+    let logger_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
         .with_log_processor(log_processor)
         .with_resource(resource)
         .build();

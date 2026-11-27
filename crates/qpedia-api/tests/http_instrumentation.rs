@@ -24,17 +24,15 @@ use axum::routing::get;
 use axum::Router;
 use opentelemetry::trace::{Status, TracerProvider as _};
 use opentelemetry::Value;
-use opentelemetry_sdk::export::trace::SpanData;
-use opentelemetry_sdk::testing::trace::{InMemorySpanExporter, InMemorySpanExporterBuilder};
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use tower::ServiceExt;
 use tracing_subscriber::prelude::*;
 
 use qpedia_api::telemetry::http_layer::http_trace;
 
 fn test_subscriber() -> (impl tracing::Subscriber + Send + Sync, InMemorySpanExporter) {
-    let exporter = InMemorySpanExporterBuilder::new().build();
-    let provider = TracerProvider::builder()
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = provider.tracer("qpedia-api-test");

@@ -17,17 +17,16 @@
 //! own wiring (verified by `cargo check`).
 
 use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
-use opentelemetry_sdk::testing::trace::{InMemorySpanExporter, InMemorySpanExporterBuilder};
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::prelude::*;
 
 use qpedia_core::{tenant::Tenant, SourceId};
 use qpedia_ingest::{extractor, ingest_job, sync_job, IngestPayload, SyncPayload};
 
-fn test_subscriber() -> (impl tracing::Subscriber + Send + Sync, InMemorySpanExporter, TracerProvider) {
-    let exporter = InMemorySpanExporterBuilder::new().build();
-    let provider = TracerProvider::builder()
+fn test_subscriber() -> (impl tracing::Subscriber + Send + Sync, InMemorySpanExporter, SdkTracerProvider) {
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = provider.tracer("qpedia-ingest-test");
@@ -90,7 +89,7 @@ async fn job_links_to_enqueuing_trace() {
     );
 
     let job_span = tracing::info_span!("Job_Span");
-    job_span.set_parent(parent_cx);
+    job_span.set_parent(parent_cx).expect("attach job trace parent");
     let job_trace_id = job_span.context().span().span_context().trace_id();
     assert_eq!(
         job_trace_id, enqueue_trace_id,

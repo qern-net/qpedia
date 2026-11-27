@@ -21,9 +21,7 @@
 
 use opentelemetry::trace::{FutureExt, Status, TracerProvider as _};
 use opentelemetry::Value;
-use opentelemetry_sdk::export::trace::SpanData;
-use opentelemetry_sdk::testing::trace::{InMemorySpanExporter, InMemorySpanExporterBuilder};
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use tracing::Instrument;
 use tracing_subscriber::prelude::*;
 
@@ -33,8 +31,8 @@ use qpedia_pg_store::{with_db_span, DbSystem};
 /// Build an in-memory-backed `tracing` subscriber and return it with the
 /// exporter so the test can read finished spans after the work completes.
 fn test_subscriber() -> (impl tracing::Subscriber + Send + Sync, InMemorySpanExporter) {
-    let exporter = InMemorySpanExporterBuilder::new().build();
-    let provider = TracerProvider::builder()
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = provider.tracer("qpedia-pg-store-test");

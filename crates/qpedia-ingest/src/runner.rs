@@ -426,7 +426,7 @@ impl JobRunner {
             use tracing_opentelemetry::OpenTelemetrySpanExt;
             let parent_cx = crate::telemetry::extractor(carrier);
             if parent_cx.span().span_context().is_valid() {
-                span.set_parent(parent_cx);
+                let _ = span.set_parent(parent_cx);
             }
         }
 
