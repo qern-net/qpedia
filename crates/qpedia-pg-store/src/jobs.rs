@@ -8,10 +8,10 @@ use chrono::Utc;
 use qpedia_core::{
     job::{Job, JobKind, JobState},
     tenant::Tenant,
-    JobId,
+    JobId, SourceId,
 };
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{postgres::PgRow, Executor, Postgres, Row};
 
 impl PgStore {
     pub async fn enqueue(&self, tenant: &Tenant, job: &Job) -> Result<()> {
@@ -224,27 +224,64 @@ impl PgStore {
         retry_in_ms: Option<i64>,
         attempt: Option<i32>,
     ) -> Result<Option<bool>> {
-        let now = Utc::now();
-        let next = retry_in_ms.map(|ms| now + chrono::Duration::milliseconds(ms));
-        let state: Option<String> = sqlx::query_scalar(
-            "UPDATE jobs SET
-                 state = CASE WHEN $2::timestamptz IS NULL OR attempt >= max_attempts
-                              THEN 'dead' ELSE 'queued' END,
-                 last_error = $1, next_run_at = coalesce($2, next_run_at),
-                 locked_by = NULL, locked_until = NULL, updated_at = $3
-             WHERE id::text = $4 AND ($5::integer IS NULL OR
-                 (attempt = $5 AND state = 'running' AND locked_until > clock_timestamp()))
-             RETURNING state",
-        )
-        .bind(err)
-        .bind(next)
-        .bind(now)
-        .bind(id.as_str())
-        .bind(attempt)
-        .fetch_optional(self.pool())
-        .await
-        .context("fail job")?;
-        Ok(state.map(|s| s == "dead"))
+        let row = record_job_failure(self.pool(), id, err, retry_in_ms, attempt).await?;
+        Ok(row.map(|row| row.get::<String, _>("state") == "dead"))
+    }
+
+    /// Record a failure and, if the job dies, mark its current source failed
+    /// before another worker can claim the next ingest. Returns whether the
+    /// source was marked failed, or `None` if the job claim has been lost.
+    pub async fn fail_ingest_job_claim(
+        &self,
+        tenant: &Tenant,
+        source_id: &SourceId,
+        id: &JobId,
+        attempt: u32,
+        err: &str,
+        retry_in_ms: Option<i64>,
+    ) -> Result<Option<bool>> {
+        let mut tx = self.begin_for(tenant).await?;
+        // Use the same lock order as the upload handoff and read the queue
+        // after any replacement that acquired the source lock has committed.
+        sqlx::query("SELECT 1 FROM sources WHERE slug=$1 FOR UPDATE")
+            .bind(source_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(job) =
+            record_job_failure(&mut *tx, id, err, retry_in_ms, Some(attempt as i32)).await?
+        else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            job.get::<String, _>("kind") == "ingest"
+                && job.get::<Option<String>, _>("source_id").as_deref() == Some(source_id.as_str()),
+            "ingest failure does not match the claimed source"
+        );
+
+        let mut marked_failed = false;
+        if job.get::<String, _>("state") == "dead" {
+            marked_failed = sqlx::query(
+                "UPDATE sources AS source SET status='failed'
+                 WHERE source.slug=$1 AND ($2::text IS NULL OR source.sha256=$2)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM jobs newer
+                       WHERE newer.tenant_id=source.tenant_id AND newer.id>$3
+                         AND newer.kind='ingest' AND newer.state IN ('queued','running')
+                         AND newer.payload->>'source_id'=source.slug
+                         AND newer.payload->>'upload_sha256' IS NOT NULL
+                   )",
+            )
+            .bind(source_id.as_str())
+            .bind(job.get::<Option<String>, _>("upload_sha256"))
+            .bind(job.get::<i64, _>("id"))
+            .execute(&mut *tx)
+            .await
+            .context("mark exhausted ingest source failed")?
+            .rows_affected()
+                != 0;
+        }
+        tx.commit().await?;
+        Ok(Some(marked_failed))
     }
 
     /// Count currently-pending (`queued`) jobs grouped by kind, across all
@@ -334,6 +371,36 @@ impl PgStore {
         tx.commit().await.ok();
         Ok(json!({ "by_state": states, "active": active, "dead": dead }))
     }
+}
+
+async fn record_job_failure<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    id: &JobId,
+    err: &str,
+    retry_in_ms: Option<i64>,
+    attempt: Option<i32>,
+) -> Result<Option<PgRow>> {
+    let now = Utc::now();
+    let next = retry_in_ms.map(|ms| now + chrono::Duration::milliseconds(ms));
+    sqlx::query(
+        "UPDATE jobs SET
+             state = CASE WHEN $2::timestamptz IS NULL OR attempt >= max_attempts
+                          THEN 'dead' ELSE 'queued' END,
+             last_error = $1, next_run_at = coalesce($2, next_run_at),
+             locked_by = NULL, locked_until = NULL, updated_at = $3
+         WHERE id::text = $4 AND ($5::integer IS NULL OR
+             (attempt = $5 AND state = 'running' AND locked_until > clock_timestamp()))
+         RETURNING id, kind, state, payload->>'source_id' AS source_id,
+                   payload->>'upload_sha256' AS upload_sha256",
+    )
+    .bind(err)
+    .bind(next)
+    .bind(now)
+    .bind(id.as_str())
+    .bind(attempt)
+    .fetch_optional(executor)
+    .await
+    .context("fail job")
 }
 
 fn kind_str(k: &JobKind) -> String {

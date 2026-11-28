@@ -1,7 +1,7 @@
 use crate::{sources::row_to_source, PgStore};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use qpedia_core::{job::Job, source::Source, tenant::Tenant, SourceId};
+use qpedia_core::{job::Job, source::Source, tenant::Tenant, JobId, SourceId};
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
 
@@ -24,6 +24,7 @@ pub struct SourceUpload<'a> {
     tx: Transaction<'a, Postgres>,
     pub source: Source,
     pub created: bool,
+    replacement_ready: bool,
 }
 
 impl PgStore {
@@ -69,6 +70,7 @@ impl PgStore {
                 tx,
                 source: row_to_source(row)?,
                 created: false,
+                replacement_ready: false,
             }));
         }
         if by_id.is_some() {
@@ -88,29 +90,63 @@ impl PgStore {
                     tx,
                     source,
                     created: true,
+                    replacement_ready: false,
                 }));
             }
         }
         bail!("no available source slug")
     }
 
-    /// An older running job may have advanced the pipeline after the upload.
-    /// Reset it once, when the matching revision reaches the front of the queue.
-    pub async fn start_version_ingest(
+    /// Synchronize with a source upload before the handler reads or writes anything.
+    /// Uploads that get the row first publish their job before this check runs;
+    /// uploads that get it later see the running claim and cannot replace the head.
+    pub async fn start_claimed_source_ingest(
         &self,
         tenant: &Tenant,
         id: &SourceId,
-        sha: &str,
+        job_id: &JobId,
+        attempt: u32,
+        expected_sha: Option<&str>,
     ) -> Result<bool> {
         let mut tx = self.begin_for(tenant).await?;
-        let restart = sqlx::query_scalar::<_, bool>(
-            "SELECT restart_version_ingest FROM sources WHERE slug=$1 AND sha256=$2 FOR UPDATE",
+        let source = sqlx::query_as::<_, (String, bool)>(
+            "SELECT sha256, restart_version_ingest FROM sources WHERE slug=$1 FOR UPDATE",
         )
         .bind(id.as_str())
-        .bind(sha)
         .fetch_optional(&mut *tx)
         .await?;
-        if restart == Some(true) {
+        let Some((sha, restart)) = source else {
+            return Ok(false);
+        };
+        if expected_sha.is_some_and(|expected| expected != sha) {
+            return Ok(false);
+        }
+        // Read the queue in a new statement, after any uploader holding the source row
+        // has committed. This also fences legacy jobs without a hash in their payload.
+        let current: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM jobs claim
+                WHERE claim.id=$1 AND claim.attempt=$2 AND claim.kind='ingest'
+                  AND claim.state='running' AND claim.locked_until > clock_timestamp()
+                  AND claim.payload->>'source_id'=$3
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs newer
+                      WHERE newer.tenant_id=claim.tenant_id AND newer.id>claim.id
+                        AND newer.kind='ingest' AND newer.state IN ('queued','running')
+                        AND newer.payload->>'source_id'=$3
+                        AND newer.payload->>'upload_sha256' IS NOT NULL
+                  )
+            )",
+        )
+        .bind(job_id.as_str().parse::<i64>().context("invalid claimed job id")?)
+        .bind(attempt as i32)
+        .bind(id.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if !current {
+            return Ok(false);
+        }
+        if restart {
             sqlx::query(
                 "UPDATE sources SET restart_version_ingest=false,status='pending',
                 classification=NULL,language=NULL,ingested_at=NULL WHERE slug=$1",
@@ -120,7 +156,7 @@ impl PgStore {
             .await?;
         }
         tx.commit().await?;
-        Ok(restart.is_some())
+        Ok(true)
     }
 
     pub async fn source_versions(
@@ -144,7 +180,30 @@ impl PgStore {
 }
 
 impl SourceUpload<'_> {
+    /// Check before writing blobs, while still holding the source row lock.
+    /// Treat expired but unreclaimed jobs as busy too: a lease can expire
+    /// before its worker has stopped. A worker starting after this check must
+    /// wait for the source lock and then validate its claim against the new head.
+    pub async fn replacement_ready(&mut self) -> Result<bool> {
+        if self.created || self.replacement_ready {
+            return Ok(true);
+        }
+        let busy: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM jobs WHERE tenant_id=$1 AND kind='ingest' AND state='running'
+                  AND payload->>'source_id'=$2
+            )",
+        )
+        .bind(self.source.tenant.as_str())
+        .bind(self.source.id.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        self.replacement_ready = !busy;
+        Ok(self.replacement_ready)
+    }
+
     pub async fn commit(mut self, updated: &Source, job: &Job) -> Result<()> {
+        anyhow::ensure!(self.replacement_ready().await?, "source ingestion is in progress");
         if !self.created {
             let query = format!("UPDATE sources SET prior_versions=prior_versions || jsonb_build_array({HEAD}),
                 restart_version_ingest=true,version_uploaded_at=now(),filename=$2,mime=$3,sha256=$4,size_bytes=$5,status='pending',
