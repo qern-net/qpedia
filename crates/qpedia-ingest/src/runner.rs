@@ -7,7 +7,6 @@ use anyhow::Result;
 use chrono::Utc;
 use qpedia_core::{
     job::{Job, JobKind, JobState},
-    source::SourceStatus,
     tenant::Tenant,
     JobId, SourceId,
 };
@@ -308,15 +307,17 @@ impl JobRunner {
                     if let Err(e) = result {
                         let msg = format!("{e:#}");
                         error!(job = %id, error = %msg, "job failed");
-                        match self.ctx.db.fail_job_claim(&id, attempt, &msg, Some(5_000)).await {
+                        let failure = if let Some(p) = &ingest_target {
+                            self.ctx.db.fail_ingest_job_claim(
+                                &p.tenant, &p.source_id, &id, attempt, &msg, Some(5_000),
+                            ).await
+                        } else {
+                            self.ctx.db.fail_job_claim(&id, attempt, &msg, Some(5_000)).await
+                        };
+                        match failure {
                             Ok(Some(true)) => {
                                 if let Some(p) = ingest_target {
-                                    warn!(job = %id, source = %p.source_id, "ingest job exhausted retries — marking source failed");
-                                    let _ = self
-                                        .ctx
-                                        .db
-                                        .update_status(&p.tenant, &p.source_id, SourceStatus::Failed)
-                                        .await;
+                                    warn!(job = %id, source = %p.source_id, "ingest job exhausted retries and marked source failed");
                                     let _ = self
                                         .ctx
                                         .db
@@ -333,7 +334,7 @@ impl JobRunner {
                                         .await;
                                 }
                             }
-                            Ok(Some(false)) => {} // re-queued for another attempt
+                            Ok(Some(false)) => {}
                             Ok(None) => warn!(job = %id, "job claim expired before failure was recorded"),
                             Err(fe) => warn!(job = %id, error = %format!("{fe:#}"), "fail_job errored"),
                         }
@@ -439,7 +440,7 @@ impl JobRunner {
         // for the duration of the work it drives (see the pg-store
         // `context_with_tenant` contract). When the tenant is unknown the
         // dispatch runs under the span alone and datastore spans omit `tenant`.
-        let dispatch = self.dispatch(kind, payload).instrument(span.clone());
+        let dispatch = self.dispatch(&job_id, job.attempt, kind, payload).instrument(span.clone());
         let result = if let Some(t) = meta.tenant.as_ref() {
             use opentelemetry::trace::FutureExt;
             let cx = qpedia_pg_store::telemetry::context_with_tenant(t.as_str());
@@ -482,15 +483,21 @@ impl JobRunner {
 
     /// Deserialize the typed payload for `kind` and run its handler. The match
     /// must cover every `JobKind` variant (the compiler enforces this).
-    async fn dispatch(&self, kind: JobKind, payload: serde_json::Value) -> Result<()> {
+    async fn dispatch(
+        &self,
+        job_id: &JobId,
+        attempt: u32,
+        kind: JobKind,
+        payload: serde_json::Value,
+    ) -> Result<()> {
         match kind {
             JobKind::Ingest => {
                 let sha = payload.get("upload_sha256").and_then(|v| v.as_str()).map(str::to_owned);
                 let p: IngestPayload = serde_json::from_value(payload)?;
-                if let Some(sha) = sha {
-                    if !self.ctx.db.start_version_ingest(&p.tenant, &p.source_id, &sha).await? {
-                        return Ok(());
-                    }
+                if !self.ctx.db.start_claimed_source_ingest(
+                    &p.tenant, &p.source_id, job_id, attempt, sha.as_deref(),
+                ).await? {
+                    return Ok(());
                 }
                 handlers::ingest::run(&self.ctx, &p.tenant, &p.source_id).await
             }

@@ -562,11 +562,14 @@ pub(crate) async fn replace_source(
 async fn store_version(
     s: &AppState, user: &User, proposed: Source, bytes: bytes::Bytes, by_id: Option<&SourceId>,
 ) -> Result<(Source, bool), ApiError> {
-    let stage = s.ctx.db.begin_source_upload(&proposed, by_id).await
+    let mut stage = s.ctx.db.begin_source_upload(&proposed, by_id).await
         .map_err(ApiError::Internal)?.ok_or(ApiError::NotFound)?;
     let mut source = stage.source.clone();
     if !user.can_read(&source.acl) { return Err(ApiError::NotFound); }
     if !stage.created && source.sha256 == proposed.sha256 { return Ok((source, true)); }
+    if !stage.replacement_ready().await.map_err(ApiError::Internal)? {
+        return Err(ApiError::SourceIngesting);
+    }
     let prior_hash = if stage.created { None } else {
         // Freeze legacy original.ext bytes before changing their database metadata.
         s.ctx.blob.preserve_original(&user.tenant, &source.id, &source.filename, &source.sha256).await?;
@@ -2373,6 +2376,7 @@ pub(crate) async fn resume_stalled_sources(
 pub enum ApiError {
     NotFound,
     Conflict,
+    SourceIngesting,
     Bad(String),
     Forbidden,
     /// 429 with `Retry-After` header. The carried `u64` is seconds.
@@ -2417,6 +2421,10 @@ impl IntoResponse for ApiError {
         let (status, msg) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::Conflict => (StatusCode::CONFLICT, "source filing revision or identity conflict".into()),
+            ApiError::SourceIngesting => (
+                StatusCode::CONFLICT,
+                "Source is being ingested. Retry the replacement after it finishes.".into(),
+            ),
             ApiError::Bad(s) => (StatusCode::BAD_REQUEST, s),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
             ApiError::Internal(e) => {

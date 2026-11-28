@@ -6,6 +6,8 @@ Changelog](https://keepachangelog.com/en/1.1.0/), versioning:
 
 ## [Unreleased]
 
+- Reject a replacement with HTTP 409 while its source is being ingested. Retry after the active ingest finishes. An older queued ingest cannot process a newer upload, and a terminal job failure records the source's failed status before the next job can run.
+
 ## [1.4.0] — 2026-11-27
 
 - Added downloadable source versions. Uploads with multipart `on_conflict=version` reuse the oldest matching filename in the same folder and access scope. Identical bytes skip ingestion. Explicit replacement also retains earlier originals. List them with `GET /api/v1/sources/{id}/versions` and download one with `GET /api/v1/sources/{id}/original?version=N`.
